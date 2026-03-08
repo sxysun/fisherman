@@ -1,0 +1,16 @@
+[project]
+name = "fisherman-server"
+version = "0.1.0"
+description = "Fisherman enclave server: ingest, encrypt, store"
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=13.0",
+    "asyncpg>=0.30",
+    "boto3>=1.35",
+    "cryptography>=43.0",
+    "click>=8.0",
+    "structlog>=24.0",
+]
+
+[project.scripts]
+pg-backup = "pg_backup:cli"
