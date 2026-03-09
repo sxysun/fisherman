@@ -9,7 +9,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
 
     // Fields
     private var serverURLField: NSTextField!
-    private var authTokenField: NSSecureTextField!
+    private var authTokenField: NSTextField!
     private var captureIntervalField: NSTextField!
     private var jpegQualityField: NSTextField!
     private var maxDimensionField: NSTextField!
@@ -31,7 +31,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
         }
 
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 340),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -54,19 +54,15 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
             content.addSubview(label)
         }
 
-        func addField(placeholder: String) -> NSTextField {
-            let field = NSTextField(frame: NSRect(x: 180, y: y, width: 220, height: 22))
+        func addField(placeholder: String, monospace: Bool = false) -> NSTextField {
+            let field = NSTextField(frame: NSRect(x: 180, y: y, width: 320, height: 22))
             field.placeholderString = placeholder
-            field.font = .systemFont(ofSize: 12)
-            content.addSubview(field)
-            y -= 36
-            return field
-        }
-
-        func addSecureField(placeholder: String) -> NSSecureTextField {
-            let field = NSSecureTextField(frame: NSRect(x: 180, y: y, width: 220, height: 22))
-            field.placeholderString = placeholder
-            field.font = .systemFont(ofSize: 12)
+            field.font = monospace
+                ? .monospacedSystemFont(ofSize: 11, weight: .regular)
+                : .systemFont(ofSize: 12)
+            field.lineBreakMode = .byTruncatingTail
+            field.usesSingleLineMode = true
+            field.cell?.isScrollable = true
             content.addSubview(field)
             y -= 36
             return field
@@ -78,11 +74,11 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
 
         // Auth Token
         addLabel("Auth Token:")
-        authTokenField = addSecureField(placeholder: "optional")
+        authTokenField = addField(placeholder: "optional", monospace: true)
 
         // Separator
         y -= 4
-        let sep = NSBox(frame: NSRect(x: 20, y: y, width: 380, height: 1))
+        let sep = NSBox(frame: NSRect(x: 20, y: y, width: 480, height: 1))
         sep.boxType = .separator
         content.addSubview(sep)
         y -= 16
@@ -113,7 +109,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
         // Save button
         let saveButton = NSButton(title: "Save & Restart", target: self, action: #selector(saveSettings))
         saveButton.bezelStyle = .rounded
-        saveButton.frame = NSRect(x: 290, y: 12, width: 110, height: 28)
+        saveButton.frame = NSRect(x: 390, y: 12, width: 110, height: 28)
         saveButton.keyEquivalent = "\r"
         content.addSubview(saveButton)
 
@@ -232,6 +228,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        // Add Edit menu so Cmd+C/V/X/A work in text fields
+        let mainMenu = NSMenu()
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+        NSApp.mainMenu = mainMenu
 
         // Read control port from env
         let projDir = findProjectDir()
