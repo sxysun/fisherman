@@ -46,13 +46,11 @@ def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
     """Capture full screen as JPEG + frontmost app metadata. ~5ms. Synchronous."""
     ts = time.time()
 
-    # Capture full screen
-    cg_image = Quartz.CGWindowListCreateImage(
-        Quartz.CGRectInfinite,
-        Quartz.kCGWindowListOptionOnScreenOnly,
-        Quartz.kCGNullWindowID,
-        Quartz.kCGWindowImageDefault,
-    )
+    # Capture the main display — CGDisplayCreateImage always gets the
+    # active Space, unlike CGWindowListCreateImage which can miss windows
+    # on other macOS desktops/Spaces.
+    main_display = Quartz.CGMainDisplayID()
+    cg_image = Quartz.CGDisplayCreateImage(main_display)
     if cg_image is None:
         raise RuntimeError("Screen capture failed — check Screen Recording permission")
 
