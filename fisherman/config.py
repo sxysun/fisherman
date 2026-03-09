@@ -35,4 +35,4 @@ class FishermanConfig(BaseSettings):
     ocr_min_text_length: int = 50  # below = probably visual content
 
     # Control
-    control_port: int = 7890
+    control_port: int = 7891

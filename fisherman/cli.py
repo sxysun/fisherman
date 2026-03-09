@@ -68,7 +68,7 @@ def start(server_url: str | None, daemonize: bool):
         loop.close()
 
 
-def _control_request(method: str, path: str, port: int = 7890) -> dict:
+def _control_request(method: str, path: str, port: int = 7891) -> dict:
     url = f"http://127.0.0.1:{port}{path}"
     req = urllib.request.Request(url, method=method)
     try:
@@ -80,7 +80,7 @@ def _control_request(method: str, path: str, port: int = 7890) -> dict:
 
 
 @main.command()
-@click.option("--port", default=7890, help="Control server port")
+@click.option("--port", default=7891, help="Control server port")
 def status(port: int):
     """Show daemon status."""
     data = _control_request("GET", "/status", port)
@@ -88,7 +88,7 @@ def status(port: int):
 
 
 @main.command()
-@click.option("--port", default=7890, help="Control server port")
+@click.option("--port", default=7891, help="Control server port")
 def pause(port: int):
     """Pause screen capture."""
     data = _control_request("POST", "/pause", port)
@@ -96,7 +96,7 @@ def pause(port: int):
 
 
 @main.command()
-@click.option("--port", default=7890, help="Control server port")
+@click.option("--port", default=7891, help="Control server port")
 def resume(port: int):
     """Resume screen capture."""
     data = _control_request("POST", "/resume", port)
@@ -110,7 +110,7 @@ def stop():
     import subprocess
 
     result = subprocess.run(
-        ["lsof", "-ti", "tcp:7890"], capture_output=True, text=True
+        ["lsof", "-ti", "tcp:7891"], capture_output=True, text=True
     )
     pids = result.stdout.strip().split("\n")
     if not pids or pids == [""]:

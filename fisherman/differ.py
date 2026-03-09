@@ -25,7 +25,7 @@ class FrameDiffer:
         if self._last_hash is None:
             self._last_hash = h
             return DiffResult(is_new=True, distance=_MAX_DHASH_DISTANCE)
-        distance = h - self._last_hash
+        distance = int(h - self._last_hash)
         if distance < self._threshold:
             return DiffResult(is_new=False, distance=distance)
         self._last_hash = h

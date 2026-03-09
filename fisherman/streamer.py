@@ -113,6 +113,7 @@ class Streamer:
                     ping_interval=20,
                     ping_timeout=10,
                     max_size=None,
+                    proxy=None,
                 )
                 self._connected = True
                 backoff = 1.0

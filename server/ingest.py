@@ -10,10 +10,13 @@ import json
 import os
 import signal
 from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
 
 import asyncpg
 import structlog
 import websockets
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
 from crypto import encrypt_json, encrypt_text
 from storage import R2Storage
@@ -21,6 +24,17 @@ from storage import R2Storage
 log = structlog.get_logger()
 
 _pool = ThreadPoolExecutor(max_workers=4)
+
+
+def _auth_check(connection, request):
+    """Reject WebSocket connections that don't carry a valid Bearer token."""
+    token = os.environ.get("INGEST_AUTH_TOKEN", "")
+    if not token:
+        return  # no auth configured, allow all
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {token}":
+        log.warning("auth_rejected", remote=connection.remote_address)
+        return Response(HTTPStatus.UNAUTHORIZED, "Unauthorized", Headers())
 
 
 async def _init_db(pool: asyncpg.Pool) -> None:
@@ -129,6 +143,7 @@ async def _run(host: str, port: int) -> None:
         lambda ws: _handle_connection(ws, db, r2),
         host,
         port,
+        process_request=_auth_check,
         max_size=None,  # frames can be large
     ):
         log.info("ingest_server_started", host=host, port=port)

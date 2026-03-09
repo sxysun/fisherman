@@ -16,45 +16,23 @@ from fisherman.streamer import Streamer
 log = structlog.get_logger()
 
 
-def _check_permissions() -> bool:
-    """Check macOS screen recording permission. Returns True if granted."""
-    import Quartz
-
-    if hasattr(Quartz, "CGPreflightScreenCaptureAccess"):
-        if not Quartz.CGPreflightScreenCaptureAccess():
-            log.warning("screen_recording_not_granted")
-            Quartz.CGRequestScreenCaptureAccess()
-            print(
-                "Screen Recording permission required.\n"
-                "Please grant access in System Settings > Privacy & Security > Screen Recording,\n"
-                "then restart fisherman.",
-                file=sys.stderr,
-            )
-            return False
-    return True
-
-
 class FishermanDaemon:
     def __init__(self, config: FishermanConfig):
         self._config = config
         self._running = False
+        self._capture_ok = False
         self._differ = FrameDiffer(threshold=config.diff_threshold)
         self._privacy = PrivacyFilter(config)
         self._router = TierRouter(config)
         self._streamer = Streamer(config.server_url, config.auth_token)
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
+        self._consecutive_capture_failures = 0
 
     async def run(self) -> None:
-        if not _check_permissions():
-            sys.exit(1)
-
         self._running = True
 
-        # Start WebSocket streamer
-        await self._streamer.start()
-
-        # Start control server
+        # Start control server first so menu bar can always get status
         control = ControlServer(
             port=self._config.control_port,
             get_status_fn=self._get_status,
@@ -62,6 +40,9 @@ class FishermanDaemon:
             resume_fn=self._privacy.resume,
         )
         await control.start()
+
+        # Start WebSocket streamer
+        await self._streamer.start()
 
         log.info(
             "fisherman_started",
@@ -93,7 +74,21 @@ class FishermanDaemon:
                 frame = await loop.run_in_executor(
                     self._pool, capture_screen, cfg.max_dimension, cfg.jpeg_quality
                 )
+                if not self._capture_ok:
+                    self._capture_ok = True
+                    log.info("screen_capture_working")
+                self._consecutive_capture_failures = 0
+            except RuntimeError as e:
+                # capture_screen raises RuntimeError when CGWindowListCreateImage
+                # returns None — this means screen recording permission is denied
+                self._consecutive_capture_failures += 1
+                if self._consecutive_capture_failures == 1:
+                    self._capture_ok = False
+                    log.warning("screen_recording_not_granted", error=str(e))
+                await asyncio.sleep(max(cfg.capture_interval, 3.0))
+                continue
             except Exception:
+                self._consecutive_capture_failures += 1
                 log.warning("capture_failed", exc_info=True)
                 await asyncio.sleep(cfg.capture_interval)
                 continue
@@ -133,10 +128,13 @@ class FishermanDaemon:
             await asyncio.sleep(max(0, cfg.capture_interval - elapsed))
 
     def _get_status(self) -> dict:
-        return {
+        status = {
             "running": self._running,
             "paused": self._privacy.is_paused,
             "frames_sent": self._streamer.frames_sent,
             "frames_dropped": self._streamer.frames_dropped,
             "connected": self._streamer.connected,
         }
+        if not self._capture_ok and self._consecutive_capture_failures > 0:
+            status["error"] = "screen_recording_not_granted"
+        return status

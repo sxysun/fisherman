@@ -7,3 +7,6 @@ dist/
 build/
 server/.venv/
 server/uv.lock
+menubar/.build/
+menubar/icon.iconset/
+*.app
