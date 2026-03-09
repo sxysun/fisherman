@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS frames (
     ts          TIMESTAMPTZ NOT NULL,
     app         TEXT,
     bundle_id   TEXT,
-    window      TEXT,
+    "window"    TEXT,
     ocr_text    BYTEA,          -- Fernet-encrypted
     urls        BYTEA,          -- Fernet-encrypted JSON
     image_key   TEXT,           -- R2 path (content is encrypted, path is not)

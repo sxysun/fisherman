@@ -82,7 +82,7 @@ async def _handle_frame(
     async with db.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO frames (ts, app, bundle_id, window, ocr_text, urls,
+            INSERT INTO frames (ts, app, bundle_id, "window", ocr_text, urls,
                                 image_key, width, height, tier_hint, routing)
             VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             """,
