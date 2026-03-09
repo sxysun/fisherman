@@ -1,5 +1,4 @@
 import asyncio
-import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import structlog
@@ -8,6 +7,7 @@ from fisherman.capture import capture_screen
 from fisherman.config import FishermanConfig
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
+from fisherman.frame_store import FrameStore
 from fisherman.ocr import ocr_fast
 from fisherman.privacy import PrivacyFilter
 from fisherman.router import TierRouter
@@ -25,6 +25,7 @@ class FishermanDaemon:
         self._privacy = PrivacyFilter(config)
         self._router = TierRouter(config)
         self._streamer = Streamer(config.server_url, config.auth_token)
+        self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
         self._consecutive_capture_failures = 0
@@ -38,6 +39,7 @@ class FishermanDaemon:
             get_status_fn=self._get_status,
             pause_fn=self._privacy.pause,
             resume_fn=self._privacy.resume,
+            frame_store=self._frame_store,
         )
         await control.start()
 
@@ -79,8 +81,8 @@ class FishermanDaemon:
                     log.info("screen_capture_working")
                 self._consecutive_capture_failures = 0
             except RuntimeError as e:
-                # capture_screen raises RuntimeError when CGWindowListCreateImage
-                # returns None — this means screen recording permission is denied
+                # capture_screen raises RuntimeError when screen recording access
+                # is missing or the capture API returns no image.
                 self._consecutive_capture_failures += 1
                 if self._consecutive_capture_failures == 1:
                     self._capture_ok = False
@@ -122,6 +124,11 @@ class FishermanDaemon:
 
             # Push to server
             await self._streamer.send(frame, ocr_text, urls, routing=routing)
+
+            # Save locally for viewer
+            await loop.run_in_executor(
+                self._pool, self._frame_store.save, frame, ocr_text, urls, routing
+            )
             self._frames_sent += 1
 
             elapsed = asyncio.get_event_loop().time() - t0

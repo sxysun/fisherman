@@ -23,10 +23,10 @@ def ocr_fast(jpeg_data: bytes) -> tuple[str, list[str]]:
     # Create request handler
     handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, None)
 
-    # Create text recognition request — fast mode
+    # Create text recognition request — accurate mode with language correction
     request = Vision.VNRecognizeTextRequest.alloc().init()
-    request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelFast)
-    request.setUsesLanguageCorrection_(False)
+    request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+    request.setUsesLanguageCorrection_(True)
 
     # Perform
     success, error = handler.performRequests_error_([request], None)

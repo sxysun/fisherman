@@ -10,3 +10,4 @@ server/uv.lock
 menubar/.build/
 menubar/icon.iconset/
 *.app
+.DS_Store

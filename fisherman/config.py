@@ -12,7 +12,7 @@ class FishermanConfig(BaseSettings):
     capture_interval: float = 1.0
     diff_threshold: int = 6
     jpeg_quality: int = 60
-    max_dimension: int = 960
+    max_dimension: int = 1920
 
     # Privacy
     excluded_bundles: list[str] = []
@@ -33,6 +33,10 @@ class FishermanConfig(BaseSettings):
     ]
     dhash_escalation_threshold: int = 20  # 0–64, above = needs VLM
     ocr_min_text_length: int = 50  # below = probably visual content
+
+    # Local frame viewer
+    frames_dir: str = "~/.fisherman/frames"
+    local_frames_max: int = 1000
 
     # Control
     control_port: int = 7891

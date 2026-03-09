@@ -40,6 +40,16 @@ Run the daemon:
 uv run fisherman start
 ```
 
+### Menu bar app
+
+Build and install the menu bar app:
+
+```bash
+cd menubar
+swift build -c release
+cp -r .build/release/FishermanMenu /Applications/Fisherman.app
+```
+
 ## CLI
 
 ```
@@ -63,10 +73,20 @@ All config is via environment variables (or `.env` file), prefixed with `FISH_`:
 | `FISH_CAPTURE_INTERVAL` | `1.0` | Seconds between captures |
 | `FISH_DIFF_THRESHOLD` | `6` | dHash distance below which frames are skipped |
 | `FISH_JPEG_QUALITY` | `60` | JPEG compression quality (0-100) |
-| `FISH_MAX_DIMENSION` | `960` | Max width/height for captured frames |
+| `FISH_MAX_DIMENSION` | `1920` | Max width/height for captured frames |
 | `FISH_EXCLUDED_BUNDLES` | `[]` | Bundle IDs to never capture |
 | `FISH_EXCLUDED_APPS` | `[]` | App names to never capture |
+| `FISH_FRAMES_DIR` | `~/.fisherman/frames` | Local frame storage directory |
+| `FISH_LOCAL_FRAMES_MAX` | `1000` | Max locally stored frames (oldest pruned) |
 | `FISH_CONTROL_PORT` | `7891` | Local HTTP port for CLI control |
+
+## Local Frame Viewer
+
+Captured frames are saved locally at `~/.fisherman/frames/` (organized by date). View them in the browser:
+
+- Open `http://127.0.0.1:7891/viewer` or click **View Frames...** in the menu bar app
+- Each frame shows the screenshot, OCR text, detected URLs, app name, and routing tier
+- Auto-refresh mode polls every 3 seconds
 
 ## Architecture
 
@@ -75,15 +95,19 @@ macOS Screen
     |
     v
 [Screen Capture] --> [Diff Filter] --> [OCR] --> [Privacy Filter] --> [WebSocket] --> Server
-    CGWindowList         dHash          Vision      exclude apps        streamer
+    CG API / CLI         dHash          Vision      exclude apps        streamer
+                                                                           |
+                                                                    [Frame Store]
+                                                                     local viewer
 ```
 
-- **Capture**: `CGWindowListCreateImage` grabs the screen, resized to `max_dimension`
+- **Capture**: `CGWindowListCreateImage` grabs the screen, with automatic fallback to `screencapture` CLI when Screen Recording permission isn't available to the CG API (e.g. when launched from the menu bar app)
 - **Diff**: perceptual hash (dHash) skips frames that haven't changed
-- **OCR**: Apple Vision framework extracts text from each frame
+- **OCR**: Apple Vision framework (accurate mode with language correction) extracts text
 - **Privacy**: filters out excluded apps/bundles
-- **Routing**: classifies frames into tiers (text-heavy vs visual) to guide downstream VLM processing
-- **Streamer**: persistent WebSocket with auto-reconnect and backpressure (drops oldest frames if server is slow)
+- **Routing**: classifies frames into tiers (text-heavy vs visual) for downstream VLM processing
+- **Streamer**: persistent WebSocket with auto-reconnect and backpressure
+- **Frame Store**: saves frames + metadata locally for the built-in viewer
 
 ## Server
 

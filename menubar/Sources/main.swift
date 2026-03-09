@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 import Foundation
 
 // MARK: - Settings Window Controller
@@ -284,6 +285,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         pauseResumeMenuItem.target = self
         menu.addItem(pauseResumeMenuItem)
 
+        let viewerItem = NSMenuItem(title: "View Frames...", action: #selector(openViewer), keyEquivalent: "v")
+        viewerItem.target = self
+        menu.addItem(viewerItem)
+
         let settingsItem = NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -296,7 +301,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
 
-        // Launch daemon
+        // Launch daemon (skips if one is already running from Terminal)
         startDaemon()
 
         // Poll status every 2s
@@ -313,7 +318,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Daemon management
 
+    private func ensureScreenRecordingAccess(prompt: Bool) -> Bool {
+        if CGPreflightScreenCaptureAccess() {
+            return true
+        }
+        if prompt && CGRequestScreenCaptureAccess() {
+            return true
+        }
+        return CGPreflightScreenCaptureAccess()
+    }
+
+    private func isDaemonRunning() -> Bool {
+        // Check if something is already listening on the control port
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(Int(controlPort) ?? 7891).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
+    }
+
     private func startDaemon() {
+        // Don't launch if a daemon is already running (e.g. started from Terminal)
+        if isDaemonRunning() {
+            return
+        }
+
         guard let uvPath = findUV() else {
             statusMenuItem.title = "Error: uv not found"
             setIcon(color: .red)
@@ -423,13 +460,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return envDir
         }
 
-        // 2. Installed location
-        let installed = NSHomeDirectory() + "/.fisherman"
-        if FileManager.default.fileExists(atPath: installed + "/pyproject.toml") {
-            return installed
-        }
-
-        // 3. Walk up from binary (dev — running from repo checkout)
+        // 2. Walk up from binary (dev — running from repo checkout)
         // Binary could be at menubar/.build/release/FishermanMenu
         // or inside .app: Fisherman.app/Contents/MacOS/FishermanMenu
         let bundlePath = Bundle.main.executablePath ?? ""
@@ -442,8 +473,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // 3. Installed location
+        let installed = NSHomeDirectory() + "/.fisherman"
+        if FileManager.default.fileExists(atPath: installed + "/pyproject.toml") {
+            return installed
+        }
+
         // Fallback
-        return NSHomeDirectory() + "/.fisherman"
+        return installed
     }
 
     // MARK: Status polling
@@ -524,10 +561,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openScreenRecordingSettings() {
+        if ensureScreenRecordingAccess(prompt: true) {
+            restartDaemon()
+            pollStatus()
+            return
+        }
+
         // macOS 13+ uses the new System Settings URL scheme
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    @objc private func openViewer() {
+        let url = URL(string: "http://127.0.0.1:\(controlPort)/viewer")!
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func openSettings() {
