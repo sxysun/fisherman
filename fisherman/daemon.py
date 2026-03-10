@@ -1,4 +1,5 @@
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 
 import structlog
@@ -9,11 +10,14 @@ from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
 from fisherman.ocr import ocr_fast
+from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
 from fisherman.router import TierRouter
 from fisherman.streamer import Streamer
 
 log = structlog.get_logger()
+
+_SWIFT_CAPTURE = os.environ.get("FISHERMAN_SWIFT_CAPTURE", "") == "1"
 
 
 class FishermanDaemon:
@@ -35,6 +39,7 @@ class FishermanDaemon:
 
     async def run(self) -> None:
         self._running = True
+        self._frame_queue: asyncio.Queue = asyncio.Queue(maxsize=16)
 
         # Start control server first so menu bar can always get status
         control = ControlServer(
@@ -43,6 +48,7 @@ class FishermanDaemon:
             pause_fn=self._privacy.pause,
             resume_fn=self._privacy.resume,
             frame_store=self._frame_store,
+            frame_queue=self._frame_queue if _SWIFT_CAPTURE else None,
         )
         await control.start()
 
@@ -54,6 +60,7 @@ class FishermanDaemon:
             server=self._config.server_url,
             interval=self._config.capture_interval,
             control_port=self._config.control_port,
+            swift_capture=_SWIFT_CAPTURE,
         )
 
         # Start VLM loop if enabled
@@ -63,7 +70,10 @@ class FishermanDaemon:
             log.info("vlm_loop_started", interval=self._config.vlm_interval)
 
         try:
-            await self._capture_loop()
+            if _SWIFT_CAPTURE:
+                await self._process_loop()
+            else:
+                await self._capture_loop()
         except asyncio.CancelledError:
             pass
         finally:
@@ -79,11 +89,26 @@ class FishermanDaemon:
             self._pool.shutdown(wait=False)
             log.info("fisherman_stopped")
 
+    def _get_interval(self) -> float:
+        """Return capture interval, slower on battery."""
+        cfg = self._config
+        if on_battery():
+            return cfg.battery_capture_interval
+        return cfg.capture_interval
+
     async def _capture_loop(self) -> None:
         loop = asyncio.get_running_loop()
         cfg = self._config
+        consecutive_idle = 0  # frames rejected by differ
 
         while self._running:
+            interval = self._get_interval()
+            # Adaptive backoff: if screen hasn't changed for a while, slow down
+            if consecutive_idle >= 10:
+                interval = min(interval * 2, 30.0)
+            elif consecutive_idle >= 5:
+                interval = min(interval * 1.5, 15.0)
+
             t0 = asyncio.get_event_loop().time()
 
             try:
@@ -109,22 +134,25 @@ class FishermanDaemon:
             except Exception:
                 self._consecutive_capture_failures += 1
                 log.warning("capture_failed", exc_info=True)
-                backoff = min(cfg.capture_interval * (2 ** self._consecutive_capture_failures), 30.0)
+                backoff = min(interval * (2 ** self._consecutive_capture_failures), 30.0)
                 await asyncio.sleep(backoff)
                 continue
 
             # Privacy check
             if self._privacy.should_skip(frame.bundle_id, frame.app_name):
                 elapsed = asyncio.get_event_loop().time() - t0
-                await asyncio.sleep(max(0, cfg.capture_interval - elapsed))
+                await asyncio.sleep(max(0, interval - elapsed))
                 continue
 
             # Diff check
             diff = self._differ.diff_frame(frame.jpeg_data)
             if not diff.is_new:
+                consecutive_idle += 1
                 elapsed = asyncio.get_event_loop().time() - t0
-                await asyncio.sleep(max(0, cfg.capture_interval - elapsed))
+                await asyncio.sleep(max(0, interval - elapsed))
                 continue
+
+            consecutive_idle = 0
 
             try:
                 # OCR in thread pool
@@ -152,7 +180,49 @@ class FishermanDaemon:
             self._frames_sent += 1
 
             elapsed = asyncio.get_event_loop().time() - t0
-            await asyncio.sleep(max(0, cfg.capture_interval - elapsed))
+            await asyncio.sleep(max(0, interval - elapsed))
+
+    async def _process_loop(self) -> None:
+        """Process frames pushed by Swift CaptureEngine via POST /frame."""
+        loop = asyncio.get_running_loop()
+        while self._running:
+            frame, dhash_distance, swift_ocr_text, swift_ocr_urls, text_source = await self._frame_queue.get()
+            self._capture_ok = True
+
+            # Privacy check (belt-and-suspenders — Swift also filters)
+            if self._privacy.should_skip(frame.bundle_id, frame.app_name):
+                continue
+
+            # Use Swift-provided OCR if available, otherwise fall back to Python
+            if swift_ocr_text is not None:
+                ocr_text = swift_ocr_text
+                urls = swift_ocr_urls or []
+                log.debug("swift_text", source=text_source, length=len(ocr_text))
+            else:
+                try:
+                    ocr_text, urls = await loop.run_in_executor(
+                        self._pool, ocr_fast, frame.jpeg_data
+                    )
+                    text_source = "python_ocr"
+                except Exception:
+                    log.warning("ocr_failed", exc_info=True)
+                    ocr_text, urls = "", []
+
+            # Route
+            routing = self._router.route(
+                dhash_distance, ocr_text, urls, frame.bundle_id or ""
+            )
+
+            # Stream to server
+            await self._streamer.send(frame, ocr_text, urls, routing=routing)
+
+            # Save locally
+            ts_ms = int(frame.timestamp * 1000)
+            await loop.run_in_executor(
+                self._pool, self._frame_store.save, frame, ocr_text, urls, routing
+            )
+            self._latest_frame = (ts_ms, frame.jpeg_data, routing.tier_hint)
+            self._frames_sent += 1
 
     async def _vlm_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -201,6 +271,8 @@ class FishermanDaemon:
             "frames_sent": self._streamer.frames_sent,
             "frames_dropped": self._streamer.frames_dropped,
             "connected": self._streamer.connected,
+            "on_battery": on_battery(),
+            "capture_interval": self._get_interval(),
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
             status["error"] = "screen_recording_not_granted"

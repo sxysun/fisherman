@@ -9,7 +9,8 @@ class FishermanConfig(BaseSettings):
     auth_token: str = ""
 
     # Capture
-    capture_interval: float = 1.0
+    capture_interval: float = 2.0
+    battery_capture_interval: float = 5.0  # slower on battery
     diff_threshold: int = 6
     jpeg_quality: int = 60
     max_dimension: int = 1920

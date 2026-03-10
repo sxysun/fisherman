@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 
@@ -138,12 +139,13 @@ loadFrames();
 class ControlServer:
     """Tiny HTTP server for local pause/resume/status control and frame viewer."""
 
-    def __init__(self, port: int, get_status_fn, pause_fn, resume_fn, frame_store=None):
+    def __init__(self, port: int, get_status_fn, pause_fn, resume_fn, frame_store=None, frame_queue: asyncio.Queue | None = None):
         self._port = port
         self._get_status = get_status_fn
         self._pause = pause_fn
         self._resume = resume_fn
         self._frame_store = frame_store
+        self._frame_queue = frame_queue
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -167,11 +169,19 @@ class ControlServer:
                 return
             method, path = parts[0], parts[1]
 
-            # Drain headers
+            # Drain headers, track content-length
+            content_length = 0
             while True:
                 line = await reader.readline()
                 if line in (b"\r\n", b"\n", b""):
                     break
+                if line.lower().startswith(b"content-length:"):
+                    content_length = int(line.split(b":")[1].strip())
+
+            # Read body for POST requests
+            body = b""
+            if content_length > 0:
+                body = await asyncio.wait_for(reader.readexactly(content_length), timeout=5.0)
 
             # Route request
             if method == "GET" and path == "/status":
@@ -183,6 +193,8 @@ class ControlServer:
             elif method == "POST" and path == "/resume":
                 self._resume()
                 self._send_json(writer, json.dumps({"paused": False}))
+            elif method == "POST" and path == "/frame":
+                await self._handle_frame_post(body, writer)
             elif method == "GET" and path == "/viewer":
                 self._send_html(writer, VIEWER_HTML)
             elif method == "GET" and path.startswith("/frames"):
@@ -239,6 +251,38 @@ class ControlServer:
             return
 
         writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+
+    async def _handle_frame_post(self, body: bytes, writer: asyncio.StreamWriter) -> None:
+        if not self._frame_queue:
+            self._send_json(writer, '{"error":"no frame queue"}')
+            return
+        try:
+            msg = json.loads(body)
+            jpeg_data = base64.b64decode(msg["jpeg_b64"])
+            from fisherman.capture import ScreenFrame
+
+            frame = ScreenFrame(
+                jpeg_data=jpeg_data,
+                width=msg["width"],
+                height=msg["height"],
+                app_name=msg.get("app_name") or None,
+                bundle_id=msg.get("bundle_id") or None,
+                window_title=msg.get("window_title") or None,
+                timestamp=msg["timestamp"],
+            )
+            dhash_distance = msg.get("dhash_distance", 64)
+            # Swift CaptureEngine may provide OCR text + urls
+            ocr_text = msg.get("ocr_text") or None
+            ocr_urls = msg.get("urls") or None
+            text_source = msg.get("text_source") or None
+            try:
+                self._frame_queue.put_nowait((frame, dhash_distance, ocr_text, ocr_urls, text_source))
+            except asyncio.QueueFull:
+                log.warning("frame_queue_full")
+            self._send_json(writer, '{"ok":true}')
+        except Exception as e:
+            log.warning("frame_post_failed", error=str(e))
+            self._send_json(writer, json.dumps({"error": str(e)}))
 
     def _send_json(self, writer: asyncio.StreamWriter, body: str) -> None:
         resp = (

@@ -36,7 +36,7 @@ def ocr_fast(jpeg_data: bytes) -> tuple[str, list[str]]:
         # Create text recognition request — accurate mode with language correction
         request = Vision.VNRecognizeTextRequest.alloc().init()
         request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-        request.setUsesLanguageCorrection_(True)
+        request.setUsesLanguageCorrection_(False)
 
         # Use latest revision if available (Revision3 = macOS 14+)
         try:
