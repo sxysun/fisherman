@@ -58,10 +58,13 @@ async def _handle_frame(
     ocr_text = msg.get("ocr_text", "")
     urls = msg.get("urls", [])
 
+    window = msg.get("window", "")
+
     # Encrypt sensitive fields (CPU-bound, run in thread)
-    enc_ocr, enc_urls = await asyncio.gather(
+    enc_ocr, enc_urls, enc_window = await asyncio.gather(
         loop.run_in_executor(_pool, encrypt_text, ocr_text),
         loop.run_in_executor(_pool, encrypt_json, urls),
+        loop.run_in_executor(_pool, encrypt_text, window),
     )
 
     # Encrypt and upload image to R2 (I/O-bound, run in thread)
@@ -89,7 +92,7 @@ async def _handle_frame(
             ts,
             msg.get("app"),
             msg.get("bundle"),
-            msg.get("window"),
+            enc_window,
             enc_ocr,
             enc_urls,
             image_key,

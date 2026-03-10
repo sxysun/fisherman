@@ -16,6 +16,9 @@ dependencies = [
     "structlog>=24.0",
 ]
 
+[project.optional-dependencies]
+vlm = ["torch>=2.0,<=2.2.2", "transformers>=4.51,<5", "einops", "pyvips", "accelerate", "numpy<2"]
+
 [project.scripts]
 fisherman = "fisherman.cli:main"
 

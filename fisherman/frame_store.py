@@ -58,6 +58,25 @@ class FrameStore:
 
         self._cleanup()
 
+    def update_scene(self, ts_ms: int, description: str) -> None:
+        """Patch the JSON sidecar for a frame with a scene_description."""
+        ts = ts_ms / 1000.0
+        dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+        day = dt.strftime("%Y-%m-%d")
+        meta_path = os.path.join(self._base, day, f"{ts_ms}.json")
+
+        if not os.path.isfile(meta_path):
+            return
+
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            meta["scene_description"] = description
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
+        except Exception:
+            log.warning("update_scene_failed", ts_ms=ts_ms, exc_info=True)
+
     def list_recent(self, count: int = 50) -> list[dict]:
         """Return metadata for the most recent `count` frames."""
         all_meta = []

@@ -14,8 +14,18 @@ class FishermanConfig(BaseSettings):
     jpeg_quality: int = 60
     max_dimension: int = 1920
 
-    # Privacy
-    excluded_bundles: list[str] = []
+    # Privacy — password managers, auth apps, keychains excluded by default
+    excluded_bundles: list[str] = [
+        "com.1password.1password",          # 1Password 8+
+        "com.agilebits.onepassword7",       # 1Password 7
+        "com.apple.keychainaccess",         # Keychain Access
+        "com.lastpass.LastPass",            # LastPass
+        "com.dashlane.Dashlane",            # Dashlane
+        "com.bitwarden.desktop",            # Bitwarden
+        "com.keepassxc.keepassxc",          # KeePassXC
+        "com.apple.systempreferences",      # System Settings (privacy screens)
+        "com.apple.Passwords",              # macOS Passwords app
+    ]
     excluded_apps: list[str] = []
 
     # Routing
@@ -37,6 +47,11 @@ class FishermanConfig(BaseSettings):
     # Local frame viewer
     frames_dir: str = "~/.fisherman/frames"
     local_frames_max: int = 1000
+
+    # VLM (scene understanding)
+    vlm_enabled: bool = False
+    vlm_interval: float = 10.0
+    vlm_model: str = "2025-04-14"  # moondream2 revision tag
 
     # Control
     control_port: int = 7891

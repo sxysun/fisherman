@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import time
 
+import objc
 import Quartz
 import structlog
 from AppKit import (
@@ -29,10 +30,13 @@ class ScreenFrame:
     timestamp: float
 
 
-# Capture method state — re-evaluated periodically
+# Capture method state — re-evaluated periodically with exponential backoff
 _use_screencapture: bool | None = None
 _last_permission_check: float = 0
 _RECHECK_INTERVAL = 60.0
+_RECHECK_MAX_INTERVAL = 1800.0  # 30 minutes max
+_recheck_interval = _RECHECK_INTERVAL
+_consecutive_denials = 0
 
 
 def _can_see_user_windows() -> bool:
@@ -139,61 +143,73 @@ def _get_frontmost_info() -> tuple[str | None, str | None, str | None]:
 
 def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
     """Capture full screen as JPEG + frontmost app metadata. Synchronous."""
-    global _use_screencapture, _last_permission_check
+    global _use_screencapture, _last_permission_check, _recheck_interval, _consecutive_denials
     ts = time.time()
 
-    # Decide capture method — check periodically so we switch to the
-    # fast CG path once the user grants Screen Recording permission.
-    if _use_screencapture is None or (ts - _last_permission_check) > _RECHECK_INTERVAL:
-        _last_permission_check = ts
-        can_see = _can_see_user_windows()
-        prev = _use_screencapture
-        _use_screencapture = not can_see
-        if _use_screencapture and prev is not True:
-            log.info(
-                "capture_method_screencapture",
-                reason="CG API cannot see user windows — falling back to screencapture CLI",
+    with objc.autorelease_pool():
+        # Decide capture method — check periodically so we switch to the
+        # fast CG path once the user grants Screen Recording permission.
+        # Uses exponential backoff to avoid repeatedly triggering permission dialogs.
+        if _use_screencapture is None or (ts - _last_permission_check) > _recheck_interval:
+            _last_permission_check = ts
+            can_see = _can_see_user_windows()
+            prev = _use_screencapture
+            _use_screencapture = not can_see
+            if _use_screencapture:
+                _consecutive_denials += 1
+                _recheck_interval = min(
+                    _RECHECK_INTERVAL * (2 ** _consecutive_denials),
+                    _RECHECK_MAX_INTERVAL,
+                )
+                if prev is not True:
+                    log.info(
+                        "capture_method_screencapture",
+                        reason="CG API cannot see user windows — falling back to screencapture CLI",
+                        next_recheck_s=int(_recheck_interval),
+                    )
+            else:
+                _consecutive_denials = 0
+                _recheck_interval = _RECHECK_INTERVAL
+                if prev is not False:
+                    log.info("capture_method_cg", reason="CG API has Screen Recording access")
+
+        if _use_screencapture:
+            cg_image, w, h = _capture_screencapture()
+        else:
+            cg_image, w, h = _capture_cg()
+
+        # Resize using NSImage (avoids PIL's heavy TIFF intermediate)
+        scale = min(max_dim / max(w, h), 1.0)
+        if scale < 1.0:
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+
+            ns_image = NSImage.alloc().initWithCGImage_size_(cg_image, NSSize(w, h))
+            resized = NSImage.alloc().initWithSize_(NSSize(new_w, new_h))
+            resized.lockFocus()
+            ns_image.drawInRect_fromRect_operation_fraction_(
+                ((0, 0), (new_w, new_h)),
+                ((0, 0), (w, h)),
+                Quartz.NSCompositeSourceOver
+                if hasattr(Quartz, "NSCompositeSourceOver")
+                else 2,
+                1.0,
             )
-        elif not _use_screencapture and prev is not False:
-            log.info("capture_method_cg", reason="CG API has Screen Recording access")
+            bitmap = NSBitmapImageRep.alloc().initWithFocusedViewRect_(
+                ((0, 0), (new_w, new_h))
+            )
+            resized.unlockFocus()
 
-    if _use_screencapture:
-        cg_image, w, h = _capture_screencapture()
-    else:
-        cg_image, w, h = _capture_cg()
+            w, h = new_w, new_h
+        else:
+            bitmap = NSBitmapImageRep.alloc().initWithCGImage_(cg_image)
 
-    # Resize using NSImage (avoids PIL's heavy TIFF intermediate)
-    scale = min(max_dim / max(w, h), 1.0)
-    if scale < 1.0:
-        new_w = int(w * scale)
-        new_h = int(h * scale)
+        # Encode as JPEG
+        props = {NSImageCompressionFactor: jpeg_quality / 100.0}
+        jpeg_data = bytes(bitmap.representationUsingType_properties_(NSJPEGFileType, props))
 
-        ns_image = NSImage.alloc().initWithCGImage_size_(cg_image, NSSize(w, h))
-        resized = NSImage.alloc().initWithSize_(NSSize(new_w, new_h))
-        resized.lockFocus()
-        ns_image.drawInRect_fromRect_operation_fraction_(
-            ((0, 0), (new_w, new_h)),
-            ((0, 0), (w, h)),
-            Quartz.NSCompositeSourceOver
-            if hasattr(Quartz, "NSCompositeSourceOver")
-            else 2,
-            1.0,
-        )
-        bitmap = NSBitmapImageRep.alloc().initWithFocusedViewRect_(
-            ((0, 0), (new_w, new_h))
-        )
-        resized.unlockFocus()
-
-        w, h = new_w, new_h
-    else:
-        bitmap = NSBitmapImageRep.alloc().initWithCGImage_(cg_image)
-
-    # Encode as JPEG
-    props = {NSImageCompressionFactor: jpeg_quality / 100.0}
-    jpeg_data = bytes(bitmap.representationUsingType_properties_(NSJPEGFileType, props))
-
-    # Metadata
-    app_name, bundle_id, window_title = _get_frontmost_info()
+        # Metadata
+        app_name, bundle_id, window_title = _get_frontmost_info()
 
     return ScreenFrame(
         jpeg_data=jpeg_data,

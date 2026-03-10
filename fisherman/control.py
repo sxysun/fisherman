@@ -40,6 +40,8 @@ VIEWER_HTML = """\
   .urls { padding: 0 12px 10px; }
   .urls a { font-size: 11px; color: #60a5fa; text-decoration: none; display: block;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .scene { padding: 6px 12px 10px; font-size: 12px; color: #c4b5fd; font-style: italic;
+    border-left: 3px solid #7c3aed; margin: 0 12px 10px; }
 </style>
 </head>
 <body>
@@ -77,6 +79,9 @@ async function loadFrames() {
       html += '</div>';
       if (f.ocr_text) {
         html += '<div class="ocr">' + esc(f.ocr_text.slice(0, 500)) + '</div>';
+      }
+      if (f.scene_description) {
+        html += '<div class="scene">' + esc(f.scene_description) + '</div>';
       }
       if (f.urls && f.urls.length > 0) {
         html += '<div class="urls">';
