@@ -105,6 +105,28 @@ async def _handle_frame(
     log.info("frame_stored", ts=ts, image_key=image_key, app=msg.get("app"))
 
 
+async def _handle_vlm(
+    msg: dict,
+    db: asyncpg.Pool,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Attach an encrypted VLM scene description to an existing frame row."""
+    ts = msg["ts"]
+    scene = msg.get("scene", "")
+    enc_scene = await loop.run_in_executor(_pool, encrypt_text, scene)
+
+    async with db.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE frames SET scene = $1
+            WHERE ts = to_timestamp($2)
+            """,
+            enc_scene,
+            ts,
+        )
+    log.info("vlm_stored", ts=ts, rows=result)
+
+
 async def _handle_connection(
     ws: websockets.WebSocketServerProtocol,
     db: asyncpg.Pool,
@@ -121,6 +143,8 @@ async def _handle_connection(
                 msg = json.loads(raw)
                 if msg.get("type") == "frame":
                     await _handle_frame(msg, db, r2, loop)
+                elif msg.get("type") == "vlm":
+                    await _handle_vlm(msg, db, loop)
             except Exception:
                 log.warning("frame_processing_failed", exc_info=True)
     except websockets.ConnectionClosed:

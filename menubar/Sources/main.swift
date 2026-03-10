@@ -301,6 +301,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem.menu = menu
 
+        // Ensure Screen Recording permission before launching daemon.
+        // The .app must be code-signed for this grant to persist across rebuilds.
+        _ = ensureScreenRecordingAccess(prompt: true)
+
         // Launch daemon (skips if one is already running from Terminal)
         startDaemon()
 
@@ -393,6 +397,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .reduce(into: [String]()) { acc, p in if !acc.contains(p) { acc.append(p) } }
             .joined(separator: ":")
         env["PATH"] = newPath
+        // Tell the Python daemon to skip CG permission checks and use
+        // the screencapture CLI directly — avoids TCC prompt loop since
+        // the child Python binary won't have Screen Recording permission.
+        env["FISHERMAN_FORCE_SCREENCAPTURE"] = "1"
         process.environment = env
 
         do {
@@ -561,13 +569,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openScreenRecordingSettings() {
-        if ensureScreenRecordingAccess(prompt: true) {
-            restartDaemon()
-            pollStatus()
-            return
-        }
-
-        // macOS 13+ uses the new System Settings URL scheme
+        // Open System Settings directly — don't call CGRequestScreenCaptureAccess()
+        // because the .app binary isn't what does the capturing (the child Python
+        // process does), and prompting for the wrong binary causes a TCC loop.
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }

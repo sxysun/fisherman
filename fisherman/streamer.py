@@ -89,6 +89,18 @@ class Streamer:
                 pass
         await self._queue.put(payload)
 
+    async def send_vlm(self, ts: float, scene: str) -> None:
+        """Send a VLM scene description to the server, linked by timestamp."""
+        msg = json.dumps({"type": "vlm", "ts": ts, "scene": scene})
+        if self._queue.full():
+            try:
+                self._queue.get_nowait()
+                self._frames_dropped += 1
+                log.warning("queue_full_dropping_vlm")
+            except asyncio.QueueEmpty:
+                pass
+        await self._queue.put(msg)
+
     async def _send_loop(self) -> None:
         while True:
             msg = await self._queue.get()

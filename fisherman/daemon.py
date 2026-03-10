@@ -189,6 +189,8 @@ class FishermanDaemon:
                 await loop.run_in_executor(
                     self._pool, self._frame_store.update_scene, ts_ms, scene
                 )
+                # Stream to server
+                await self._streamer.send_vlm(ts_ms / 1000.0, scene)
             except Exception:
                 log.warning("vlm_failed", exc_info=True)
 

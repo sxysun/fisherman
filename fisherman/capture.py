@@ -38,6 +38,11 @@ _RECHECK_MAX_INTERVAL = 1800.0  # 30 minutes max
 _recheck_interval = _RECHECK_INTERVAL
 _consecutive_denials = 0
 
+# When launched from .app, the Python binary won't have Screen Recording
+# permission and checking triggers a TCC prompt loop. Skip straight to
+# the screencapture CLI fallback.
+_FORCE_SCREENCAPTURE = os.environ.get("FISHERMAN_FORCE_SCREENCAPTURE", "") == "1"
+
 
 def _can_see_user_windows() -> bool:
     """Check if CG API has Screen Recording access to see other apps' windows.
@@ -89,12 +94,16 @@ def _capture_screencapture() -> tuple:
     fd, tmppath = tempfile.mkstemp(suffix=".jpg")
     os.close(fd)
     try:
-        subprocess.run(
+        result = subprocess.run(
             ["/usr/sbin/screencapture", "-x", "-t", "jpg", tmppath],
-            check=True,
             timeout=10,
             capture_output=True,
         )
+        if result.returncode != 0:
+            stderr = result.stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                f"screencapture exited {result.returncode}: {stderr or 'no stderr'}"
+            )
         with open(tmppath, "rb") as f:
             raw_jpeg = f.read()
         if not raw_jpeg:
@@ -116,15 +125,18 @@ def _capture_screencapture() -> tuple:
     return cg_image, w, h
 
 
-def _get_frontmost_info() -> tuple[str | None, str | None, str | None]:
-    """Return (app_name, bundle_id, window_title) for the frontmost app."""
+def _get_frontmost_info(skip_window_title: bool = False) -> tuple[str | None, str | None, str | None]:
+    """Return (app_name, bundle_id, window_title) for the frontmost app.
+
+    When skip_window_title=True, only uses NSWorkspace (no TCC-gated CG calls).
+    """
     ws = NSWorkspace.sharedWorkspace()
     app = ws.frontmostApplication()
     app_name = app.localizedName() if app else None
     bundle_id = app.bundleIdentifier() if app else None
 
     window_title = None
-    if app:
+    if app and not skip_window_title:
         pid = app.processIdentifier()
         window_list = Quartz.CGWindowListCopyWindowInfo(
             Quartz.kCGWindowListOptionOnScreenOnly
@@ -147,10 +159,15 @@ def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
     ts = time.time()
 
     with objc.autorelease_pool():
-        # Decide capture method — check periodically so we switch to the
-        # fast CG path once the user grants Screen Recording permission.
-        # Uses exponential backoff to avoid repeatedly triggering permission dialogs.
-        if _use_screencapture is None or (ts - _last_permission_check) > _recheck_interval:
+        # When launched from .app, skip CG permission check entirely to
+        # avoid triggering the TCC "would like to record" prompt loop.
+        if _FORCE_SCREENCAPTURE:
+            if _use_screencapture is None:
+                log.info("capture_method_screencapture", reason="FISHERMAN_FORCE_SCREENCAPTURE=1")
+                _use_screencapture = True
+        elif _use_screencapture is None or (ts - _last_permission_check) > _recheck_interval:
+            # Decide capture method — check periodically so we switch to the
+            # fast CG path once the user grants Screen Recording permission.
             _last_permission_check = ts
             can_see = _can_see_user_windows()
             prev = _use_screencapture
@@ -208,8 +225,11 @@ def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
         props = {NSImageCompressionFactor: jpeg_quality / 100.0}
         jpeg_data = bytes(bitmap.representationUsingType_properties_(NSJPEGFileType, props))
 
-        # Metadata
-        app_name, bundle_id, window_title = _get_frontmost_info()
+        # Metadata — skip window title when using screencapture fallback
+        # to avoid CGWindowListCopyWindowInfo triggering TCC prompt
+        app_name, bundle_id, window_title = _get_frontmost_info(
+            skip_window_title=_FORCE_SCREENCAPTURE
+        )
 
     return ScreenFrame(
         jpeg_data=jpeg_data,
