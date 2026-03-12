@@ -28,6 +28,7 @@ class Streamer:
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_MAX_QUEUE)
         self._connected = False
+        self._ever_connected = False
         self._frames_sent = 0
         self._frames_dropped = 0
         self._tasks: list[asyncio.Task] = []
@@ -128,6 +129,7 @@ class Streamer:
                     proxy=None,
                 )
                 self._connected = True
+                self._ever_connected = True
                 backoff = 1.0
                 log.info("websocket_connected", url=self._url)
 
@@ -139,6 +141,13 @@ class Streamer:
                 raise
             except Exception:
                 self._connected = False
-                log.warning("websocket_disconnected", backoff=backoff, exc_info=True)
+                if not self._ever_connected:
+                    log.error(
+                        "server_unreachable",
+                        url=self._url,
+                        hint="Frames saved locally. Check FISH_SERVER_URL. Retrying...",
+                    )
+                else:
+                    log.warning("websocket_disconnected", backoff=backoff, exc_info=True)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, _MAX_BACKOFF)

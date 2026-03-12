@@ -47,6 +47,14 @@ def start(server_url: str | None, daemonize: bool):
 
     config = FishermanConfig(**overrides)
 
+    click.echo("Fisherman daemon starting")
+    click.echo(f"  Server:   {config.server_url}")
+    if "localhost" in config.server_url or "127.0.0.1" in config.server_url:
+        click.echo("  (local server — set FISH_SERVER_URL for remote)")
+    click.echo(f"  Control:  http://127.0.0.1:{config.control_port}")
+    click.echo(f"  Interval: {config.capture_interval}s")
+    click.echo(f"  Frames:   {config.frames_dir}")
+
     from fisherman.daemon import FishermanDaemon
 
     daemon = FishermanDaemon(config)
@@ -104,17 +112,20 @@ def resume(port: int):
 
 
 @main.command()
-def stop():
+@click.option("--port", default=None, type=int, help="Control server port")
+def stop(port: int | None):
     """Stop the running daemon."""
-    # Send SIGTERM to the process listening on the control port
     import subprocess
 
+    if port is None:
+        port = int(os.environ.get("FISH_CONTROL_PORT", "7891"))
+
     result = subprocess.run(
-        ["lsof", "-ti", "tcp:7891"], capture_output=True, text=True
+        ["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True
     )
     pids = result.stdout.strip().split("\n")
     if not pids or pids == [""]:
-        click.echo("No fisherman daemon found.")
+        click.echo(f"No fisherman daemon found on port {port}.")
         return
     for pid in pids:
         try:

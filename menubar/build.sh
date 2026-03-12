@@ -26,4 +26,12 @@ codesign --force --sign "$SIGN_ID" "$APP"
 echo "Signed: ${IDENTITY:-ad-hoc}"
 
 echo "Assembled: $APP"
-echo "Run: open $APP"
+
+# Deploy to /Applications and relaunch
+pkill -f FishermanMenu 2>/dev/null || true
+sleep 1
+rm -rf /Applications/Fisherman.app
+cp -R "$APP" /Applications/Fisherman.app
+echo "Deployed: /Applications/Fisherman.app"
+open /Applications/Fisherman.app
+echo "Launched."

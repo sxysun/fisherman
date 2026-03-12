@@ -33,8 +33,12 @@ class FrameStore:
 
         # Save JPEG
         img_path = os.path.join(day_dir, f"{ts_ms}.jpg")
-        with open(img_path, "wb") as f:
-            f.write(frame.jpeg_data)
+        try:
+            with open(img_path, "wb") as f:
+                f.write(frame.jpeg_data)
+        except OSError:
+            log.warning("frame_save_failed", path=img_path, exc_info=True)
+            return
 
         # Save metadata
         meta = {
@@ -53,8 +57,11 @@ class FrameStore:
             meta["routing_signals"] = routing.to_wire().get("routing_signals", {})
 
         meta_path = os.path.join(day_dir, f"{ts_ms}.json")
-        with open(meta_path, "w") as f:
-            json.dump(meta, f)
+        try:
+            with open(meta_path, "w") as f:
+                json.dump(meta, f)
+        except OSError:
+            log.warning("meta_save_failed", path=meta_path, exc_info=True)
 
         self._cleanup()
 

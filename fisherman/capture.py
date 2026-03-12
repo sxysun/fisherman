@@ -34,7 +34,7 @@ class ScreenFrame:
 _use_screencapture: bool | None = None
 _last_permission_check: float = 0
 _RECHECK_INTERVAL = 60.0
-_RECHECK_MAX_INTERVAL = 1800.0  # 30 minutes max
+_RECHECK_MAX_INTERVAL = 60.0  # 1 minute max
 _recheck_interval = _RECHECK_INTERVAL
 _consecutive_denials = 0
 

@@ -68,7 +68,12 @@ echo "Building menu bar app..."
 cd "$FISH_DIR/menubar"
 swift build -c release
 
-# 8. Assemble /Applications/Fisherman.app
+# 8. Code-sign the binary
+IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')
+SIGN_ID="${IDENTITY:--}"
+codesign --force --sign "$SIGN_ID" .build/release/FishermanMenu
+
+# 9. Assemble /Applications/Fisherman.app
 echo "Installing to /Applications..."
 APP="/Applications/Fisherman.app"
 rm -rf "$APP"
@@ -76,8 +81,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/FishermanMenu "$APP/Contents/MacOS/FishermanMenu"
 cp Info.plist "$APP/Contents/Info.plist"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+codesign --force --sign "$SIGN_ID" "$APP"
+echo "Signed: ${IDENTITY:-ad-hoc}"
 
-# 9. Create logs directory
+# 10. Create logs directory
 mkdir -p "$FISH_DIR/logs"
 
 echo

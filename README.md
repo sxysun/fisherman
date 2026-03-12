@@ -42,13 +42,14 @@ uv run fisherman start
 
 ### Menu bar app
 
-Build and install the menu bar app:
+Build, code-sign, and install the menu bar app:
 
 ```bash
 cd menubar
-swift build -c release
-cp -r .build/release/FishermanMenu /Applications/Fisherman.app
+./build.sh
 ```
+
+This builds the release binary, signs it with your Apple Development certificate (or ad-hoc if none), deploys to `/Applications/Fisherman.app`, and launches it.
 
 ## CLI
 
@@ -120,6 +121,21 @@ curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/uninstall.sh 
 ```
 
 Or manually: delete `/Applications/Fisherman.app` and `~/.fisherman`.
+
+## Troubleshooting
+
+**Screen Recording permission**: First launch prompts for Screen Recording access. If denied, the daemon falls back to `/usr/sbin/screencapture` (slower but works). Grant permission in System Settings > Privacy & Security > Screen Recording, then restart the daemon — it re-checks every 60 seconds.
+
+**Port already in use**: If `fisherman start` fails to bind, check for a stale process:
+```bash
+lsof -ti tcp:7891 | xargs kill
+```
+
+**Server unreachable**: The daemon logs `server_unreachable` when it can't connect. Frames are still saved locally. Set `FISH_SERVER_URL` in `.env` to point to your server.
+
+**Daemon not starting**: Run `fisherman status` to check. If unresponsive, try `fisherman stop` then `fisherman start` again.
+
+**Screen Recording lost after rebuild**: The menu bar app must be code-signed. Always use `cd menubar && ./build.sh` to rebuild — it handles signing automatically.
 
 ## Requirements
 
