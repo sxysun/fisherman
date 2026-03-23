@@ -7,6 +7,10 @@ import structlog
 
 log = structlog.get_logger()
 
+_FRAME_BINARY_MAGIC = b"FISHBIN1"
+_FRAME_BINARY_HEADER_LEN = len(_FRAME_BINARY_MAGIC) + 4
+_FRAME_SOCKET_HEADER_LEN = len(_FRAME_BINARY_MAGIC) + 8
+
 VIEWER_HTML = """\
 <!DOCTYPE html>
 <html>
@@ -139,14 +143,27 @@ loadFrames();
 class ControlServer:
     """Tiny HTTP server for local pause/resume/status control and frame viewer."""
 
-    def __init__(self, port: int, get_status_fn, pause_fn, resume_fn, frame_store=None, frame_queue: asyncio.Queue | None = None):
+    def __init__(
+        self,
+        port: int,
+        get_status_fn,
+        pause_fn,
+        resume_fn,
+        frame_store=None,
+        frame_queue: asyncio.Queue | None = None,
+        frame_socket_path: str | None = None,
+    ):
         self._port = port
         self._get_status = get_status_fn
         self._pause = pause_fn
         self._resume = resume_fn
         self._frame_store = frame_store
         self._frame_queue = frame_queue
+        self._frame_socket_path = (
+            os.path.expanduser(frame_socket_path) if frame_socket_path else None
+        )
         self._server: asyncio.Server | None = None
+        self._frame_server: asyncio.AbstractServer | None = None
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(
@@ -154,10 +171,33 @@ class ControlServer:
         )
         log.info("control_server_started", port=self._port)
 
+        if self._frame_queue and self._frame_socket_path and hasattr(asyncio, "start_unix_server"):
+            sock_dir = os.path.dirname(self._frame_socket_path)
+            if sock_dir:
+                os.makedirs(sock_dir, exist_ok=True)
+            try:
+                if os.path.exists(self._frame_socket_path):
+                    os.unlink(self._frame_socket_path)
+            except OSError:
+                log.warning("frame_socket_cleanup_failed", path=self._frame_socket_path, exc_info=True)
+            self._frame_server = await asyncio.start_unix_server(
+                self._handle_frame_socket, path=self._frame_socket_path
+            )
+            log.info("frame_socket_server_started", path=self._frame_socket_path)
+
     async def stop(self) -> None:
         if self._server:
             self._server.close()
             await self._server.wait_closed()
+        if self._frame_server:
+            self._frame_server.close()
+            await self._frame_server.wait_closed()
+            self._frame_server = None
+        if self._frame_socket_path and os.path.exists(self._frame_socket_path):
+            try:
+                os.unlink(self._frame_socket_path)
+            except OSError:
+                log.warning("frame_socket_unlink_failed", path=self._frame_socket_path, exc_info=True)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -171,12 +211,15 @@ class ControlServer:
 
             # Drain headers, track content-length
             content_length = 0
+            content_type = ""
             while True:
                 line = await reader.readline()
                 if line in (b"\r\n", b"\n", b""):
                     break
                 if line.lower().startswith(b"content-length:"):
                     content_length = int(line.split(b":")[1].strip())
+                elif line.lower().startswith(b"content-type:"):
+                    content_type = line.split(b":", 1)[1].decode(errors="ignore").strip()
 
             # Read body for POST requests
             body = b""
@@ -194,7 +237,7 @@ class ControlServer:
                 self._resume()
                 self._send_json(writer, json.dumps({"paused": False}))
             elif method == "POST" and path == "/frame":
-                await self._handle_frame_post(body, writer)
+                await self._handle_frame_post(body, writer, content_type)
             elif method == "GET" and path == "/viewer":
                 self._send_html(writer, VIEWER_HTML)
             elif method == "GET" and path.startswith("/frames"):
@@ -252,37 +295,102 @@ class ControlServer:
 
         writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
 
-    async def _handle_frame_post(self, body: bytes, writer: asyncio.StreamWriter) -> None:
+    async def _handle_frame_post(
+        self,
+        body: bytes,
+        writer: asyncio.StreamWriter,
+        content_type: str = "",
+    ) -> None:
         if not self._frame_queue:
             self._send_json(writer, '{"error":"no frame queue"}')
             return
         try:
-            msg = json.loads(body)
-            jpeg_data = base64.b64decode(msg["jpeg_b64"])
-            from fisherman.capture import ScreenFrame
-
-            frame = ScreenFrame(
-                jpeg_data=jpeg_data,
-                width=msg["width"],
-                height=msg["height"],
-                app_name=msg.get("app_name") or None,
-                bundle_id=msg.get("bundle_id") or None,
-                window_title=msg.get("window_title") or None,
-                timestamp=msg["timestamp"],
-            )
-            dhash_distance = msg.get("dhash_distance", 64)
-            # Swift CaptureEngine may provide OCR text + urls
-            ocr_text = msg.get("ocr_text") or None
-            ocr_urls = msg.get("urls") or None
-            text_source = msg.get("text_source") or None
-            try:
-                self._frame_queue.put_nowait((frame, dhash_distance, ocr_text, ocr_urls, text_source))
-            except asyncio.QueueFull:
-                log.warning("frame_queue_full")
+            if content_type.lower().startswith("application/octet-stream"):
+                msg, jpeg_data = self._parse_binary_frame(body)
+            else:
+                msg = json.loads(body)
+                jpeg_data = base64.b64decode(msg["jpeg_b64"])
+            await self._enqueue_frame(msg, jpeg_data)
             self._send_json(writer, '{"ok":true}')
         except Exception as e:
             log.warning("frame_post_failed", error=str(e))
             self._send_json(writer, json.dumps({"error": str(e)}))
+
+    async def _handle_frame_socket(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            msg, jpeg_data = await self._read_frame_socket(reader)
+            await self._enqueue_frame(msg, jpeg_data)
+            writer.write(b"\x01")
+            await writer.drain()
+        except Exception as e:
+            log.warning("frame_socket_failed", error=str(e))
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def _read_frame_socket(
+        self, reader: asyncio.StreamReader
+    ) -> tuple[dict, bytes]:
+        header = await reader.readexactly(_FRAME_SOCKET_HEADER_LEN)
+        if not header.startswith(_FRAME_BINARY_MAGIC):
+            raise ValueError("invalid frame socket magic")
+
+        meta_start = len(_FRAME_BINARY_MAGIC)
+        meta_len = int.from_bytes(header[meta_start:meta_start + 4], "big")
+        jpeg_len = int.from_bytes(header[meta_start + 4:meta_start + 8], "big")
+        if meta_len <= 0 or jpeg_len <= 0:
+            raise ValueError("invalid frame socket lengths")
+
+        meta = json.loads(await reader.readexactly(meta_len))
+        jpeg_data = await reader.readexactly(jpeg_len)
+        return meta, jpeg_data
+
+    async def _enqueue_frame(self, msg: dict, jpeg_data: bytes) -> None:
+        if not self._frame_queue:
+            raise RuntimeError("no frame queue")
+        from fisherman.capture import ScreenFrame
+
+        frame = ScreenFrame(
+            jpeg_data=jpeg_data,
+            width=msg["width"],
+            height=msg["height"],
+            app_name=msg.get("app_name") or None,
+            bundle_id=msg.get("bundle_id") or None,
+            window_title=msg.get("window_title") or None,
+            timestamp=msg["timestamp"],
+        )
+        dhash_distance = msg.get("dhash_distance", 64)
+        ocr_text = msg.get("ocr_text") or None
+        ocr_urls = msg.get("urls") or None
+        text_source = msg.get("text_source") or None
+        try:
+            self._frame_queue.put_nowait(
+                (frame, dhash_distance, ocr_text, ocr_urls, text_source)
+            )
+        except asyncio.QueueFull:
+            log.warning("frame_queue_full")
+
+    def _parse_binary_frame(self, body: bytes) -> tuple[dict, bytes]:
+        if len(body) < _FRAME_BINARY_HEADER_LEN:
+            raise ValueError("binary frame body too small")
+        if not body.startswith(_FRAME_BINARY_MAGIC):
+            raise ValueError("invalid binary frame magic")
+
+        meta_len = int.from_bytes(body[len(_FRAME_BINARY_MAGIC):_FRAME_BINARY_HEADER_LEN], "big")
+        meta_start = _FRAME_BINARY_HEADER_LEN
+        meta_end = meta_start + meta_len
+        if meta_end > len(body):
+            raise ValueError("binary frame metadata length out of range")
+
+        meta = json.loads(body[meta_start:meta_end])
+        jpeg_data = body[meta_end:]
+        if not jpeg_data:
+            raise ValueError("binary frame missing jpeg payload")
+        return meta, jpeg_data
 
     def _send_json(self, writer: asyncio.StreamWriter, body: str) -> None:
         resp = (

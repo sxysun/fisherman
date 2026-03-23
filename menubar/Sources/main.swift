@@ -246,6 +246,13 @@ struct OCRResult {
     let urls: [String]
 }
 
+private let swiftOCRCustomWords = [
+    "localhost", "https", "OAuth", "GitHub", "README",
+    "webpack", "nginx", "pytest", "asyncio", "pydantic",
+    "PostgreSQL", "SQLite", "WebSocket", "stderr", "stdout",
+    "kubectl", "docker", "sudo", "chmod", "chown",
+]
+
 // MARK: - URL regex (internal so Accessibility.swift can use it)
 
 let urlPattern = try! NSRegularExpression(pattern: "https?://[^\\s<>\"')\\]]+", options: [])
@@ -274,12 +281,16 @@ class CaptureEngine {
     private let batteryCaptureInterval: TimeInterval
     private var currentInterval: TimeInterval
     private var consecutiveIdle: Int = 0
-    private var session: URLSession
-
-    // OCR pipelining: run Vision OCR on background queue
-    private let ocrQueue = DispatchQueue(label: "fish.ocr", qos: .userInitiated)
-    private var pendingOCR: (result: OCRResult, frameHash: UInt64)? = nil
-    private let pendingOCRLock = NSLock()
+    private let useSwiftVisionOCR: Bool
+    private let minTriggerSpacing: TimeInterval = 0.2
+    private let frontmostWindowCacheTTL: TimeInterval = 0.2
+    private var lastCaptureStartUptime: TimeInterval = 0
+    private var captureInFlight = false
+    private let captureGateLock = NSLock()
+    private let processingQueue = DispatchQueue(label: "fish.capture.process", qos: .userInitiated)
+    private let frameSocketClient: FrameSocketClient
+    private let streamManager: ScreenStreamManager
+    private var cachedFrontmostWindow: CachedFrontmostWindow?
 
     // Screenpipe-inspired optimizations
     private let ocrCache = OCRCache()
@@ -292,7 +303,15 @@ class CaptureEngine {
         self.jpegQuality = (Double(config["FISH_JPEG_QUALITY"] ?? "") ?? 60.0) / 100.0
         self.captureInterval = Double(config["FISH_CAPTURE_INTERVAL"] ?? "") ?? 2.0
         self.batteryCaptureInterval = Double(config["FISH_BATTERY_CAPTURE_INTERVAL"] ?? "") ?? 5.0
+        let swiftOCRSetting = (config["FISH_SWIFT_VISION_OCR"] ?? "").lowercased()
+        self.useSwiftVisionOCR = !(swiftOCRSetting == "false" || swiftOCRSetting == "0")
         self.currentInterval = self.captureInterval
+        let socketPath = config["FISH_FRAME_SOCKET_PATH"] ?? "~/.fisherman/frame.sock"
+        self.frameSocketClient = FrameSocketClient(path: socketPath)
+        self.streamManager = ScreenStreamManager(
+            frameInterval: CaptureEngine.preferredStreamFrameInterval(onBattery: CaptureEngine.isOnBattery()),
+            maxDimension: self.maxDimension
+        )
 
         let bundleStr = config["FISH_EXCLUDED_BUNDLES"] ?? ""
         if bundleStr.isEmpty {
@@ -312,11 +331,6 @@ class CaptureEngine {
                 bundleStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
             )
         }
-
-        let sessionConfig = URLSessionConfiguration.ephemeral
-        sessionConfig.timeoutIntervalForRequest = 5
-        sessionConfig.httpMaximumConnectionsPerHost = 2
-        self.session = URLSession(configuration: sessionConfig)
     }
 
     func start() {
@@ -340,6 +354,7 @@ class CaptureEngine {
         }
 
         currentInterval = CaptureEngine.isOnBattery() ? batteryCaptureInterval : captureInterval
+        streamManager.start()
         scheduleTimer()
     }
 
@@ -347,6 +362,7 @@ class CaptureEngine {
         timer?.invalidate()
         timer = nil
         activityMonitor.stop()
+        streamManager.stop()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
@@ -362,16 +378,55 @@ class CaptureEngine {
         updateInterval()
         scheduleTimer()
 
-        // 1. Capture screen via CG API
-        guard let cgImage = CGWindowListCreateImage(
-            CGRect.null,
-            .optionOnScreenOnly,
-            kCGNullWindowID,
-            .bestResolution
-        ) else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        captureGateLock.lock()
+        if captureInFlight || (now - lastCaptureStartUptime) < minTriggerSpacing {
+            captureGateLock.unlock()
+            return
+        }
+        captureInFlight = true
+        lastCaptureStartUptime = now
+        captureGateLock.unlock()
+        processingQueue.async { [weak self] in
+            self?.emitCurrentFrame()
+        }
+    }
 
-        // 2. Compute dhash
-        let hash = computeDHash(cgImage)
+    private func emitCurrentFrame() {
+        defer {
+            captureGateLock.lock()
+            captureInFlight = false
+            captureGateLock.unlock()
+        }
+
+        let frontApp = NSWorkspace.shared.frontmostApplication
+        let appName = frontApp?.localizedName
+        let bundleId = frontApp?.bundleIdentifier
+        let pid = frontApp?.processIdentifier
+
+        if let bid = bundleId, excludedBundles.contains(bid) {
+            return
+        }
+
+        let windowDetails = frontmostWindowDetails(pid: pid)
+        let windowTitle = windowDetails.title
+
+        if IncognitoDetector.isIncognito(bundleId: bundleId, windowTitle: windowTitle) {
+            return
+        }
+
+        let sourceImage: CGImage
+        if let latestFrame = streamManager.latestFrame(
+            preferredDisplayID: windowDetails.displayID,
+            waitUpTo: 0.35
+        ) {
+            sourceImage = latestFrame.image
+        } else {
+            guard let fallbackImage = CaptureEngine.captureFallbackImage() else { return }
+            sourceImage = fallbackImage
+        }
+
+        let hash = computeDHash(sourceImage)
         let distance = firstFrame ? 64 : hammingDistance(hash, lastHash)
         firstFrame = false
 
@@ -383,130 +438,170 @@ class CaptureEngine {
         lastHash = hash
         consecutiveIdle = 0
 
-        // 3. Get frontmost app info
-        let frontApp = NSWorkspace.shared.frontmostApplication
-        let appName = frontApp?.localizedName
-        let bundleId = frontApp?.bundleIdentifier
-        let pid = frontApp?.processIdentifier
+        let preparedImage = prepareImageForUpload(sourceImage)
+        guard let imageForOCR = preparedImage.image,
+              let jpegData = preparedImage.jpegData
+        else { return }
 
-        // Skip excluded bundles
-        if let bid = bundleId, excludedBundles.contains(bid) {
-            return
-        }
-
-        // Get window title via CGWindowListCopyWindowInfo
-        var windowTitle: String? = nil
-        if let pid {
-            if let windowList = CGWindowListCopyWindowInfo(
-                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-            ) as? [[CFString: Any]] {
-                for w in windowList {
-                    if let wPid = w[kCGWindowOwnerPID] as? Int32, wPid == pid {
-                        if let title = w[kCGWindowName] as? String, !title.isEmpty {
-                            windowTitle = title
-                            break
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. Skip incognito/private browsing windows
-        if IncognitoDetector.isIncognito(bundleId: bundleId, windowTitle: windowTitle) {
-            return
-        }
-
-        // 5. Resize + JPEG encode
-        let origW = CGFloat(cgImage.width)
-        let origH = CGFloat(cgImage.height)
-        let scale = min(CGFloat(maxDimension) / max(origW, origH), 1.0)
-        let newW = Int(origW * scale)
-        let newH = Int(origH * scale)
-
-        let jpegData: Data
-        let imageForOCR: CGImage
-        if scale < 1.0 {
-            guard let ctx = CGContext(
-                data: nil, width: newW, height: newH,
-                bitsPerComponent: 8, bytesPerRow: 0,
-                space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
-            ) else { return }
-            ctx.interpolationQuality = .high
-            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: newW, height: newH))
-            guard let resized = ctx.makeImage() else { return }
-            imageForOCR = resized
-
-            let rep = NSBitmapImageRep(cgImage: resized)
-            guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: jpegQuality])
-            else { return }
-            jpegData = data
-        } else {
-            imageForOCR = cgImage
-            let rep = NSBitmapImageRep(cgImage: cgImage)
-            guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: jpegQuality])
-            else { return }
-            jpegData = data
-        }
-
-        // 6. Text extraction — prioritized pipeline:
-        //    a) OCR cache hit (by dhash) → no work needed
-        //    b) Accessibility tree → instant text, no Vision OCR
-        //    c) Pipelined Vision OCR from previous frame
-        //    d) None → Python daemon handles OCR
         var textResult: OCRResult? = nil
         var textSource: String? = nil
-        var needsVisionOCR = true
 
-        // (a) Check OCR cache
         if let cached = ocrCache.get(hash) {
             textResult = cached
             textSource = "cache"
-            needsVisionOCR = false
         }
 
-        // (b) Try accessibility tree (instant, ~1ms)
         if textResult == nil, let pid,
            let axResult = AccessibilityTextExtractor.extractText(pid: pid, bundleId: bundleId)
         {
             textResult = axResult
             textSource = "accessibility"
             ocrCache.set(hash, result: axResult)
-            needsVisionOCR = false
         }
 
-        // (c) Collect pipelined Vision OCR from previous frame
-        if textResult == nil {
-            pendingOCRLock.lock()
-            if let pending = pendingOCR {
-                textResult = pending.result
+        if textResult == nil, useSwiftVisionOCR {
+            let swiftOCR = Self.runOCR(on: imageForOCR)
+            if !swiftOCR.text.isEmpty {
+                textResult = swiftOCR
                 textSource = "ocr"
-                ocrCache.set(pending.frameHash, result: pending.result)
+                ocrCache.set(hash, result: swiftOCR)
             }
-            pendingOCR = nil
-            pendingOCRLock.unlock()
-            // Still need OCR for THIS frame even if we got prev frame's result
-            needsVisionOCR = true
         }
 
-        // 7. POST to Python daemon
         postFrame(
-            jpeg: jpegData, width: newW, height: newH,
-            appName: appName, bundleId: bundleId, windowTitle: windowTitle,
-            timestamp: Date().timeIntervalSince1970, dhashDistance: distance,
-            ocrResult: textResult, textSource: textSource
+            jpeg: jpegData,
+            width: preparedImage.width,
+            height: preparedImage.height,
+            appName: appName,
+            bundleId: bundleId,
+            windowTitle: windowTitle,
+            timestamp: Date().timeIntervalSince1970,
+            dhashDistance: distance,
+            ocrResult: textResult,
+            textSource: textSource
         )
+    }
 
-        // 8. Start Vision OCR for this frame on background queue if needed
-        if needsVisionOCR {
-            let frameHash = hash
-            ocrQueue.async { [weak self] in
-                let result = Self.runOCR(on: imageForOCR)
-                self?.pendingOCRLock.lock()
-                self?.pendingOCR = (result: result, frameHash: frameHash)
-                self?.pendingOCRLock.unlock()
+    private struct PreparedFrame {
+        let image: CGImage?
+        let jpegData: Data?
+        let width: Int
+        let height: Int
+    }
+
+    private func prepareImageForUpload(_ image: CGImage) -> PreparedFrame {
+        let origW = CGFloat(image.width)
+        let origH = CGFloat(image.height)
+        let scale = min(CGFloat(maxDimension) / max(origW, origH), 1.0)
+        let newW = max(Int(origW * scale), 1)
+        let newH = max(Int(origH * scale), 1)
+
+        if scale < 1.0 {
+            guard let ctx = CGContext(
+                data: nil, width: newW, height: newH,
+                bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else {
+                return PreparedFrame(image: nil, jpegData: nil, width: newW, height: newH)
+            }
+            ctx.interpolationQuality = .medium
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: newW, height: newH))
+            guard let resized = ctx.makeImage() else {
+                return PreparedFrame(image: nil, jpegData: nil, width: newW, height: newH)
+            }
+            let rep = NSBitmapImageRep(cgImage: resized)
+            let jpegData = rep.representation(
+                using: .jpeg,
+                properties: [.compressionFactor: jpegQuality]
+            )
+            return PreparedFrame(image: resized, jpegData: jpegData, width: newW, height: newH)
+        }
+
+        let rep = NSBitmapImageRep(cgImage: image)
+        let jpegData = rep.representation(
+            using: .jpeg,
+            properties: [.compressionFactor: jpegQuality]
+        )
+        return PreparedFrame(image: image, jpegData: jpegData, width: image.width, height: image.height)
+    }
+
+    private struct FrontmostWindowDetails {
+        let title: String?
+        let displayID: CGDirectDisplayID?
+    }
+
+    private struct CachedFrontmostWindow {
+        let pid: pid_t
+        let details: FrontmostWindowDetails
+        let timestamp: TimeInterval
+    }
+
+    private func frontmostWindowDetails(pid: pid_t?) -> FrontmostWindowDetails {
+        guard let pid else {
+            cachedFrontmostWindow = nil
+            return FrontmostWindowDetails(title: nil, displayID: nil)
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cached = cachedFrontmostWindow,
+           cached.pid == pid,
+           (now - cached.timestamp) <= frontmostWindowCacheTTL
+        {
+            return cached.details
+        }
+
+        guard let windowList = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[CFString: Any]] else {
+            return FrontmostWindowDetails(title: nil, displayID: nil)
+        }
+
+        var fallback = FrontmostWindowDetails(title: nil, displayID: nil)
+        for window in windowList {
+            guard let ownerPID = window[kCGWindowOwnerPID] as? Int32, ownerPID == pid else {
+                continue
+            }
+
+            var displayID: CGDirectDisplayID? = nil
+            if let boundsDict = window[kCGWindowBounds] as? CFDictionary,
+               let rect = CGRect(dictionaryRepresentation: boundsDict)
+            {
+                displayID = streamManager.displayID(for: rect)
+            }
+
+            let title = (window[kCGWindowName] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let title, !title.isEmpty {
+                let details = FrontmostWindowDetails(title: title, displayID: displayID)
+                cachedFrontmostWindow = CachedFrontmostWindow(
+                    pid: pid,
+                    details: details,
+                    timestamp: now
+                )
+                return details
+            }
+
+            if fallback.displayID == nil {
+                fallback = FrontmostWindowDetails(title: nil, displayID: displayID)
             }
         }
+
+        cachedFrontmostWindow = CachedFrontmostWindow(
+            pid: pid,
+            details: fallback,
+            timestamp: now
+        )
+        return fallback
+    }
+
+    private static func captureFallbackImage() -> CGImage? {
+        CGWindowListCreateImage(
+            CGRect.null,
+            .optionOnScreenOnly,
+            kCGNullWindowID,
+            []
+        )
     }
 
     // MARK: - Vision OCR
@@ -517,6 +612,10 @@ class CaptureEngine {
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
         request.minimumTextHeight = 0.01
+        request.customWords = swiftOCRCustomWords
+        if #available(macOS 14.0, *) {
+            request.revision = VNRecognizeTextRequestRevision3
+        }
 
         do {
             try handler.perform([request])
@@ -550,7 +649,7 @@ class CaptureEngine {
             space: CGColorSpaceCreateDeviceGray(),
             bitmapInfo: CGImageAlphaInfo.none.rawValue
         ) else { return 0 }
-        ctx.interpolationQuality = .high
+        ctx.interpolationQuality = .low
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: 9, height: 8))
         guard let data = ctx.data else { return 0 }
         let pixels = data.bindMemory(to: UInt8.self, capacity: 72)
@@ -601,6 +700,9 @@ class CaptureEngine {
         }
 
         currentInterval = interval
+        streamManager.updateFrameInterval(
+            CaptureEngine.preferredStreamFrameInterval(onBattery: CaptureEngine.isOnBattery())
+        )
     }
 
     // MARK: - Battery
@@ -616,6 +718,10 @@ class CaptureEngine {
             == kIOPSBatteryPowerValue as String
     }
 
+    static func preferredStreamFrameInterval(onBattery: Bool) -> TimeInterval {
+        onBattery ? 1.0 : 0.5
+    }
+
     // MARK: - HTTP POST
 
     private func postFrame(
@@ -624,13 +730,7 @@ class CaptureEngine {
         timestamp: Double, dhashDistance: Int,
         ocrResult: OCRResult? = nil, textSource: String? = nil
     ) {
-        guard let url = URL(string: "http://127.0.0.1:\(controlPort)/frame") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
         var body: [String: Any] = [
-            "jpeg_b64": jpeg.base64EncodedString(),
             "width": width,
             "height": height,
             "app_name": appName ?? "",
@@ -646,8 +746,8 @@ class CaptureEngine {
         if let source = textSource {
             body["text_source"] = source
         }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        session.dataTask(with: request).resume()
+        guard let metadata = try? JSONSerialization.data(withJSONObject: body) else { return }
+        _ = frameSocketClient.sendFrame(metadata: metadata, jpeg: jpeg)
     }
 }
 

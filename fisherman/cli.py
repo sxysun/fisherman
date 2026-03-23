@@ -52,8 +52,9 @@ def start(server_url: str | None, daemonize: bool):
     if "localhost" in config.server_url or "127.0.0.1" in config.server_url:
         click.echo("  (local server — set FISH_SERVER_URL for remote)")
     click.echo(f"  Control:  http://127.0.0.1:{config.control_port}")
+    click.echo(f"  Frames:   unix://{os.path.expanduser(config.frame_socket_path)}")
     click.echo(f"  Interval: {config.capture_interval}s")
-    click.echo(f"  Frames:   {config.frames_dir}")
+    click.echo(f"  Store:    {config.frames_dir}")
 
     from fisherman.daemon import FishermanDaemon
 
