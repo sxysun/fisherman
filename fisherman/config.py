@@ -56,3 +56,4 @@ class FishermanConfig(BaseSettings):
 
     # Control
     control_port: int = 7891
+    frame_socket_path: str = "~/.fisherman/frame.sock"

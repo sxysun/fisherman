@@ -49,6 +49,7 @@ class FishermanDaemon:
             resume_fn=self._privacy.resume,
             frame_store=self._frame_store,
             frame_queue=self._frame_queue if _SWIFT_CAPTURE else None,
+            frame_socket_path=self._config.frame_socket_path if _SWIFT_CAPTURE else None,
         )
         await control.start()
 

@@ -1,9 +1,10 @@
 """Local frame storage for viewing captured data without a server."""
 
+from collections import deque
 import datetime
 import json
 import os
-import time
+import threading
 
 import structlog
 
@@ -17,7 +18,10 @@ class FrameStore:
     def __init__(self, frames_dir: str, max_frames: int = 1000):
         self._base = os.path.expanduser(frames_dir)
         self._max = max_frames
+        self._lock = threading.Lock()
         os.makedirs(self._base, exist_ok=True)
+        self._entries: deque[tuple[str, str]] = deque()
+        self._index_existing()
 
     def save(
         self,
@@ -63,7 +67,9 @@ class FrameStore:
         except OSError:
             log.warning("meta_save_failed", path=meta_path, exc_info=True)
 
-        self._cleanup()
+        with self._lock:
+            self._entries.append((day_dir, str(ts_ms)))
+            self._cleanup_locked()
 
     def update_scene(self, ts_ms: int, description: str) -> None:
         """Patch the JSON sidecar for a frame with a scene_description."""
@@ -129,37 +135,43 @@ class FrameStore:
                     return p
         return None
 
-    def _cleanup(self) -> None:
-        """Remove oldest frames if over max."""
-        all_files: list[tuple[str, str]] = []  # (day, basename_no_ext)
+    def _index_existing(self) -> None:
+        """Build an in-memory ordered index once, so cleanup stays incremental."""
+        existing: list[tuple[str, str]] = []
         if not os.path.isdir(self._base):
             return
+
         for day in sorted(os.listdir(self._base)):
             day_dir = os.path.join(self._base, day)
             if not os.path.isdir(day_dir):
                 continue
-            stamps = sorted(set(
-                os.path.splitext(f)[0]
-                for f in os.listdir(day_dir)
-                if f.endswith(".jpg")
-            ))
-            for s in stamps:
-                all_files.append((day_dir, s))
+            stems = sorted(
+                {
+                    os.path.splitext(name)[0]
+                    for name in os.listdir(day_dir)
+                    if name.endswith(".jpg")
+                },
+                key=lambda value: int(value) if value.isdigit() else value,
+            )
+            for stem in stems:
+                existing.append((day_dir, stem))
 
-        if len(all_files) <= self._max:
-            return
+        with self._lock:
+            self._entries = deque(existing)
+            self._cleanup_locked()
 
-        to_remove = all_files[: len(all_files) - self._max]
-        for day_dir, stem in to_remove:
+    def _cleanup_locked(self) -> None:
+        """Remove oldest indexed frames if over max."""
+        while len(self._entries) > self._max:
+            day_dir, stem = self._entries.popleft()
             for ext in (".jpg", ".json"):
                 p = os.path.join(day_dir, stem + ext)
                 try:
                     os.remove(p)
                 except OSError:
                     pass
-        # Remove empty day dirs
-        if os.path.isdir(self._base):
-            for day in os.listdir(self._base):
-                day_dir = os.path.join(self._base, day)
+            try:
                 if os.path.isdir(day_dir) and not os.listdir(day_dir):
                     os.rmdir(day_dir)
+            except OSError:
+                pass

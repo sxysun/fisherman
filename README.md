@@ -75,11 +75,13 @@ All config is via environment variables (or `.env` file), prefixed with `FISH_`:
 | `FISH_DIFF_THRESHOLD` | `6` | dHash distance below which frames are skipped |
 | `FISH_JPEG_QUALITY` | `60` | JPEG compression quality (0-100) |
 | `FISH_MAX_DIMENSION` | `1920` | Max width/height for captured frames |
+| `FISH_SWIFT_VISION_OCR` | `true` | Prefer Swift-side Vision OCR on macOS; Python OCR remains the fallback when Swift returns no usable text |
 | `FISH_EXCLUDED_BUNDLES` | `[]` | Bundle IDs to never capture |
 | `FISH_EXCLUDED_APPS` | `[]` | App names to never capture |
 | `FISH_FRAMES_DIR` | `~/.fisherman/frames` | Local frame storage directory |
 | `FISH_LOCAL_FRAMES_MAX` | `1000` | Max locally stored frames (oldest pruned) |
 | `FISH_CONTROL_PORT` | `7891` | Local HTTP port for CLI control |
+| `FISH_FRAME_SOCKET_PATH` | `~/.fisherman/frame.sock` | Local Unix domain socket used by the menu bar app to push frame payloads into the daemon |
 
 ## Local Frame Viewer
 
