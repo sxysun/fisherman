@@ -1,8 +1,14 @@
 import re
+import sys
 
-import objc
-import Quartz
-import Vision
+if sys.platform == "darwin":
+    import objc
+    import Quartz
+    import Vision
+else:
+    objc = None
+    Quartz = None
+    Vision = None
 
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
@@ -21,6 +27,11 @@ def ocr_fast(jpeg_data: bytes) -> tuple[str, list[str]]:
     Run Apple Vision OCR on JPEG data. Synchronous.
     Returns (full_text, extracted_urls).
     """
+    if sys.platform != "darwin":
+        raise RuntimeError(
+            "native OCR is only supported on macOS; "
+            "use FISH_CAPTURE_BACKEND=screenpipe or provide OCR text upstream on Windows"
+        )
     with objc.autorelease_pool():
         # Create CGImage from JPEG bytes
         data_provider = Quartz.CGDataProviderCreateWithCFData(jpeg_data)

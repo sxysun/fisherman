@@ -9,11 +9,15 @@ class FishermanConfig(BaseSettings):
     auth_token: str = ""
 
     # Capture
+    capture_backend: str = "native"
     capture_interval: float = 2.0
     battery_capture_interval: float = 5.0  # slower on battery
     diff_threshold: int = 6
     jpeg_quality: int = 60
     max_dimension: int = 1920
+    screenpipe_url: str = "http://127.0.0.1:3030"
+    screenpipe_poll_interval: float = 1.0
+    screenpipe_search_limit: int = 50
 
     # Privacy — password managers, auth apps, keychains excluded by default
     excluded_bundles: list[str] = [

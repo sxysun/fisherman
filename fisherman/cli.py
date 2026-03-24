@@ -52,7 +52,12 @@ def start(server_url: str | None, daemonize: bool):
     if "localhost" in config.server_url or "127.0.0.1" in config.server_url:
         click.echo("  (local server — set FISH_SERVER_URL for remote)")
     click.echo(f"  Control:  http://127.0.0.1:{config.control_port}")
-    click.echo(f"  Interval: {config.capture_interval}s")
+    click.echo(f"  Capture:  {config.capture_backend}")
+    if (config.capture_backend or "").strip().lower() == "screenpipe":
+        click.echo(f"  Source:   {config.screenpipe_url}")
+        click.echo(f"  Poll:     {config.screenpipe_poll_interval}s")
+    else:
+        click.echo(f"  Interval: {config.capture_interval}s")
     click.echo(f"  Frames:   {config.frames_dir}")
 
     from fisherman.daemon import FishermanDaemon

@@ -27,6 +27,7 @@ class Streamer:
         self._auth_token = auth_token
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_MAX_QUEUE)
+        self._connected_event = asyncio.Event()
         self._connected = False
         self._ever_connected = False
         self._frames_sent = 0
@@ -57,6 +58,7 @@ class Streamer:
         if self._ws:
             await self._ws.close()
         self._connected = False
+        self._connected_event.clear()
 
     async def send(
         self,
@@ -105,13 +107,17 @@ class Streamer:
     async def _send_loop(self) -> None:
         while True:
             msg = await self._queue.get()
-            if self._ws and self._connected:
+            while True:
+                await self._connected_event.wait()
                 try:
+                    assert self._ws is not None
                     await self._ws.send(msg)
                     self._frames_sent += 1
+                    break
                 except Exception:
                     log.warning("send_failed", exc_info=True)
                     self._connected = False
+                    self._connected_event.clear()
 
     async def _reconnect_loop(self) -> None:
         backoff = 1.0
@@ -129,6 +135,7 @@ class Streamer:
                     proxy=None,
                 )
                 self._connected = True
+                self._connected_event.set()
                 self._ever_connected = True
                 backoff = 1.0
                 log.info("websocket_connected", url=self._url)
@@ -141,6 +148,7 @@ class Streamer:
                 raise
             except Exception:
                 self._connected = False
+                self._connected_event.clear()
                 if not self._ever_connected:
                     log.error(
                         "server_unreachable",

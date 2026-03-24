@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 .env
+server/.env
 *.egg-info/
 dist/
 build/
@@ -10,4 +11,5 @@ server/uv.lock
 menubar/.build/
 menubar/icon.iconset/
 *.app
+.run/
 .DS_Store
