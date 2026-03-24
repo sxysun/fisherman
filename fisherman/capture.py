@@ -1,20 +1,32 @@
 from dataclasses import dataclass
 import os
 import subprocess
+import sys
 import tempfile
 import time
 
-import objc
-import Quartz
 import structlog
-from AppKit import (
-    NSBitmapImageRep,
-    NSImage,
-    NSImageCompressionFactor,
-    NSJPEGFileType,
-    NSWorkspace,
-)
-from Foundation import NSSize
+
+if sys.platform == "darwin":
+    import objc
+    import Quartz
+    from AppKit import (
+        NSBitmapImageRep,
+        NSImage,
+        NSImageCompressionFactor,
+        NSJPEGFileType,
+        NSWorkspace,
+    )
+    from Foundation import NSSize
+else:
+    objc = None
+    Quartz = None
+    NSBitmapImageRep = None
+    NSImage = None
+    NSImageCompressionFactor = None
+    NSJPEGFileType = None
+    NSWorkspace = None
+    NSSize = None
 
 log = structlog.get_logger()
 
@@ -44,12 +56,21 @@ _consecutive_denials = 0
 _FORCE_SCREENCAPTURE = os.environ.get("FISHERMAN_FORCE_SCREENCAPTURE", "") == "1"
 
 
+def _require_macos() -> None:
+    if sys.platform != "darwin":
+        raise RuntimeError(
+            "native screen capture is only supported on macOS; "
+            "use FISH_CAPTURE_BACKEND=screenpipe on Windows"
+        )
+
+
 def _can_see_user_windows() -> bool:
     """Check if CG API has Screen Recording access to see other apps' windows.
 
     Without Screen Recording, CGWindowListCopyWindowInfo still returns window
     entries but kCGWindowName is hidden for other processes' windows.
     """
+    _require_macos()
     window_list = Quartz.CGWindowListCopyWindowInfo(
         Quartz.kCGWindowListOptionOnScreenOnly
         | Quartz.kCGWindowListExcludeDesktopElements,
@@ -72,6 +93,7 @@ def _can_see_user_windows() -> bool:
 
 def _capture_cg() -> tuple:
     """Capture via CGWindowListCreateImage. Fast, ~5ms."""
+    _require_macos()
     cg_image = Quartz.CGWindowListCreateImage(
         Quartz.CGRectNull,
         Quartz.kCGWindowListOptionOnScreenOnly,
@@ -91,6 +113,7 @@ def _capture_screencapture() -> tuple:
     screencapture is a system binary with special entitlements that may
     bypass TCC restrictions the CG API cannot.
     """
+    _require_macos()
     fd, tmppath = tempfile.mkstemp(suffix=".jpg")
     os.close(fd)
     try:
@@ -130,6 +153,7 @@ def _get_frontmost_info(skip_window_title: bool = False) -> tuple[str | None, st
 
     When skip_window_title=True, only uses NSWorkspace (no TCC-gated CG calls).
     """
+    _require_macos()
     ws = NSWorkspace.sharedWorkspace()
     app = ws.frontmostApplication()
     app_name = app.localizedName() if app else None
@@ -155,6 +179,7 @@ def _get_frontmost_info(skip_window_title: bool = False) -> tuple[str | None, st
 
 def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
     """Capture full screen as JPEG + frontmost app metadata. Synchronous."""
+    _require_macos()
     global _use_screencapture, _last_permission_check, _recheck_interval, _consecutive_denials
     ts = time.time()
 

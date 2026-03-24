@@ -71,15 +71,39 @@ All config is via environment variables (or `.env` file), prefixed with `FISH_`:
 |---|---|---|
 | `FISH_SERVER_URL` | `ws://localhost:9999/ingest` | WebSocket server URL |
 | `FISH_AUTH_TOKEN` | (empty) | Bearer token for server auth |
+| `FISH_CAPTURE_BACKEND` | `native` | `native` uses Fisherman capture, `screenpipe` reads frames from a local Screenpipe service |
 | `FISH_CAPTURE_INTERVAL` | `1.0` | Seconds between captures |
 | `FISH_DIFF_THRESHOLD` | `6` | dHash distance below which frames are skipped |
 | `FISH_JPEG_QUALITY` | `60` | JPEG compression quality (0-100) |
 | `FISH_MAX_DIMENSION` | `1920` | Max width/height for captured frames |
+| `FISH_SCREENPIPE_URL` | `http://127.0.0.1:3030` | Base URL for the local Screenpipe HTTP service |
+| `FISH_SCREENPIPE_POLL_INTERVAL` | `1.0` | Seconds between polling Screenpipe for new frames |
+| `FISH_SCREENPIPE_SEARCH_LIMIT` | `50` | Number of OCR records scanned per Screenpipe poll |
 | `FISH_EXCLUDED_BUNDLES` | `[]` | Bundle IDs to never capture |
 | `FISH_EXCLUDED_APPS` | `[]` | App names to never capture |
 | `FISH_FRAMES_DIR` | `~/.fisherman/frames` | Local frame storage directory |
 | `FISH_LOCAL_FRAMES_MAX` | `1000` | Max locally stored frames (oldest pruned) |
 | `FISH_CONTROL_PORT` | `7891` | Local HTTP port for CLI control |
+
+### Using Screenpipe For Capture
+
+To keep Fisherman's server pipeline but source screenshots from Screenpipe, set:
+
+```bash
+FISH_CAPTURE_BACKEND=screenpipe
+FISH_SCREENPIPE_URL=http://127.0.0.1:3030
+```
+
+In this mode Fisherman polls Screenpipe's local HTTP API for new OCR-backed frames, downloads the screenshot from Screenpipe, and still uses Fisherman's privacy filter, routing, local frame viewer, and WebSocket streamer.
+
+### Current Stack Bootstrap
+
+For the current Screenpipe-backed integration:
+
+- Startup script: [`scripts/start_current_stack.py`](scripts/start_current_stack.py)
+- Architecture diagram: [`docs/current-architecture.md`](docs/current-architecture.md)
+
+The script prepares `.env` files, aligns the shared auth token, validates that the local Screenpipe HTTP service is already running, and then starts the Fisherman ingest server plus the Fisherman daemon. It works on both Windows and macOS.
 
 ## Local Frame Viewer
 
@@ -91,24 +115,39 @@ Captured frames are saved locally at `~/.fisherman/frames/` (organized by date).
 
 ## Architecture
 
-```
-macOS Screen
-    |
-    v
-[Screen Capture] --> [Diff Filter] --> [OCR] --> [Privacy Filter] --> [WebSocket] --> Server
-    CG API / CLI         dHash          Vision      exclude apps        streamer
-                                                                           |
-                                                                    [Frame Store]
-                                                                     local viewer
+```mermaid
+flowchart LR
+    subgraph CaptureSources["Capture Sources"]
+        Native["Native Capture Backend
+CG API / screencapture / Vision OCR"]
+        Screenpipe["Screenpipe Capture Backend
+Local Screenpipe HTTP API"]
+    end
+
+    Native --> Normalize["Normalize Into Fisherman Frame"]
+    Screenpipe --> Normalize
+
+    Normalize --> Privacy["Privacy Filter
+Excluded apps / bundles"]
+    Privacy --> Diff["Diff Filter
+dHash change detection"]
+    Diff --> Route["Tier Router
+Text-heavy vs visual"]
+    Route --> Stream["WebSocket Streamer
+Send to Fisherman server"]
+    Route --> Store["Local Frame Store
+Built-in viewer"]
+    Store --> Viewer["Viewer UI"]
+    Stream --> Server["Fisherman Server"]
 ```
 
-- **Capture**: `CGWindowListCreateImage` grabs the screen, with automatic fallback to `screencapture` CLI when Screen Recording permission isn't available to the CG API (e.g. when launched from the menu bar app)
-- **Diff**: perceptual hash (dHash) skips frames that haven't changed
-- **OCR**: Apple Vision framework (accurate mode with language correction) extracts text
-- **Privacy**: filters out excluded apps/bundles
-- **Routing**: classifies frames into tiers (text-heavy vs visual) for downstream VLM processing
-- **Streamer**: persistent WebSocket with auto-reconnect and backpressure
-- **Frame Store**: saves frames + metadata locally for the built-in viewer
+- **Capture sources**: Fisherman can capture directly with its native backend, or read frames from a local Screenpipe service when `FISH_CAPTURE_BACKEND=screenpipe`.
+- **Normalize**: both capture modes are converted into the same internal `ScreenFrame` shape before downstream processing.
+- **Privacy filter**: removes frames from excluded apps or bundles before they are routed.
+- **Diff filter**: uses perceptual hashing (dHash) to skip visually redundant frames.
+- **Tier router**: classifies frames into text-heavy vs visual paths for downstream processing hints.
+- **Streamer**: keeps a persistent WebSocket connection and streams accepted frames to the Fisherman server.
+- **Frame store**: saves frames and metadata locally for the built-in viewer, independent of the upstream server.
 
 ## Server
 
