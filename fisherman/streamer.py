@@ -11,7 +11,7 @@ from fisherman.router import RoutingDecision
 
 log = structlog.get_logger()
 
-_MAX_QUEUE = 8
+_MAX_QUEUE = 32
 _MAX_BACKOFF = 30.0
 
 
@@ -110,10 +110,17 @@ class Streamer:
             while True:
                 await self._connected_event.wait()
                 try:
-                    assert self._ws is not None
-                    await self._ws.send(msg)
+                    ws = self._ws
+                    if ws is None:
+                        self._connected_event.clear()
+                        continue
+                    await asyncio.wait_for(ws.send(msg), timeout=30)
                     self._frames_sent += 1
                     break
+                except asyncio.TimeoutError:
+                    log.warning("send_timeout")
+                    self._connected = False
+                    self._connected_event.clear()
                 except Exception:
                     log.warning("send_failed", exc_info=True)
                     self._connected = False
@@ -129,8 +136,10 @@ class Streamer:
                 self._ws = await websockets.connect(
                     self._url,
                     additional_headers=headers,
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=30,
+                    ping_timeout=30,
+                    close_timeout=5,
+                    open_timeout=10,
                     max_size=None,
                     proxy=None,
                 )

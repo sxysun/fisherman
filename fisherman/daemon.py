@@ -114,9 +114,9 @@ class FishermanDaemon:
         while self._running:
             interval = self._get_interval()
             # Adaptive backoff: if screen hasn't changed for a while, slow down
-            if consecutive_idle >= 10:
+            if consecutive_idle >= 30:
                 interval = min(interval * 2, 30.0)
-            elif consecutive_idle >= 5:
+            elif consecutive_idle >= 15:
                 interval = min(interval * 1.5, 15.0)
 
             t0 = asyncio.get_event_loop().time()
