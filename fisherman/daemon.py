@@ -13,6 +13,7 @@ from fisherman.ocr import ocr_fast
 from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
 from fisherman.router import TierRouter
+from fisherman.screenpipe_capture import ScreenpipeCaptureClient, ScreenpipeCaptureError
 from fisherman.streamer import Streamer
 
 log = structlog.get_logger()
@@ -23,6 +24,7 @@ _SWIFT_CAPTURE = os.environ.get("FISHERMAN_SWIFT_CAPTURE", "") == "1"
 class FishermanDaemon:
     def __init__(self, config: FishermanConfig):
         self._config = config
+        self._capture_backend = (config.capture_backend or "native").strip().lower()
         self._running = False
         self._capture_ok = False
         self._differ = FrameDiffer(threshold=config.diff_threshold)
@@ -30,6 +32,11 @@ class FishermanDaemon:
         self._router = TierRouter(config)
         self._streamer = Streamer(config.server_url, config.auth_token)
         self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
+        self._screenpipe = ScreenpipeCaptureClient(
+            config.screenpipe_url,
+            search_limit=config.screenpipe_search_limit,
+            timeout=max(config.screenpipe_poll_interval, 5.0),
+        )
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
         self._consecutive_capture_failures = 0
@@ -61,6 +68,7 @@ class FishermanDaemon:
             interval=self._config.capture_interval,
             control_port=self._config.control_port,
             swift_capture=_SWIFT_CAPTURE,
+            capture_backend=self._capture_backend,
         )
 
         # Start VLM loop if enabled
@@ -72,6 +80,8 @@ class FishermanDaemon:
         try:
             if _SWIFT_CAPTURE:
                 await self._process_loop()
+            elif self._capture_backend == "screenpipe":
+                await self._screenpipe_capture_loop()
             else:
                 await self._capture_loop()
         except asyncio.CancelledError:
@@ -163,21 +173,58 @@ class FishermanDaemon:
                 log.warning("ocr_failed", exc_info=True)
                 ocr_text, urls = "", []
 
-            # Route frame to appropriate VLM tier
-            routing = self._router.route(
-                diff.distance, ocr_text, urls, frame.bundle_id
-            )
+            await self._publish_frame(frame, diff.distance, ocr_text, urls)
 
-            # Push to server
-            await self._streamer.send(frame, ocr_text, urls, routing=routing)
+            elapsed = asyncio.get_event_loop().time() - t0
+            await asyncio.sleep(max(0, interval - elapsed))
 
-            # Save locally for viewer
-            ts_ms = int(frame.timestamp * 1000)
-            await loop.run_in_executor(
-                self._pool, self._frame_store.save, frame, ocr_text, urls, routing
-            )
-            self._latest_frame = (ts_ms, frame.jpeg_data, routing.tier_hint)
-            self._frames_sent += 1
+    async def _screenpipe_capture_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        interval = max(self._config.screenpipe_poll_interval, 0.25)
+
+        while self._running:
+            t0 = asyncio.get_event_loop().time()
+
+            try:
+                payloads = await loop.run_in_executor(self._pool, self._screenpipe.poll)
+                self._capture_ok = True
+                self._consecutive_capture_failures = 0
+            except ScreenpipeCaptureError as e:
+                self._capture_ok = False
+                self._consecutive_capture_failures += 1
+                log.warning("screenpipe_capture_failed", error=str(e))
+                backoff = min(
+                    interval * (2 ** (self._consecutive_capture_failures - 1)),
+                    30.0,
+                )
+                await asyncio.sleep(backoff)
+                continue
+            except Exception:
+                self._capture_ok = False
+                self._consecutive_capture_failures += 1
+                log.warning("screenpipe_capture_failed", exc_info=True)
+                backoff = min(
+                    interval * (2 ** (self._consecutive_capture_failures - 1)),
+                    30.0,
+                )
+                await asyncio.sleep(backoff)
+                continue
+
+            for payload in payloads:
+                frame = payload.frame
+                if self._privacy.should_skip(frame.bundle_id, frame.app_name):
+                    continue
+
+                diff = self._differ.diff_frame(frame.jpeg_data)
+                if not diff.is_new:
+                    continue
+
+                await self._publish_frame(
+                    frame,
+                    diff.distance,
+                    payload.ocr_text,
+                    payload.urls,
+                )
 
             elapsed = asyncio.get_event_loop().time() - t0
             await asyncio.sleep(max(0, interval - elapsed))
@@ -208,21 +255,7 @@ class FishermanDaemon:
                     log.warning("ocr_failed", exc_info=True)
                     ocr_text, urls = "", []
 
-            # Route
-            routing = self._router.route(
-                dhash_distance, ocr_text, urls, frame.bundle_id or ""
-            )
-
-            # Stream to server
-            await self._streamer.send(frame, ocr_text, urls, routing=routing)
-
-            # Save locally
-            ts_ms = int(frame.timestamp * 1000)
-            await loop.run_in_executor(
-                self._pool, self._frame_store.save, frame, ocr_text, urls, routing
-            )
-            self._latest_frame = (ts_ms, frame.jpeg_data, routing.tier_hint)
-            self._frames_sent += 1
+            await self._publish_frame(frame, dhash_distance, ocr_text, urls)
 
     async def _vlm_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -273,7 +306,32 @@ class FishermanDaemon:
             "connected": self._streamer.connected,
             "on_battery": on_battery(),
             "capture_interval": self._get_interval(),
+            "capture_backend": self._capture_backend,
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
-            status["error"] = "screen_recording_not_granted"
+            if self._capture_backend == "screenpipe":
+                status["error"] = "screenpipe_capture_unavailable"
+            else:
+                status["error"] = "screen_recording_not_granted"
         return status
+
+    async def _publish_frame(
+        self,
+        frame,
+        dhash_distance: int,
+        ocr_text: str,
+        urls: list[str],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        routing = self._router.route(
+            dhash_distance, ocr_text, urls, frame.bundle_id or ""
+        )
+
+        await self._streamer.send(frame, ocr_text, urls, routing=routing)
+
+        ts_ms = int(frame.timestamp * 1000)
+        await loop.run_in_executor(
+            self._pool, self._frame_store.save, frame, ocr_text, urls, routing
+        )
+        self._latest_frame = (ts_ms, frame.jpeg_data, routing.tier_hint)
+        self._frames_sent += 1

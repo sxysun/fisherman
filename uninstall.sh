@@ -4,10 +4,14 @@ set -e
 echo "=== Fisherman Uninstaller ==="
 echo
 
-# Quit running app
+# Quit running app (this also stops screenpipe + fisherman daemon)
 echo "Stopping Fisherman..."
 osascript -e 'quit app "Fisherman"' 2>/dev/null || true
 sleep 1
+
+# Kill any lingering screenpipe or fisherman processes
+pkill -f FishermanMenu 2>/dev/null || true
+pkill -f "fisherman start" 2>/dev/null || true
 
 # Remove .app bundle
 if [ -d "/Applications/Fisherman.app" ]; then
@@ -35,7 +39,7 @@ fi
 echo
 echo "Fisherman has been uninstalled."
 echo
-echo "You may also want to manually remove Fisherman from:"
+echo "You may also want to remove screenpipe from:"
 echo "  - System Settings > Privacy & Security > Screen Recording"
 echo "  - System Settings > General > Login Items"
 echo

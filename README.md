@@ -1,55 +1,87 @@
 # Fisherman
 
-Lightweight macOS screen streamer. Captures your screen, runs OCR, and streams frames to a remote server over WebSocket. Runs as a menu bar app or CLI daemon.
+Lightweight macOS screen streamer. Uses Screenpipe for capture and OCR, then streams frames to your server over WebSocket. Runs as a dynamic notch app.
 
 ## Quick Start
-
-### One-line install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
 ```
 
-This will:
-1. Install [uv](https://github.com/astral-sh/uv) if needed
-2. Clone the repo to `~/.fisherman`
-3. Set up the Python environment
-4. Build the menu bar app
-5. Install to `/Applications/Fisherman.app`
+This installs everything (uv, screenpipe, Python deps), prompts for your server URL and auth token, builds the menu bar app, and deploys to `/Applications`.
 
-Then open Fisherman from Applications. First launch will prompt for Screen Recording permission.
-
-### Manual install
+Then:
 
 ```bash
-git clone https://github.com/sxysun/fisherman.git
-cd fisherman
-uv sync
+open /Applications/Fisherman.app
 ```
 
-Copy and edit the config:
+The app appears in the notch area. Green = streaming. It manages screenpipe and the fisherman daemon as child processes.
+
+## New User Setup
+
+### 1. Deploy the server
 
 ```bash
-cp .env.example .env
-# Edit .env — at minimum set FISH_SERVER_URL and FISH_AUTH_TOKEN
+cd server
+bash setup.sh        # auto-generates encryption keys and auth token, installs deps
+docker compose up    # starts Postgres + ingest server on port 9999
 ```
 
-Run the daemon:
+No external database or cloud storage needed to get started — Postgres runs in Docker and frames are stored locally. Copy the auth token printed by `setup.sh` for the next step. See [`server/README.md`](server/README.md) for production setup with R2.
+
+### 2. Install the client (macOS)
 
 ```bash
-uv run fisherman start
+curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
 ```
 
-### Menu bar app
+### 3. Configure
 
-Build, code-sign, and install the menu bar app:
+Open Fisherman.app, hover over the notch, and click **Settings**. Set your server URL (e.g. `ws://your-server:9999/ingest`) and auth token. The daemon restarts automatically when you save.
 
-```bash
-cd menubar
-./build.sh
-```
+You can also edit `~/.fisherman/.env` directly — see the Configuration section below.
 
-This builds the release binary, signs it with your Apple Development certificate (or ad-hoc if none), deploys to `/Applications/Fisherman.app`, and launches it.
+## What It Does
+
+1. **Screenpipe** captures your screen and runs OCR locally
+2. **Fisherman** polls screenpipe for new frames, applies privacy filters and deduplication, then streams to your server over WebSocket
+3. Frames are also saved locally at `~/.fisherman/frames/` with a built-in viewer
+
+## Configuration
+
+All config is via environment variables or `~/.fisherman/.env`, prefixed with `FISH_`.
+
+### Essential
+
+| Variable | Default | Description |
+|---|---|---|
+| `FISH_SERVER_URL` | `ws://localhost:9999/ingest` | WebSocket server URL |
+| `FISH_AUTH_TOKEN` | (empty) | Bearer token for server auth |
+
+### Advanced
+
+<details>
+<summary>All options</summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `FISH_CAPTURE_BACKEND` | `screenpipe` | Capture backend (`screenpipe` or `native`) |
+| `FISH_SCREENPIPE_URL` | `http://127.0.0.1:3030` | Screenpipe local API |
+| `FISH_SCREENPIPE_POLL_INTERVAL` | `5.0` | Seconds between screenpipe polls |
+| `FISH_SCREENPIPE_SEARCH_LIMIT` | `50` | OCR records per poll |
+| `FISH_DIFF_THRESHOLD` | `6` | dHash distance below which frames are skipped |
+| `FISH_JPEG_QUALITY` | `60` | JPEG compression quality (0-100) |
+| `FISH_MAX_DIMENSION` | `1920` | Max width/height for frames |
+| `FISH_CONTROL_PORT` | `7892` | Local HTTP port for CLI control |
+| `FISH_EXCLUDED_BUNDLES` | `[]` | Bundle IDs to never capture |
+| `FISH_EXCLUDED_APPS` | `[]` | App names to never capture |
+| `FISH_FRAMES_DIR` | `~/.fisherman/frames` | Local frame storage |
+| `FISH_LOCAL_FRAMES_MAX` | `1000` | Max locally stored frames |
+| `FISH_VLM_ENABLED` | `false` | Enable local VLM scene understanding |
+| `FISH_VLM_INTERVAL` | `10.0` | Seconds between VLM runs |
+
+</details>
 
 ## CLI
 
@@ -63,56 +95,32 @@ fisherman stop               # stop the daemon
 fisherman install-service    # install macOS LaunchAgent for auto-start
 ```
 
-## Configuration
+## Architecture
 
-All config is via environment variables (or `.env` file), prefixed with `FISH_`:
-
-| Variable | Default | Description |
-|---|---|---|
-| `FISH_SERVER_URL` | `ws://localhost:9999/ingest` | WebSocket server URL |
-| `FISH_AUTH_TOKEN` | (empty) | Bearer token for server auth |
-| `FISH_CAPTURE_INTERVAL` | `1.0` | Seconds between captures |
-| `FISH_DIFF_THRESHOLD` | `6` | dHash distance below which frames are skipped |
-| `FISH_JPEG_QUALITY` | `60` | JPEG compression quality (0-100) |
-| `FISH_MAX_DIMENSION` | `1920` | Max width/height for captured frames |
-| `FISH_EXCLUDED_BUNDLES` | `[]` | Bundle IDs to never capture |
-| `FISH_EXCLUDED_APPS` | `[]` | App names to never capture |
-| `FISH_FRAMES_DIR` | `~/.fisherman/frames` | Local frame storage directory |
-| `FISH_LOCAL_FRAMES_MAX` | `1000` | Max locally stored frames (oldest pruned) |
-| `FISH_CONTROL_PORT` | `7891` | Local HTTP port for CLI control |
+```mermaid
+flowchart LR
+    SP["Screenpipe
+    Screen capture + OCR"] --> Poll["Fisherman Daemon
+    Poll screenpipe API"]
+    Poll --> Privacy["Privacy Filter
+    Excluded apps/bundles"]
+    Privacy --> Diff["Diff Filter
+    dHash deduplication"]
+    Diff --> Route["Tier Router
+    Text-heavy vs visual"]
+    Route --> Stream["WebSocket Streamer"]
+    Route --> Store["Local Frame Store"]
+    Stream --> Server["Fisherman Server"]
+    Store --> Viewer["Built-in Viewer"]
+```
 
 ## Local Frame Viewer
 
-Captured frames are saved locally at `~/.fisherman/frames/` (organized by date). View them in the browser:
-
-- Open `http://127.0.0.1:7891/viewer` or click **View Frames...** in the menu bar app
-- Each frame shows the screenshot, OCR text, detected URLs, app name, and routing tier
-- Auto-refresh mode polls every 3 seconds
-
-## Architecture
-
-```
-macOS Screen
-    |
-    v
-[Screen Capture] --> [Diff Filter] --> [OCR] --> [Privacy Filter] --> [WebSocket] --> Server
-    CG API / CLI         dHash          Vision      exclude apps        streamer
-                                                                           |
-                                                                    [Frame Store]
-                                                                     local viewer
-```
-
-- **Capture**: `CGWindowListCreateImage` grabs the screen, with automatic fallback to `screencapture` CLI when Screen Recording permission isn't available to the CG API (e.g. when launched from the menu bar app)
-- **Diff**: perceptual hash (dHash) skips frames that haven't changed
-- **OCR**: Apple Vision framework (accurate mode with language correction) extracts text
-- **Privacy**: filters out excluded apps/bundles
-- **Routing**: classifies frames into tiers (text-heavy vs visual) for downstream VLM processing
-- **Streamer**: persistent WebSocket with auto-reconnect and backpressure
-- **Frame Store**: saves frames + metadata locally for the built-in viewer
+Captured frames are saved at `~/.fisherman/frames/`. View them at `http://127.0.0.1:7892/viewer` or via **View Frames...** in the app menu.
 
 ## Server
 
-See [`server/README.md`](server/README.md) for server setup.
+`cd server && bash setup.sh && docker compose up` — see [`server/README.md`](server/README.md) for details and production deployment with Cloudflare R2.
 
 ## Uninstall
 
@@ -124,21 +132,19 @@ Or manually: delete `/Applications/Fisherman.app` and `~/.fisherman`.
 
 ## Troubleshooting
 
-**Screen Recording permission**: First launch prompts for Screen Recording access. If denied, the daemon falls back to `/usr/sbin/screencapture` (slower but works). Grant permission in System Settings > Privacy & Security > Screen Recording, then restart the daemon — it re-checks every 60 seconds.
+**Screenpipe not running**: The app starts screenpipe automatically. If it fails, install manually with `brew install screenpipe` and ensure it has Screen Recording permission in System Settings > Privacy & Security.
 
-**Port already in use**: If `fisherman start` fails to bind, check for a stale process:
+**Port already in use**: If the daemon can't bind, check for a stale process:
 ```bash
-lsof -ti tcp:7891 | xargs kill
+lsof -ti tcp:7892 | xargs kill
 ```
 
-**Server unreachable**: The daemon logs `server_unreachable` when it can't connect. Frames are still saved locally. Set `FISH_SERVER_URL` in `.env` to point to your server.
+**Server unreachable**: The daemon logs `server_unreachable` when it can't connect. Frames are still saved locally. Check `FISH_SERVER_URL` in `~/.fisherman/.env`.
 
-**Daemon not starting**: Run `fisherman status` to check. If unresponsive, try `fisherman stop` then `fisherman start` again.
-
-**Screen Recording lost after rebuild**: The menu bar app must be code-signed. Always use `cd menubar && ./build.sh` to rebuild — it handles signing automatically.
+**App won't open after rebuild**: Strip quarantine attributes: `xattr -cr /Applications/Fisherman.app`
 
 ## Requirements
 
 - macOS 13+
 - Python 3.12+
-- Screen Recording permission
+- Screenpipe (`brew install screenpipe`)

@@ -52,7 +52,12 @@ def start(server_url: str | None, daemonize: bool):
     if "localhost" in config.server_url or "127.0.0.1" in config.server_url:
         click.echo("  (local server — set FISH_SERVER_URL for remote)")
     click.echo(f"  Control:  http://127.0.0.1:{config.control_port}")
-    click.echo(f"  Interval: {config.capture_interval}s")
+    click.echo(f"  Capture:  {config.capture_backend}")
+    if (config.capture_backend or "").strip().lower() == "screenpipe":
+        click.echo(f"  Source:   {config.screenpipe_url}")
+        click.echo(f"  Poll:     {config.screenpipe_poll_interval}s")
+    else:
+        click.echo(f"  Interval: {config.capture_interval}s")
     click.echo(f"  Frames:   {config.frames_dir}")
 
     from fisherman.daemon import FishermanDaemon
@@ -76,7 +81,7 @@ def start(server_url: str | None, daemonize: bool):
         loop.close()
 
 
-def _control_request(method: str, path: str, port: int = 7891) -> dict:
+def _control_request(method: str, path: str, port: int = 7892) -> dict:
     url = f"http://127.0.0.1:{port}{path}"
     req = urllib.request.Request(url, method=method)
     try:
@@ -88,7 +93,7 @@ def _control_request(method: str, path: str, port: int = 7891) -> dict:
 
 
 @main.command()
-@click.option("--port", default=7891, help="Control server port")
+@click.option("--port", default=7892, help="Control server port")
 def status(port: int):
     """Show daemon status."""
     data = _control_request("GET", "/status", port)
@@ -96,7 +101,7 @@ def status(port: int):
 
 
 @main.command()
-@click.option("--port", default=7891, help="Control server port")
+@click.option("--port", default=7892, help="Control server port")
 def pause(port: int):
     """Pause screen capture."""
     data = _control_request("POST", "/pause", port)
@@ -104,7 +109,7 @@ def pause(port: int):
 
 
 @main.command()
-@click.option("--port", default=7891, help="Control server port")
+@click.option("--port", default=7892, help="Control server port")
 def resume(port: int):
     """Resume screen capture."""
     data = _control_request("POST", "/resume", port)
@@ -118,7 +123,7 @@ def stop(port: int | None):
     import subprocess
 
     if port is None:
-        port = int(os.environ.get("FISH_CONTROL_PORT", "7891"))
+        port = int(os.environ.get("FISH_CONTROL_PORT", "7892"))
 
     result = subprocess.run(
         ["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True

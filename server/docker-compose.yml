@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fisherman
+      POSTGRES_PASSWORD: fisherman
+      POSTGRES_DB: fisherman
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fisherman"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  server:
+    build: .
+    ports:
+      - "9999:9999"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://fisherman:fisherman@postgres:5432/fisherman
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

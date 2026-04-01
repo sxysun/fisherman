@@ -12,6 +12,9 @@ import signal
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncpg
 import structlog
 import websockets
@@ -19,7 +22,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Response
 
 from crypto import encrypt_json, encrypt_text
-from storage import R2Storage
+from storage import create_storage
 
 log = structlog.get_logger()
 
@@ -158,8 +161,8 @@ async def _run(host: str, port: int) -> None:
     db = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     await _init_db(db)
 
-    r2 = R2Storage()
-    log.info("r2_storage_initialized")
+    r2 = create_storage()
+    log.info("storage_initialized", backend=type(r2).__name__)
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
