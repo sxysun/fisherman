@@ -51,6 +51,7 @@ final class ProcessManager: @unchecked Sendable {
             "--fps", "0.2",
             "--disable-audio",
             "--disable-telemetry",
+            "--use-pii-removal",
             "--data-dir", screenpipeDataDir,
             "--auto-destruct-pid", "\(ProcessInfo.processInfo.processIdentifier)",
         ]
