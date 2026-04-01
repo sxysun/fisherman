@@ -4,6 +4,7 @@ import base64
 import datetime
 import json
 import os
+import re
 import sys
 
 import asyncio
@@ -17,6 +18,26 @@ from storage import create_storage
 
 load_dotenv()
 log = structlog.get_logger()
+
+_RELATIVE_RE = re.compile(r"(\d+)\s*(s|sec|seconds?|m|min|minutes?|h|hours?|d|days?)\s+ago", re.IGNORECASE)
+_UNIT_MAP = {"s": "seconds", "sec": "seconds", "second": "seconds", "seconds": "seconds",
+             "m": "minutes", "min": "minutes", "minute": "minutes", "minutes": "minutes",
+             "h": "hours", "hour": "hours", "hours": "hours",
+             "d": "days", "day": "days", "days": "days"}
+
+
+def _parse_time(s: str) -> datetime.datetime:
+    """Parse a time string — supports ISO 8601 and relative like '5m ago', '2h ago'."""
+    m = _RELATIVE_RE.match(s.strip())
+    if m:
+        amount = int(m.group(1))
+        unit = _UNIT_MAP[m.group(2).lower()]
+        return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(**{unit: amount})
+    # Try ISO parse
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
 
 
 async def _get_pool() -> asyncpg.Pool:
@@ -60,12 +81,12 @@ async def _query_frames(
         idx = 1
 
         if since:
-            clauses.append(f"ts >= ${idx}::timestamptz")
-            params.append(since)
+            clauses.append(f"ts >= ${idx}")
+            params.append(_parse_time(since))
             idx += 1
         if until:
-            clauses.append(f"ts <= ${idx}::timestamptz")
-            params.append(until)
+            clauses.append(f"ts <= ${idx}")
+            params.append(_parse_time(until))
             idx += 1
         if app:
             clauses.append(f"LOWER(app) LIKE LOWER(${idx})")
