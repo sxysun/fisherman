@@ -40,9 +40,6 @@ class FishermanDaemon:
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
         self._consecutive_capture_failures = 0
-        # Shared state for VLM loop: (ts_ms, jpeg_data, tier_hint)
-        self._latest_frame: tuple[int, bytes, int] | None = None
-        self._last_vlm_ts: int = 0  # avoid re-describing the same frame
 
     async def run(self) -> None:
         self._running = True
@@ -71,12 +68,6 @@ class FishermanDaemon:
             capture_backend=self._capture_backend,
         )
 
-        # Start VLM loop if enabled
-        vlm_task = None
-        if self._config.vlm_enabled:
-            vlm_task = asyncio.create_task(self._vlm_loop())
-            log.info("vlm_loop_started", interval=self._config.vlm_interval)
-
         try:
             if _SWIFT_CAPTURE:
                 await self._process_loop()
@@ -88,12 +79,6 @@ class FishermanDaemon:
             pass
         finally:
             self._running = False
-            if vlm_task:
-                vlm_task.cancel()
-                try:
-                    await vlm_task
-                except asyncio.CancelledError:
-                    pass
             await self._streamer.stop()
             await control.stop()
             self._pool.shutdown(wait=False)
@@ -215,13 +200,20 @@ class FishermanDaemon:
                 if self._privacy.should_skip(frame.bundle_id, frame.app_name):
                     continue
 
-                diff = self._differ.diff_frame(frame.jpeg_data)
-                if not diff.is_new:
-                    continue
+                # When screenpipe can't extract a JPEG (MP4 still being
+                # written), jpeg_data is empty. Skip diff and always send
+                # — we still have OCR text + metadata.
+                if frame.jpeg_data:
+                    diff = self._differ.diff_frame(frame.jpeg_data)
+                    if not diff.is_new:
+                        continue
+                    distance = diff.distance
+                else:
+                    distance = 64  # max distance — treat as fully new
 
                 await self._publish_frame(
                     frame,
-                    diff.distance,
+                    distance,
                     payload.ocr_text,
                     payload.urls,
                 )
@@ -257,46 +249,6 @@ class FishermanDaemon:
 
             await self._publish_frame(frame, dhash_distance, ocr_text, urls)
 
-    async def _vlm_loop(self) -> None:
-        loop = asyncio.get_running_loop()
-        cfg = self._config
-        # Import lazily so no startup cost when VLM is disabled
-        from fisherman.vlm import describe
-
-        while self._running:
-            await asyncio.sleep(cfg.vlm_interval)
-
-            frame_snapshot = self._latest_frame
-            if frame_snapshot is None:
-                continue
-
-            ts_ms, jpeg_data, tier_hint = frame_snapshot
-
-            # Skip if we already described this exact frame
-            if ts_ms == self._last_vlm_ts:
-                continue
-
-            # Only run VLM on T2 frames (visual content where OCR alone
-            # isn't enough). T1 frames are text-heavy apps with abundant
-            # OCR — scene description would add little value.
-            if tier_hint == 1:
-                log.debug("vlm_skip_t1", ts_ms=ts_ms)
-                continue
-
-            self._last_vlm_ts = ts_ms
-            try:
-                scene = await loop.run_in_executor(
-                    self._pool, describe, jpeg_data, cfg.vlm_model
-                )
-                log.info("vlm_scene", ts_ms=ts_ms, scene=scene)
-                await loop.run_in_executor(
-                    self._pool, self._frame_store.update_scene, ts_ms, scene
-                )
-                # Stream to server
-                await self._streamer.send_vlm(ts_ms / 1000.0, scene)
-            except Exception:
-                log.warning("vlm_failed", exc_info=True)
-
     def _get_status(self) -> dict:
         status = {
             "running": self._running,
@@ -329,9 +281,7 @@ class FishermanDaemon:
 
         await self._streamer.send(frame, ocr_text, urls, routing=routing)
 
-        ts_ms = int(frame.timestamp * 1000)
         await loop.run_in_executor(
             self._pool, self._frame_store.save, frame, ocr_text, urls, routing
         )
-        self._latest_frame = (ts_ms, frame.jpeg_data, routing.tier_hint)
         self._frames_sent += 1

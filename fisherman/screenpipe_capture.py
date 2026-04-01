@@ -65,15 +65,17 @@ class ScreenpipeCaptureClient:
             if ref.frame_id in self._seen_lookup:
                 continue
 
+            context = self._fetch_frame_context(ref.frame_id, fallback_text=ref.ocr_text)
+
+            # Try to fetch the JPEG frame; proceed without image if unavailable
+            # (screenpipe can't extract frames from MP4s still being written)
+            jpeg_data = b""
+            width, height = 0, 0
             try:
-                context = self._fetch_frame_context(ref.frame_id, fallback_text=ref.ocr_text)
                 jpeg_data = self._fetch_bytes(f"/frames/{ref.frame_id}")
                 width, height = _extract_image_size(jpeg_data)
             except ScreenpipeCaptureError:
-                # Individual frame may be unavailable (e.g. MP4 cleaned up).
-                # Skip it rather than failing the entire poll batch.
-                self._remember_frame(ref.frame_id, ref.timestamp)
-                continue
+                log.debug("frame_image_unavailable", frame_id=ref.frame_id)
 
             frame = ScreenFrame(
                 jpeg_data=jpeg_data,

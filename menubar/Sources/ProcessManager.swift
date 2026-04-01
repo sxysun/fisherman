@@ -102,7 +102,7 @@ final class ProcessManager: @unchecked Sendable {
 
         var env = buildEnvironment()
         env["FISH_CAPTURE_BACKEND"] = "screenpipe"
-        env["FISH_SCREENPIPE_POLL_INTERVAL"] = "5"
+        env["FISH_SCREENPIPE_POLL_INTERVAL"] = "3"
         proc.environment = env
 
         let log = logFileHandle(name: "fisherman")

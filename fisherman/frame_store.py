@@ -31,14 +31,14 @@ class FrameStore:
         day_dir = os.path.join(self._base, dt.strftime("%Y-%m-%d"))
         os.makedirs(day_dir, exist_ok=True)
 
-        # Save JPEG
+        # Save JPEG (skip if empty — screenpipe sometimes can't extract frames)
         img_path = os.path.join(day_dir, f"{ts_ms}.jpg")
-        try:
-            with open(img_path, "wb") as f:
-                f.write(frame.jpeg_data)
-        except OSError:
-            log.warning("frame_save_failed", path=img_path, exc_info=True)
-            return
+        if frame.jpeg_data:
+            try:
+                with open(img_path, "wb") as f:
+                    f.write(frame.jpeg_data)
+            except OSError:
+                log.warning("frame_save_failed", path=img_path, exc_info=True)
 
         # Save metadata
         meta = {

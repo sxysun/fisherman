@@ -10,13 +10,13 @@ class FishermanConfig(BaseSettings):
 
     # Capture
     capture_backend: str = "screenpipe"
-    capture_interval: float = 2.0
-    battery_capture_interval: float = 5.0  # slower on battery
-    diff_threshold: int = 6
+    capture_interval: float = 3.0
+    battery_capture_interval: float = 10.0  # slower on battery
+    diff_threshold: int = 3
     jpeg_quality: int = 60
     max_dimension: int = 1920
     screenpipe_url: str = "http://127.0.0.1:3030"
-    screenpipe_poll_interval: float = 2.0
+    screenpipe_poll_interval: float = 3.0
     screenpipe_search_limit: int = 50
 
     # Privacy — password managers, auth apps, keychains excluded by default
@@ -52,11 +52,6 @@ class FishermanConfig(BaseSettings):
     # Local frame viewer
     frames_dir: str = "~/.fisherman/frames"
     local_frames_max: int = 1000
-
-    # VLM (scene understanding)
-    vlm_enabled: bool = False
-    vlm_interval: float = 10.0
-    vlm_model: str = "2025-04-14"  # moondream2 revision tag
 
     # Control
     control_port: int = 7892
