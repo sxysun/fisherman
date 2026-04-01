@@ -22,7 +22,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Response
 
 from crypto import encrypt_json, encrypt_text
-from storage import create_storage
+from storage import R2Storage, LocalStorage, create_storage
 
 log = structlog.get_logger()
 
