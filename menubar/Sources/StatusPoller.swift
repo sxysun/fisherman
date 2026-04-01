@@ -49,7 +49,6 @@ final class StatusPoller: @unchecked Sendable {
             }
             DispatchQueue.main.async {
                 self?.state.screenpipeHealthy = ok
-                self?.deriveStatus()
             }
         }.resume()
     }
@@ -73,14 +72,5 @@ final class StatusPoller: @unchecked Sendable {
                 )
             }
         }.resume()
-    }
-
-    private func deriveStatus() {
-        // Called after screenpipe poll — fisherman poll will call update() which also derives
-        // This just ensures screenpipe-only state changes reflect immediately
-        state.update(
-            screenpipeOK: state.screenpipeHealthy,
-            fishermanStatus: state.fishermanRunning ? [:] : nil
-        )
     }
 }
