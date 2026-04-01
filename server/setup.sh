@@ -1,12 +1,12 @@
 #!/bin/bash
-# One-line server setup: generates keys, creates .env, installs deps.
+# One-line server setup: installs Postgres, generates keys, creates .env, installs deps.
 # Usage: cd server && bash setup.sh
 set -e
 cd "$(dirname "$0")"
 
 echo "==> Fisherman server setup"
 
-# Check for uv or python
+# --- Python ---
 if command -v uv &>/dev/null; then
     PY="uv run python"
     echo "    Found uv"
@@ -18,28 +18,58 @@ else
     exit 1
 fi
 
-# Generate secrets
+# --- Postgres ---
+echo "==> Setting up Postgres..."
+if command -v psql &>/dev/null; then
+    echo "    Postgres client found"
+else
+    echo "    Installing Postgres..."
+    if [ "$(uname)" = "Linux" ] && command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql postgresql-client > /dev/null
+    elif [ "$(uname)" = "Darwin" ] && command -v brew &>/dev/null; then
+        brew install postgresql@16 && brew services start postgresql@16
+    else
+        echo "Error: please install Postgres manually and re-run."
+        exit 1
+    fi
+fi
+
+# Ensure Postgres is running
+if [ "$(uname)" = "Linux" ] && command -v systemctl &>/dev/null; then
+    if ! systemctl is-active --quiet postgresql; then
+        sudo systemctl start postgresql
+        sudo systemctl enable postgresql
+    fi
+fi
+
+# Create user and database (idempotent)
+sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='fisherman'" | grep -q 1 \
+    || sudo -u postgres psql -c "CREATE USER fisherman WITH PASSWORD 'fisherman';"
+sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='fisherman'" | grep -q 1 \
+    || sudo -u postgres psql -c "CREATE DATABASE fisherman OWNER fisherman;"
+echo "    Postgres ready: fisherman@localhost:5432/fisherman"
+
+# --- Generate secrets ---
 ENCRYPTION_KEY=$($PY -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || true)
 AUTH_TOKEN=$($PY -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || true)
 
-# If uv python couldn't generate (deps not installed yet), install first
 if [ -z "$ENCRYPTION_KEY" ] && command -v uv &>/dev/null; then
     echo "==> Installing dependencies..."
     uv sync --quiet
     ENCRYPTION_KEY=$(uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
     AUTH_TOKEN=$(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
 elif [ -z "$ENCRYPTION_KEY" ]; then
-    # Fallback: use openssl for key generation
     ENCRYPTION_KEY=$(python3 -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())")
     AUTH_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 fi
 
+# --- .env ---
 if [ -f .env ]; then
     echo "    .env already exists, not overwriting"
     echo "    To regenerate: rm .env && bash setup.sh"
 else
     cat > .env <<EOF
-# Postgres — use the docker-compose default, or replace with your own
+# Postgres (local — persistent across restarts)
 DATABASE_URL=postgresql://fisherman:fisherman@localhost:5432/fisherman
 
 # Cloudflare R2 (optional — leave blank to store frames locally in ./frames/)
@@ -61,7 +91,7 @@ EOF
     echo "    Created .env with auto-generated keys"
 fi
 
-# Install deps
+# --- Install deps ---
 if command -v uv &>/dev/null; then
     echo "==> Installing dependencies..."
     uv sync --quiet
@@ -73,12 +103,7 @@ echo ""
 echo "    Auth token (set this as FISH_AUTH_TOKEN on the client):"
 grep INGEST_AUTH_TOKEN .env | head -1
 echo ""
-echo "    Next steps:"
-echo ""
-echo "    Option A — Docker (includes Postgres):"
-echo "      docker compose up"
-echo ""
-echo "    Option B — Local (needs Postgres running on localhost:5432):"
+echo "    Start the server:"
 echo "      uv run python ingest.py"
 echo ""
 echo "    R2 is optional. Without R2 credentials, frames are stored locally in ./frames/"

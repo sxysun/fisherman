@@ -1,30 +1,13 @@
+# Ingest server only — Postgres runs on the host (setup.sh installs it).
+# This avoids data split between Docker and host databases.
 services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: fisherman
-      POSTGRES_PASSWORD: fisherman
-      POSTGRES_DB: fisherman
-    ports:
-      - "5433:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fisherman"]
-      interval: 2s
-      timeout: 2s
-      retries: 10
-
   server:
     build: .
     ports:
       - "9999:9999"
     env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      DATABASE_URL: postgresql://fisherman:fisherman@postgres:5432/fisherman
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-volumes:
-  pgdata:
+      DATABASE_URL: postgresql://fisherman:fisherman@host.docker.internal:5432/fisherman
+    restart: unless-stopped

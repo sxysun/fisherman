@@ -6,31 +6,21 @@ WebSocket ingest server that receives frames from the daemon, encrypts sensitive
 
 ```bash
 cd server
-bash setup.sh        # generates keys, creates .env, installs deps
-docker compose up    # starts Postgres + server
-```
-
-That's it. The server is running on `ws://localhost:9999/ingest`.
-
-Copy the `INGEST_AUTH_TOKEN` printed by setup.sh and paste it as `FISH_AUTH_TOKEN` in the client's settings (or `~/.fisherman/.env`).
-
-## Setup Without Docker
-
-If you already have Postgres running:
-
-```bash
-cd server
-bash setup.sh
-# Edit .env — update DATABASE_URL to point to your Postgres
+bash setup.sh          # installs Postgres, generates keys, creates .env
 uv run python ingest.py
 ```
+
+That's it. The server is running on `ws://localhost:9999/ingest`. Data is stored in local Postgres — persistent across restarts.
+
+Copy the `INGEST_AUTH_TOKEN` printed by setup.sh and paste it as `FISH_AUTH_TOKEN` in the client's settings (or `~/.fisherman/.env`).
 
 ## What `setup.sh` Does
 
 1. Checks for `uv` (or `python3`)
-2. Installs Python dependencies
-3. Auto-generates `ENCRYPTION_KEY` (Fernet) and `INGEST_AUTH_TOKEN`
-4. Creates `.env` from defaults (won't overwrite if it already exists)
+2. Installs Postgres if not present, creates the `fisherman` user and database
+3. Installs Python dependencies
+4. Auto-generates `ENCRYPTION_KEY` (Fernet) and `INGEST_AUTH_TOKEN`
+5. Creates `.env` from defaults (won't overwrite if it already exists)
 
 ## Environment Variables
 
