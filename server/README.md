@@ -59,6 +59,46 @@ The server checks `Authorization: Bearer <token>` on incoming WebSocket connecti
 
 The server auto-creates the `frames` table on startup. Sensitive columns (window title, OCR text, URLs, VLM descriptions) are Fernet-encrypted at rest. Images are encrypted before storage.
 
+## CLI — Query & Decrypt
+
+`fisherman-cli` is the read path for all captured data. It decrypts OCR text, window titles, URLs, scene descriptions, and screenshots.
+
+**Setup:** `cd server && uv sync` (uses the same `.env` as the ingest server — needs `DATABASE_URL` and `ENCRYPTION_KEY`).
+
+```bash
+# Query recent frames (human-readable)
+uv run fisherman query --limit 10
+
+# Filter by app, time range, or text search
+uv run fisherman query --app "Chrome" --since "2h ago" --search "meeting notes"
+
+# JSON output (for agent/LLM consumption)
+uv run fisherman query --since "2026-04-01T09:00:00" -j
+
+# Activity summary grouped by app
+uv run fisherman summary --since "2026-04-01T09:00:00"
+
+# Download & decrypt a screenshot to JPEG
+uv run fisherman image "frames/2026-04-01/12345.jpg.enc" -o screenshot.jpg
+
+# Full detail for one frame + save its image
+uv run fisherman show 9 -o meeting.jpg
+```
+
+### Agent Integration
+
+If you're an AI agent with shell access to this repo, this is how you get user context:
+
+```bash
+cd /path/to/fisherman/server
+uv run fisherman query -j --limit 20          # recent activity as JSON
+uv run fisherman summary                       # high-level activity breakdown
+uv run fisherman query -j --search "keyword"   # search across all decrypted text
+uv run fisherman image "<image_key>" -o /tmp/frame.jpg  # decrypt a screenshot
+```
+
+All fields (OCR, window titles, URLs, scenes) are returned fully decrypted. The `image_key` field in query results can be passed to `fisherman image` to retrieve the actual screenshot.
+
 ## Backup / Restore
 
 For production deployments (especially TEE/CVM where disk is ephemeral):
