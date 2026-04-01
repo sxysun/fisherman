@@ -48,7 +48,7 @@ final class ProcessManager: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
         proc.arguments = [
-            "--fps", "0.2",
+            "--fps", "1",
             "--disable-audio",
             "--disable-telemetry",
             "--use-pii-removal",
