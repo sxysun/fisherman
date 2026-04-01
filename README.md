@@ -68,9 +68,9 @@ All config is via environment variables or `~/.fisherman/.env`, prefixed with `F
 |---|---|---|
 | `FISH_CAPTURE_BACKEND` | `screenpipe` | Capture backend (`screenpipe` or `native`) |
 | `FISH_SCREENPIPE_URL` | `http://127.0.0.1:3030` | Screenpipe local API |
-| `FISH_SCREENPIPE_POLL_INTERVAL` | `5.0` | Seconds between screenpipe polls |
+| `FISH_SCREENPIPE_POLL_INTERVAL` | `3.0` | Seconds between screenpipe polls |
 | `FISH_SCREENPIPE_SEARCH_LIMIT` | `50` | OCR records per poll |
-| `FISH_DIFF_THRESHOLD` | `6` | dHash distance below which frames are skipped |
+| `FISH_DIFF_THRESHOLD` | `3` | dHash distance below which frames are skipped |
 | `FISH_JPEG_QUALITY` | `60` | JPEG compression quality (0-100) |
 | `FISH_MAX_DIMENSION` | `1920` | Max width/height for frames |
 | `FISH_CONTROL_PORT` | `7892` | Local HTTP port for CLI control |
@@ -78,8 +78,6 @@ All config is via environment variables or `~/.fisherman/.env`, prefixed with `F
 | `FISH_EXCLUDED_APPS` | `[]` | App names to never capture |
 | `FISH_FRAMES_DIR` | `~/.fisherman/frames` | Local frame storage |
 | `FISH_LOCAL_FRAMES_MAX` | `1000` | Max locally stored frames |
-| `FISH_VLM_ENABLED` | `false` | Enable local VLM scene understanding |
-| `FISH_VLM_INTERVAL` | `10.0` | Seconds between VLM runs |
 
 </details>
 
@@ -121,6 +119,86 @@ Captured frames are saved at `~/.fisherman/frames/`. View them at `http://127.0.
 ## Server
 
 `cd server && bash setup.sh && docker compose up` — see [`server/README.md`](server/README.md) for details and production deployment with Cloudflare R2.
+
+## Fisherman CLI — Agent Integration
+
+The fisherman CLI lets AI agents query what the user has been doing — recent apps, OCR text, window titles, URLs, and screenshots. All data is encrypted at rest and decrypted on the fly by the CLI.
+
+### Setup
+
+The CLI runs from the `server/` directory and requires two things in `server/.env`:
+- `DATABASE_URL` — Postgres connection string (set by `setup.sh`)
+- `ENCRYPTION_KEY` — Fernet key for decryption (set by `setup.sh`)
+
+If you ran `bash setup.sh` during server setup, both are already configured.
+
+```bash
+cd server
+uv sync   # install deps (one-time)
+```
+
+### Commands
+
+```bash
+# Recent activity as JSON (best for agents)
+uv run fisherman query -j --limit 20
+
+# Search across all captured OCR text, window titles, and descriptions
+uv run fisherman query -j --search "meeting notes"
+
+# Filter by app and time range
+uv run fisherman query -j --app "Chrome" --since "2h ago"
+uv run fisherman query -j --app "VSCode" --since "2026-04-01T09:00:00"
+
+# Activity summary grouped by app (good for "what have I been doing?")
+uv run fisherman summary --since "4h ago"
+
+# Full detail for a specific frame
+uv run fisherman show <frame_id>
+
+# Decrypt and save a screenshot
+uv run fisherman image "<image_key>" -o /tmp/screenshot.jpg
+```
+
+### Output format (JSON mode)
+
+Each frame in `-j` mode returns:
+
+```json
+{
+  "id": 42,
+  "ts": "2026-04-01T17:34:20+00:00",
+  "app": "Chrome",
+  "window": "GitHub - Pull Request #123",
+  "ocr_text": "Full OCR text from the screen...",
+  "urls": ["https://github.com/..."],
+  "image_key": "frames/2026-04-01/1234567890.jpg.enc",
+  "width": 1920,
+  "height": 1080,
+  "tier_hint": 2
+}
+```
+
+The `image_key` can be passed to `uv run fisherman image "<image_key>"` to retrieve the actual screenshot.
+
+### Agent CLAUDE.md snippet
+
+Add this to your project's `CLAUDE.md` so your agent knows how to use fisherman:
+
+```markdown
+## User context (fisherman)
+
+To understand what the user has been doing on their computer:
+
+\`\`\`bash
+cd /path/to/fisherman/server
+uv run fisherman query -j --limit 20              # recent screen captures
+uv run fisherman query -j --search "keyword"       # search all OCR text
+uv run fisherman summary --since "2h ago"           # activity by app
+\`\`\`
+
+Returns decrypted OCR text, window titles, URLs, and app names from screen captures.
+```
 
 ## Uninstall
 
