@@ -53,6 +53,8 @@ class FishermanDaemon:
             resume_fn=self._privacy.resume,
             frame_store=self._frame_store,
             frame_queue=self._frame_queue if _SWIFT_CAPTURE else None,
+            screenpipe_data_dir=os.path.expanduser(self._config.screenpipe_data_dir)
+            if self._capture_backend == "screenpipe" else None,
         )
         await control.start()
 
@@ -166,6 +168,7 @@ class FishermanDaemon:
     async def _screenpipe_capture_loop(self) -> None:
         loop = asyncio.get_running_loop()
         interval = max(self._config.screenpipe_poll_interval, 0.25)
+        cfg = self._config
 
         while self._running:
             t0 = asyncio.get_event_loop().time()
@@ -195,14 +198,29 @@ class FishermanDaemon:
                 await asyncio.sleep(backoff)
                 continue
 
+            # Screenshot fallback: when screenpipe can't extract JPEGs from
+            # the active MP4 chunk, take one screenshot and use it for all
+            # imageless frames in this batch.
+            screenshot = None
+            if any(not p.frame.jpeg_data for p in payloads):
+                try:
+                    screenshot = await loop.run_in_executor(
+                        self._pool, capture_screen, cfg.max_dimension, cfg.jpeg_quality
+                    )
+                except Exception:
+                    log.debug("screenshot_fallback_failed", exc_info=True)
+
             for payload in payloads:
                 frame = payload.frame
                 if self._privacy.should_skip(frame.bundle_id, frame.app_name):
                     continue
 
-                # When screenpipe can't extract a JPEG (MP4 still being
-                # written), jpeg_data is empty. Skip diff and always send
-                # — we still have OCR text + metadata.
+                # Fill in missing JPEG from screenshot fallback
+                if not frame.jpeg_data and screenshot:
+                    frame.jpeg_data = screenshot.jpeg_data
+                    frame.width = screenshot.width
+                    frame.height = screenshot.height
+
                 if frame.jpeg_data:
                     diff = self._differ.diff_frame(frame.jpeg_data)
                     if not diff.is_new:
@@ -216,6 +234,8 @@ class FishermanDaemon:
                     distance,
                     payload.ocr_text,
                     payload.urls,
+                    video_path=payload.video_path,
+                    video_offset=payload.video_offset,
                 )
 
             elapsed = asyncio.get_event_loop().time() - t0
@@ -273,6 +293,8 @@ class FishermanDaemon:
         dhash_distance: int,
         ocr_text: str,
         urls: list[str],
+        video_path: str | None = None,
+        video_offset: int = 0,
     ) -> None:
         loop = asyncio.get_running_loop()
         routing = self._router.route(
@@ -282,6 +304,7 @@ class FishermanDaemon:
         await self._streamer.send(frame, ocr_text, urls, routing=routing)
 
         await loop.run_in_executor(
-            self._pool, self._frame_store.save, frame, ocr_text, urls, routing
+            self._pool, self._frame_store.save, frame, ocr_text, urls, routing,
+            video_path, video_offset,
         )
         self._frames_sent += 1

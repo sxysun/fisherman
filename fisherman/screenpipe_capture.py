@@ -37,6 +37,8 @@ class ScreenpipeFramePayload:
     ocr_text: str
     urls: list[str]
     frame_id: int
+    video_path: str | None = None
+    video_offset: int = 0
 
 
 class ScreenpipeCaptureClient:
@@ -59,12 +61,17 @@ class ScreenpipeCaptureClient:
     def poll(self) -> list[ScreenpipeFramePayload]:
         payload = self._fetch_json("/search", self._build_search_params())
         refs = self._parse_search_response(payload)
+
+        # Filter out already-seen frames
+        new_refs = [ref for ref in refs if ref.frame_id not in self._seen_lookup]
+        if not new_refs:
+            return []
+
+        # Batch-fetch video chunk paths and offsets
+        video_info = self._fetch_video_info([ref.frame_id for ref in new_refs])
+
         results: list[ScreenpipeFramePayload] = []
-
-        for ref in refs:
-            if ref.frame_id in self._seen_lookup:
-                continue
-
+        for ref in new_refs:
             context = self._fetch_frame_context(ref.frame_id, fallback_text=ref.ocr_text)
 
             # Try to fetch the JPEG frame; proceed without image if unavailable
@@ -76,6 +83,8 @@ class ScreenpipeCaptureClient:
                 width, height = _extract_image_size(jpeg_data)
             except ScreenpipeCaptureError:
                 log.debug("frame_image_unavailable", frame_id=ref.frame_id)
+
+            vinfo = video_info.get(ref.frame_id, {})
 
             frame = ScreenFrame(
                 jpeg_data=jpeg_data,
@@ -92,6 +101,8 @@ class ScreenpipeCaptureClient:
                     ocr_text=context["text"],
                     urls=context["urls"],
                     frame_id=ref.frame_id,
+                    video_path=vinfo.get("file_path"),
+                    video_offset=vinfo.get("offset_index", 0),
                 )
             )
             self._remember_frame(ref.frame_id, ref.timestamp)
@@ -110,6 +121,48 @@ class ScreenpipeCaptureClient:
             )
             params["start_time"] = _isoformat_z(start_time)
         return params
+
+    def _fetch_video_info(self, frame_ids: list[int]) -> dict[int, dict]:
+        """Batch-fetch video chunk file_path and offset_index for frame IDs."""
+        if not frame_ids:
+            return {}
+        ids_str = ",".join(str(fid) for fid in frame_ids)
+        query = (
+            f"SELECT f.id, f.offset_index, vc.file_path "
+            f"FROM frames f JOIN video_chunks vc ON f.video_chunk_id = vc.id "
+            f"WHERE f.id IN ({ids_str})"
+        )
+        try:
+            rows = self._post_json("/raw_sql", {"query": query})
+        except ScreenpipeCaptureError:
+            log.debug("video_info_fetch_failed", count=len(frame_ids))
+            return {}
+        result: dict[int, dict] = {}
+        if isinstance(rows, list):
+            for row in rows:
+                fid = row.get("id")
+                if isinstance(fid, int):
+                    result[fid] = row
+        return result
+
+    def _post_json(self, path: str, data: dict) -> object:
+        url = _build_url(self._base_url, path)
+        body = json.dumps(data).encode()
+        req = Request(url, data=body, headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        })
+        try:
+            with _NO_PROXY_OPENER.open(req, timeout=self._timeout) as resp:
+                return json.loads(resp.read())
+        except HTTPError as exc:
+            raise ScreenpipeCaptureError(
+                f"screenpipe HTTP {exc.code} for POST {path}"
+            ) from exc
+        except (URLError, OSError) as exc:
+            raise ScreenpipeCaptureError(
+                f"screenpipe POST {path} failed: {exc}"
+            ) from exc
 
     def _fetch_frame_context(self, frame_id: int, fallback_text: str) -> dict[str, object]:
         try:

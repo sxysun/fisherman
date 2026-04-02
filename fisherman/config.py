@@ -52,6 +52,7 @@ class FishermanConfig(BaseSettings):
     # Local frame viewer
     frames_dir: str = "~/.fisherman/frames"
     local_frames_max: int = 1000
+    screenpipe_data_dir: str = "~/.fisherman/screenpipe-data/data"
 
     # Control
     control_port: int = 7892

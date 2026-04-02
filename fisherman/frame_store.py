@@ -25,6 +25,8 @@ class FrameStore:
         ocr_text: str,
         urls: list[str],
         routing: RoutingDecision | None = None,
+        video_path: str | None = None,
+        video_offset: int = 0,
     ) -> None:
         ts_ms = int(frame.timestamp * 1000)
         dt = datetime.datetime.fromtimestamp(frame.timestamp, tz=datetime.timezone.utc)
@@ -55,6 +57,9 @@ class FrameStore:
         if routing:
             meta["tier_hint"] = routing.tier_hint
             meta["routing_signals"] = routing.to_wire().get("routing_signals", {})
+        if video_path:
+            meta["video_path"] = video_path
+            meta["video_offset"] = video_offset
 
         meta_path = os.path.join(day_dir, f"{ts_ms}.json")
         try:
@@ -106,6 +111,8 @@ class FrameStore:
                     with open(path) as f:
                         meta = json.load(f)
                     meta["_day"] = day
+                    jpg_path = os.path.join(day_dir, jf[:-5] + ".jpg")
+                    meta["has_image"] = os.path.isfile(jpg_path)
                     all_meta.append(meta)
                 except Exception:
                     continue
