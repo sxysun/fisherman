@@ -4,6 +4,20 @@ WebSocket ingest server that receives frames from the daemon, encrypts sensitive
 
 ## Quick Start
 
+Recommended: let an agent handle the server side for you.
+
+If you have Hermes / OpenCode / another shell-capable agent on the box, give it this repo and tell it to use:
+- `skills/fisherman-cli/`
+- `skills/mind-rolling-summary/`
+
+Then give it a prompt like:
+
+```text
+Set up the Fisherman server from this repo. Handle server deployment end-to-end, including environment setup, dependency installation, Postgres, auth token, encryption key, and starting the ingest service. Use the repo-local skills in `skills/fisherman-cli/` and `skills/mind-rolling-summary/`. When done, tell me the server WebSocket URL and the auth token the client should use.
+```
+
+Manual quick start:
+
 ```bash
 cd server
 bash setup.sh          # installs Postgres, generates keys, creates .env
@@ -12,7 +26,11 @@ uv run python ingest.py
 
 That's it. The server is running on `ws://localhost:9999/ingest`. Data is stored in local Postgres — persistent across restarts.
 
-Copy the `INGEST_AUTH_TOKEN` printed by setup.sh and paste it as `FISH_AUTH_TOKEN` in the client's settings (or `~/.fisherman/.env`).
+Auth model:
+- `INGEST_AUTH_TOKEN` is just a shared bearer password between client and server
+- `setup.sh` auto-generates one for convenience
+- you can also edit `.env` and set `INGEST_AUTH_TOKEN` yourself to any strong random token
+- the client must use the same value as `FISH_AUTH_TOKEN`
 
 ## What `setup.sh` Does
 

@@ -4,41 +4,64 @@ Lightweight macOS screen streamer. Uses Screenpipe for capture and OCR, then str
 
 ## Quick Start
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
-```
+Fisherman has two sides:
+- client: the macOS app that captures and streams frames
+- server: the ingest service that receives, encrypts, and stores them
 
-This installs everything (uv, screenpipe, Python deps), prompts for your server URL and auth token, builds the menu bar app, and deploys to `/Applications`.
-
-Then:
-
-```bash
-open /Applications/Fisherman.app
-```
-
-The app appears in the notch area. Green = streaming. It manages screenpipe and the fisherman daemon as child processes.
+Recommended setup:
+- end users install a prebuilt client app if you provide one
+- server operators use an agent-managed server setup or the manual server quick start
 
 ## New User Setup
 
-### 1. Deploy the server
+### 1. Set up the server
+
+Recommended for technical users: have an agent handle it.
+See `server/README.md` and `skills/` for the agent-managed flow.
+
+Manual quick start:
 
 ```bash
 cd server
-bash setup.sh        # auto-generates encryption keys and auth token, installs deps
-docker compose up    # starts Postgres + ingest server on port 9999
+bash setup.sh
+uv run python ingest.py
 ```
 
-No external database or cloud storage needed to get started — Postgres runs in Docker and frames are stored locally. Copy the auth token printed by `setup.sh` for the next step. See [`server/README.md`](server/README.md) for production setup with R2.
+This creates `.env`, installs dependencies, sets up Postgres, generates an encryption key, and generates an ingest auth token.
+
+Important auth note:
+- the client auth token is just a shared bearer password
+- `setup.sh` auto-generates one for convenience
+- you can also open `server/.env` and set `INGEST_AUTH_TOKEN` yourself to any strong random value you want
+- the client should use the same value as `FISH_AUTH_TOKEN`
+
+No external database or cloud storage is required to get started. Local Postgres + local frame storage works by default. See [`server/README.md`](server/README.md) for production options, agent setup, and R2.
 
 ### 2. Install the client (macOS)
+
+#### Option A — prebuilt app / DMG (recommended)
+
+If you provide a precompiled Fisherman.app or DMG to the user:
+1. drag `Fisherman.app` into `/Applications`
+2. open the app
+3. grant Screen Recording / related macOS permissions
+4. paste the server URL and auth token
+
+#### Option B — build/install from source (advanced)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
 ```
 
-### 3. Configure
+This installs dependencies, prompts for server URL + auth token, builds the menu bar app locally, and deploys it to `/Applications`.
 
-Open Fisherman.app, hover over the notch, and click **Settings**. Set your server URL (e.g. `ws://your-server:9999/ingest`) and auth token. The daemon restarts automatically when you save.
+### 3. Configure the client
+
+Open Fisherman.app, hover over the notch, and click **Settings**. Set:
+- server URL (for example `ws://your-server:9999/ingest` or `wss://your-server/ingest`)
+- auth token (the same shared token / password as `INGEST_AUTH_TOKEN` on the server)
+
+The daemon restarts automatically when you save.
 
 You can also edit `~/.fisherman/.env` directly — see the Configuration section below.
 
@@ -205,6 +228,7 @@ Returns decrypted OCR text, window titles, URLs, and app names from screen captu
 Workflow-specific skill mirrors live in:
 - `skills/fisherman-cli/` — instructions for querying and visually inspecting Fisherman data reliably
 - `skills/mind-rolling-summary/` — instructions/templates for turning Fisherman evidence into layered memory under `/home/ubuntu/mind`
+- `skills/server-agent-setup-prompt.md` — a copy-paste prompt for asking an agent to handle the server side end-to-end
 
 These mirror the live Hermes skills so the workflow is discoverable inside this repo too.
 
