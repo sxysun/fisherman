@@ -16,6 +16,15 @@ Then give it a prompt like:
 Set up the Fisherman server from this repo. Handle server deployment end-to-end, including environment setup, dependency installation, Postgres, auth token, encryption key, and starting the ingest service. Use the repo-local skills in `skills/fisherman-cli/` and `skills/mind-rolling-summary/`. When done, tell me the server WebSocket URL and the auth token the client should use.
 ```
 
+Agent-friendly shell entrypoint:
+
+```bash
+cd server
+bash bootstrap-agent.sh --start
+```
+
+This wraps setup, prints the client auth token, and starts the ingest server in the background.
+
 Manual quick start:
 
 ```bash

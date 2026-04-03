@@ -12,6 +12,20 @@ Recommended setup:
 - end users install a prebuilt client app if you provide one
 - server operators use an agent-managed server setup or the manual server quick start
 
+### One-line agent setup
+
+If you already have Hermes / OpenCode / another shell-capable agent on the server, point it at this repo and give it the prompt in:
+- `skills/server-agent-setup-prompt.md`
+
+If you prefer a shell entrypoint for the agent, it can also run:
+
+```bash
+cd server
+bash bootstrap-agent.sh --start
+```
+
+That will run setup, print the client auth token, and start the ingest server in the background.
+
 ## New User Setup
 
 ### 1. Set up the server
@@ -40,6 +54,10 @@ No external database or cloud storage is required to get started. Local Postgres
 ### 2. Install the client (macOS)
 
 #### Option A — prebuilt app / DMG (recommended)
+
+Recommended distribution model:
+- publish a signed `Fisherman.app`, `.zip`, or `.dmg` via GitHub Releases or your own download page
+- send users directly to that artifact instead of asking them to compile locally
 
 If you provide a precompiled Fisherman.app or DMG to the user:
 1. drag `Fisherman.app` into `/Applications`

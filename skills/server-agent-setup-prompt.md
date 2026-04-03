@@ -2,6 +2,15 @@
 
 Use this when you want an agent (Hermes, OpenCode, etc.) to handle the server side end-to-end.
 
+## Fast shell alternative
+
+If the agent prefers a shell entrypoint, it can run:
+
+```bash
+cd server
+bash bootstrap-agent.sh --start
+```
+
 ## Agent prompt
 
 ```text
