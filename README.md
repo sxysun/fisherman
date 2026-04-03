@@ -200,6 +200,14 @@ uv run fisherman summary --since "2h ago"           # activity by app
 Returns decrypted OCR text, window titles, URLs, and app names from screen captures.
 ```
 
+## Repo-local skill docs
+
+Workflow-specific skill mirrors live in:
+- `skills/fisherman-cli/` — instructions for querying and visually inspecting Fisherman data reliably
+- `skills/mind-rolling-summary/` — instructions/templates for turning Fisherman evidence into layered memory under `/home/ubuntu/mind`
+
+These mirror the live Hermes skills so the workflow is discoverable inside this repo too.
+
 ## Uninstall
 
 ```bash
