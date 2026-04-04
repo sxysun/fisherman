@@ -1,6 +1,6 @@
 ---
 name: mind-rolling-summary
-description: Build and maintain a searchable rolling memory system in /home/ubuntu/mind from Fisherman captures, with a compact rolling summary plus detailed timestamped markdown context logs.
+description: Build and maintain a searchable rolling memory system from Fisherman captures, with a compact rolling summary plus detailed timestamped markdown context logs.
 version: 0.1.0
 author: Hermes Agent
 license: MIT
@@ -8,7 +8,7 @@ license: MIT
 
 # Mind Rolling Summary
 
-Use this skill when you need to turn Fisherman screen-capture context into durable, searchable notes under `/home/ubuntu/mind`.
+Use this skill when you need to turn Fisherman screen-capture context into durable, searchable notes inside the agent's chosen knowledge base or memory directory.
 
 This skill is meant to work together with the `fisherman-cli` skill:
 - `fisherman-cli` = how to inspect the captured activity reliably
@@ -17,25 +17,27 @@ This skill is meant to work together with the `fisherman-cli` skill:
 ## Goal
 
 Maintain both:
-1. a compact high-signal running brief at `/home/ubuntu/mind/rolling-summary.md`
+1. a compact high-signal running brief at the chosen knowledge-base location (for example `rolling-summary.md`)
 2. richer timestamped markdown logs that preserve more detailed context for later search and reconstruction
+
+The exact root path is environment-specific. In Hermes this may be `/home/ubuntu/mind`, but other agents or repos may use a different target memory directory or vault. Reuse the local convention instead of hardcoding one global path.
 
 The design principle is **layered memory**:
 - `rolling-summary.md` = current worldview / stable themes / most important recency signal
 - `fisherman-digests/*.md` = timestamped narrative passes (one per analysis pass)
 - `context-hours/YYYY-MM-DD/HH.md` = denser searchable hour-bucket notes for reconstruction and retrieval
 - `context-entities/*.md` = flexible entity/topic pages for recurring people, companies, projects, chats, or motifs
-- `INDEX.md` = top-level map of the entire `/home/ubuntu/mind` folder, including uploaded writings, source docs, syntheses, and Fisherman-derived memory
+- `INDEX.md` = top-level map of the entire knowledge-base folder, including source docs, syntheses, and Fisherman-derived memory
 
 ## Canonical file layout
 
-Under `/home/ubuntu/mind`:
+Under the chosen knowledge-base root:
 
 - `rolling-summary.md`
   - current high-signal synthesis
   - should be readable in a few minutes
 - `INDEX.md`
-  - top-level map of the whole `mind/` folder
+  - top-level map of the whole knowledge-base folder
   - should index source writings, anchor documents, syntheses, and rolling observational memory
 - `fisherman-digests/YYYY-MM-DD_HHMM.md`
   - one file per Fisherman review pass
@@ -50,6 +52,18 @@ Active/optional directories depending on how useful they become:
 - `context-screens/` for exported screenshots worth preserving
 
 ## When to update what
+
+### Optional automation / scheduled maintenance
+If the user wants ongoing passive maintenance rather than one-off manual reviews, the agent should offer to create or verify a recurring scheduled job.
+
+Recommended generic behavior:
+- schedule the job at a reasonable cadence (hourly is a good default for active use)
+- ensure the recurring job loads both the Fisherman evidence-gathering instructions and this rolling-summary skill
+- ensure the scheduled prompt is self-contained and updates the chosen knowledge base autonomously
+- make the job write durable files, not just emit ephemeral chat summaries
+- preserve uncertainty, correction passes, and screenshot/OCR mismatch notes in the durable memory layer
+
+Because scheduler infrastructure differs by agent/runtime, do not assume a specific cron implementation. Use whatever recurring-job mechanism the current agent platform supports.
 
 ### Update `fisherman-digests/*.md` every review pass
 Create a new digest whenever you do a meaningful Fisherman review, whether the pass is:
@@ -153,8 +167,8 @@ Do not flood these files with raw OCR dumps. Curate into clean searchable notes.
   - what the user directly wrote
   - what an assistant/bot wrote
   - what was inferred from surrounding activity
-- Treat older `/home/ubuntu/mind/writings/*` as historically informative, not necessarily current ground truth.
-- Treat `what-problem-next-5-years.txt` as more current than old writings.
+- Treat older writings/archive folders in the chosen knowledge base as historically informative, not necessarily current ground truth.
+- If the knowledge base contains a more recent anchor essay or worldview note, weight it more heavily than older writings.
 
 ## Granularity guidance
 
