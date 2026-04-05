@@ -1,15 +1,23 @@
+---
+type: fisherman-digest
+status: draft
+last_updated: YYYY-MM-DD HH:MM UTC
+time_span: YYYY-MM-DD HH:MM UTC → YYYY-MM-DD HH:MM UTC
+entities: []
+tags: [fisherman, timeline, digest]
+moc: []
+---
+
 # Fisherman digest — YYYY-MM-DD HH:MM UTC
 
-Window reviewed: primarily **...** from Fisherman (`summary --since "2h ago"`, targeted per-app pulls, and visual exports).
-Current clock during pass: **...**.
-Assessment: **fresh active window / continuity pass / correction pass**.
+## Metadata
+- Digest timestamp: YYYY-MM-DD HH:MM UTC
+- Reviewed window: YYYY-MM-DD HH:MM UTC → YYYY-MM-DD HH:MM UTC
+- Current clock during pass: YYYY-MM-DD HH:MM UTC
+- Assessment: fresh active window / continuity pass / correction pass
 
-## Self-account
+## Strongest direct evidence
 - ...
-
-## Observed activity
-- **App / surface:** ...
-- **App / surface:** ...
 
 ## Inferred themes
 - ...
@@ -19,3 +27,8 @@ Assessment: **fresh active window / continuity pass / correction pass**.
 
 ## Best current read
 - ...
+
+## Related pages
+- [[MOC - Active Workstreams]]
+- [[MOC - Fisherman Timeline]]
+- [[ENTITY OR PROJECT PAGE]]

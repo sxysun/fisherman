@@ -1,6 +1,6 @@
 ---
 name: mind-rolling-summary
-description: Build and maintain a searchable rolling memory system from Fisherman captures, with a compact rolling summary plus detailed timestamped markdown context logs.
+description: Build and maintain /home/ubuntu/mind as an Obsidian-native compiled wiki from Fisherman captures — with rolling summary, digests, context-hours, entity pages, MOCs, area pages, and system docs for retrieval/search.
 version: 0.1.0
 author: Hermes Agent
 license: MIT
@@ -8,7 +8,7 @@ license: MIT
 
 # Mind Rolling Summary
 
-Use this skill when you need to turn Fisherman screen-capture context into durable, searchable notes inside the agent's chosen knowledge base or memory directory.
+Use this skill when you need to turn Fisherman screen-capture context into durable, searchable notes under `/home/ubuntu/mind`.
 
 This skill is meant to work together with the `fisherman-cli` skill:
 - `fisherman-cli` = how to inspect the captured activity reliably
@@ -17,27 +17,39 @@ This skill is meant to work together with the `fisherman-cli` skill:
 ## Goal
 
 Maintain both:
-1. a compact high-signal running brief at the chosen knowledge-base location (for example `rolling-summary.md`)
+1. a compact high-signal running brief at `/home/ubuntu/mind/rolling-summary.md`
 2. richer timestamped markdown logs that preserve more detailed context for later search and reconstruction
-
-The exact root path is environment-specific. In Hermes this may be `/home/ubuntu/mind`, but other agents or repos may use a different target memory directory or vault. Reuse the local convention instead of hardcoding one global path.
 
 The design principle is **layered memory**:
 - `rolling-summary.md` = current worldview / stable themes / most important recency signal
 - `fisherman-digests/*.md` = timestamped narrative passes (one per analysis pass)
 - `context-hours/YYYY-MM-DD/HH.md` = denser searchable hour-bucket notes for reconstruction and retrieval
 - `context-entities/*.md` = flexible entity/topic pages for recurring people, companies, projects, chats, or motifs
-- `INDEX.md` = top-level map of the entire knowledge-base folder, including source docs, syntheses, and Fisherman-derived memory
+- `mocs/*.md` = map-of-content pages that gather and route related pages
+- `areas/*.md` = durable workstream/theme pages that sit between entity pages and the top-level rolling summary
+- `system/*.md` = maintenance docs that define retrieval order, search behavior, and wiki operating rules
+- `INDEX.md` = top-level map of the entire `/home/ubuntu/mind` folder, including uploaded writings, source docs, syntheses, and Fisherman-derived memory
+
+This should increasingly be treated as an **Obsidian-native LLM wiki**, not just a logging system:
+- the wiki is a compiled layer between raw sources and future reasoning
+- Hermes should search the compiled layer before going back to raw source files
+- future structure should move toward clearer separation of **raw sources**, **compiled wiki**, and **system/maintenance docs**
+- use wikilinks, frontmatter, MOCs (maps of content), and stable page types wherever useful
+- when deciding whether to add a new page or update an old one, prefer maintaining the wiki as a coherent artifact over appending disconnected summaries
 
 ## Canonical file layout
 
-Under the chosen knowledge-base root:
+See also:
+- `references/file-layout.md`
+- `references/obsidian-native-llm-wiki.md`
+
+Under `/home/ubuntu/mind`:
 
 - `rolling-summary.md`
   - current high-signal synthesis
   - should be readable in a few minutes
 - `INDEX.md`
-  - top-level map of the whole knowledge-base folder
+  - top-level map of the whole `mind/` folder
   - should index source writings, anchor documents, syntheses, and rolling observational memory
 - `fisherman-digests/YYYY-MM-DD_HHMM.md`
   - one file per Fisherman review pass
@@ -64,6 +76,40 @@ Recommended generic behavior:
 - preserve uncertainty, correction passes, and screenshot/OCR mismatch notes in the durable memory layer
 
 Because scheduler infrastructure differs by agent/runtime, do not assume a specific cron implementation. Use whatever recurring-job mechanism the current agent platform supports.
+
+### Cron verification / stale-job troubleshooting
+A scheduled job can look healthy while the actual mind layer is stale.
+
+Use this verification pattern whenever the user asks whether the rolling summary has really been running, or when the latest Fisherman activity is newer than the latest digest/summary timestamps:
+1. Inspect the scheduler metadata itself (enabled state, `last_run_at`, `last_status`, `next_run_at`).
+2. Inspect the durable outputs on disk, not just job status:
+   - latest files under the scheduler output directory
+   - latest files under `/home/ubuntu/mind/fisherman-digests/`
+   - `Last updated:` in `/home/ubuntu/mind/rolling-summary.md`
+3. Compare those timestamps to the newest available Fisherman frame timestamp.
+4. If the job is enabled but the mind files lag behind the newest frames, treat that as a real stale-memory condition even if the last scheduler status says `ok`.
+5. Manually run a catch-up pass immediately:
+   - write the missing digest/hour/entity/summary/index updates to `/home/ubuntu/mind`
+   - then verify that the new files actually exist on disk
+6. After the manual catch-up, tighten the recurring job prompt so it explicitly:
+   - performs catch-up work when durable notes are behind the newest frames
+   - only emits `[SILENT]` when there is genuinely nothing new and no files were changed
+   - reports which durable files were updated when it does make changes
+7. Re-check the next scheduled run after the update.
+
+Important practical lesson: a cron job can be `enabled` and `ok` yet still fail to advance the durable memory layer if the prompt is too willing to return `[SILENT]` or does not explicitly compare Fisherman recency against the on-disk mind files.
+
+### If the user asks for a "daily digest" of observed work
+Default to the rolling-summary system rather than producing only an ephemeral chat summary.
+
+Meaning:
+- create a new `fisherman-digests/*.md` pass note
+- update the relevant `context-hours/YYYY-MM-DD/HH.md` files
+- update `rolling-summary.md` if the high-level read sharpened
+- update `INDEX.md`
+- optionally give a concise chat summary too, but the durable mind-layer update is the default
+
+If you temporarily answer with a one-off digest first and the user pushes back (for example: "use the rolling summary skill"), treat that as a correction and fold the same synthesis into the full rolling-memory structure immediately.
 
 ### Update `fisherman-digests/*.md` every review pass
 Create a new digest whenever you do a meaningful Fisherman review, whether the pass is:
@@ -127,6 +173,12 @@ It should usually contain:
 - recency notes
 - if useful, a short “where to look next” section
 
+Treat it as a compact synthesis page in a wiki, not a diary. Over time it should become more Obsidian-native:
+- use frontmatter when practical
+- add wikilinks for recurring entities/projects/workstreams
+- avoid duplicating lower-level detail that belongs in entity pages or timeline pages
+- link outward to the most relevant MOCs or entity pages once those exist
+
 ### For `fisherman-digests/*.md`
 Each digest should explicitly include:
 - timestamp of the digest
@@ -150,6 +202,13 @@ Prefer sections like:
 - `## Open questions / ambiguity`
 - `## Source digests`
 
+Treat each hour note as a timeline page in a larger wiki:
+- preserve exact searchable strings
+- link recurring entities/topics with wikilinks when possible
+- keep direct evidence separate from inference
+- avoid raw OCR dumps unless absolutely necessary
+- if an hour clearly belongs to a larger workstream, link that workstream or entity page explicitly
+
 Important: preserve concrete searchable strings where useful:
 - app names
 - chat titles
@@ -167,8 +226,8 @@ Do not flood these files with raw OCR dumps. Curate into clean searchable notes.
   - what the user directly wrote
   - what an assistant/bot wrote
   - what was inferred from surrounding activity
-- Treat older writings/archive folders in the chosen knowledge base as historically informative, not necessarily current ground truth.
-- If the knowledge base contains a more recent anchor essay or worldview note, weight it more heavily than older writings.
+- Treat older `/home/ubuntu/mind/writings/*` as historically informative, not necessarily current ground truth.
+- Treat `what-problem-next-5-years.txt` as more current than old writings.
 
 ## Granularity guidance
 
@@ -187,6 +246,19 @@ Ask after each pass:
 - Did I preserve the key names/terms someone would actually search?
 - Did I keep the rolling summary short enough to reread quickly?
 - Did I record important uncertainty instead of laundering it away?
+
+## Tooling pitfall when updating mind files
+
+When reading existing markdown files with Hermes `read_file`, remember that the returned `content` includes `LINE_NUM|` prefixes for every line.
+
+Do **not** feed that string directly back into `write_file` / `execute_code` rewrites, or you will accidentally persist the line-number prefixes into the markdown files.
+
+Safer patterns:
+- use targeted `patch` edits when possible
+- if using Python/shell for a full rewrite, read the file from disk directly instead of reusing `read_file` output
+- if you must reuse `read_file` output programmatically, strip the leading `^\s*\d+\|` prefix from each line before writing
+
+This matters especially for `rolling-summary.md`, `INDEX.md`, and `context-hours/*.md`, where accidental prefix persistence pollutes the user's durable memory layer.
 
 ## Backfill / reinspection procedure
 
@@ -226,4 +298,6 @@ See:
 - `templates/digest-template.md`
 - `templates/context-hour-template.md`
 - `templates/entity-template.md`
+- `templates/area-template.md`
 - `references/file-layout.md`
+- `references/obsidian-native-llm-wiki.md`
