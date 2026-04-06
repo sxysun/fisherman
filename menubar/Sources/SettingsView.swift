@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var serverURL: String = ""
     @State private var authToken: String = ""
     @State private var controlPort: String = ""
+    @State private var setupCode: String = ""
+    @State private var setupCodeError: String? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -21,6 +23,40 @@ struct SettingsView: View {
                 Spacer()
             }
 
+            // Quick Setup
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.yellow)
+                    Text("Quick Setup")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+
+                TextField("Paste setup code here...", text: $setupCode)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 13, design: .monospaced))
+                    .onSubmit { applySetupCode() }
+
+                if let error = setupCodeError {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                }
+
+                Button("Connect") { applySetupCode() }
+                    .disabled(setupCode.isEmpty)
+            }
+
+            HStack {
+                VStack { Divider() }
+                Text("or configure manually")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .layoutPriority(1)
+                VStack { Divider() }
+            }
+
             // Server URL
             VStack(alignment: .leading, spacing: 4) {
                 Text("Server URL")
@@ -29,6 +65,14 @@ struct SettingsView: View {
                 TextField("ws://localhost:9999/ingest", text: $serverURL)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 13, design: .monospaced))
+                    .onChange(of: serverURL) { _, newValue in
+                        // Detect fish: prefix pasted into the URL field
+                        if newValue.hasPrefix("fish:") {
+                            setupCode = newValue
+                            serverURL = config.serverURL
+                            applySetupCode()
+                        }
+                    }
             }
 
             // Auth Token (plain NSTextField per MEMORY.md — NSSecureTextField triggers Passwords dialog)
@@ -83,5 +127,18 @@ struct SettingsView: View {
             authToken = config.authToken
             controlPort = config.controlPort
         }
+    }
+
+    private func applySetupCode() {
+        setupCodeError = nil
+        guard let parsed = ConfigManager.parseSetupCode(setupCode) else {
+            setupCodeError = "Invalid setup code"
+            return
+        }
+        config.serverURL = parsed.url
+        config.authToken = parsed.token
+        config.controlPort = controlPort // keep existing control port
+        config.save()
+        onSave()
     }
 }

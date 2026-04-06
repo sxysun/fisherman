@@ -77,11 +77,13 @@ This installs dependencies, prompts for server URL + auth token, builds the menu
 
 ### 3. Configure the client
 
-Open Fisherman.app, hover over the notch, and click **Settings**. Set:
+**Quickest:** paste the setup code from the server into Fisherman's **Quick Setup** field. The server prints a one-line code like `fish:eyJ1cmw...` when you run `bootstrap-agent.sh`. Paste it and click **Connect** — done.
+
+**Manual:** hover over the notch, click **Settings**, and enter:
 - server URL (for example `ws://your-server:9999/ingest` or `wss://your-server/ingest`)
 - auth token (the same shared token / password as `INGEST_AUTH_TOKEN` on the server)
 
-The daemon restarts automatically when you save.
+The daemon restarts automatically when you save. On first launch with no server configured, the settings window opens automatically.
 
 You can also edit `~/.fisherman/.env` directly — see the Configuration section below.
 

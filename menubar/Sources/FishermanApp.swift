@@ -93,6 +93,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         Task { @MainActor in
             await notch.compact()
         }
+
+        // Auto-open settings on first launch if not configured
+        if !configManager.isConfigured {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.openSettings()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

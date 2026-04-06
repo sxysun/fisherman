@@ -91,6 +91,22 @@ final class ConfigManager {
         NSLog("[Fisherman] saved config to \(envPath)")
     }
 
+    var isConfigured: Bool {
+        !serverURL.isEmpty && serverURL != "ws://localhost:9999/ingest"
+    }
+
+    static func parseSetupCode(_ code: String) -> (url: String, token: String)? {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "fish:"
+        guard trimmed.hasPrefix(prefix) else { return nil }
+        let b64 = String(trimmed.dropFirst(prefix.count))
+        guard let data = Data(base64Encoded: b64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let url = json["url"]
+        else { return nil }
+        return (url: url, token: json["token"] ?? "")
+    }
+
     private func extractValue(_ line: String, key: String) -> String? {
         let prefix = "\(key)="
         guard line.hasPrefix(prefix) else { return nil }
