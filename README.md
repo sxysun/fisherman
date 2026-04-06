@@ -53,27 +53,15 @@ No external database or cloud storage is required to get started. Local Postgres
 
 ### 2. Install the client (macOS)
 
-#### Option A — prebuilt app / DMG (recommended)
-
-Recommended distribution model:
-- publish a `Fisherman.app`, `.zip`, or `.dmg` via GitHub Releases or your own download page
-- send users directly to that artifact instead of asking them to compile locally
-- this repo now includes a GitHub Actions workflow at `.github/workflows/macos-release.yml` that can build `.zip` and `.dmg` artifacts for tagged releases or manual runs
-- for the smoothest end-user install experience, you will eventually want Apple signing/notarization credentials; without that, the app is still distributable but macOS may show extra warnings/quarantine friction
-
-If you provide a precompiled Fisherman.app or DMG to the user:
-1. drag `Fisherman.app` into `/Applications`
-2. open the app
-3. grant Screen Recording / related macOS permissions
-4. paste the server URL and auth token
-
-#### Option B — build/install from source (advanced)
+Build and install from source:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
 ```
 
-This installs dependencies, prompts for server URL + auth token, builds the menu bar app locally, and deploys it to `/Applications`.
+This installs dependencies, prompts for server URL + auth token, builds the menu bar app locally, and deploys it to `/Applications`. After install, hover over the notch and open Settings to paste the setup code from your server.
+
+There is currently no prebuilt DMG. The source build is the only supported install path.
 
 ### 3. Configure the client
 
@@ -253,13 +241,6 @@ Workflow-specific skill mirrors live in:
 - `skills/server-agent-setup-prompt.md` — a copy-paste prompt for asking an agent to handle the server side end-to-end
 
 These mirror the live Hermes skills so the workflow is discoverable inside this repo too.
-
-## Release automation
-
-- `.github/workflows/macos-release.yml` builds `Fisherman.app`, `.zip`, and `.dmg` artifacts on macOS runners
-- run it manually from GitHub Actions or push a tag like `v0.1.0` to publish release artifacts
-- current workflow uses ad-hoc signing for distributable artifacts
-- if you want first-class macOS install UX, the next step is adding Apple Developer signing + notarization secrets and extending the workflow
 
 ## Uninstall
 
