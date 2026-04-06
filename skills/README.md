@@ -1,11 +1,12 @@
-# Fisherman repo skill mirrors
+# Fisherman skill references
 
-This directory mirrors Hermes skill packages that are tightly related to the Fisherman workflow.
+The canonical agent entry point is **[`/SKILL.md`](../SKILL.md)** at the repo root. It covers all three phases — server setup, querying captured data, and maintaining the rolling-memory wiki — and links into this directory for the deep operational reference.
 
-Current subdirectories:
-- `fisherman-cli/` — how Hermes should query and inspect Fisherman data reliably
-- `mind-rolling-summary/` — how Hermes should convert Fisherman evidence into layered memory files under `/home/ubuntu/mind`
+This folder holds the deeper, longer-form material that `SKILL.md` links to:
 
-Note:
-- The live Hermes source-of-truth skills still live under `~/.hermes/skills/...`
-- These repo-local copies are here so the workflow is discoverable alongside the Fisherman codebase.
+- `fisherman-cli/SKILL.md` — full query playbook with every OCR/screenshot mismatch trap encountered in production and the recovery patterns for each
+- `mind-rolling-summary/SKILL.md` — full memory-wiki maintenance procedure
+- `mind-rolling-summary/templates/` — page templates for digests, hour notes, entity pages, and area pages
+- `mind-rolling-summary/references/` — file-layout reference and the Obsidian-native LLM wiki design notes
+
+Agents should read `/SKILL.md` first and only open these files when they need the deeper reference.
