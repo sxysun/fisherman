@@ -9,7 +9,7 @@ from fisherman.config import FishermanConfig
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
-from fisherman.ocr import ocr_fast
+from fisherman.ocr import maybe_extract_pdf_context, ocr_fast
 from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
 from fisherman.router import TierRouter
@@ -40,6 +40,33 @@ class FishermanDaemon:
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
         self._consecutive_capture_failures = 0
+
+    async def _enhance_pdf_context(self, frame, ocr_text: str, urls: list[str]) -> tuple[str, list[str]]:
+        loop = asyncio.get_running_loop()
+        try:
+            pdf_text, pdf_urls = await loop.run_in_executor(
+                self._pool,
+                maybe_extract_pdf_context,
+                frame.app_name,
+                frame.window_title,
+                frame.jpeg_data,
+            )
+        except Exception:
+            log.debug("pdf_context_enhancement_failed", exc_info=True)
+            return ocr_text, urls
+
+        if len(pdf_text) > len(ocr_text):
+            merged_urls = list(dict.fromkeys((pdf_urls or []) + (urls or [])))
+            log.debug(
+                "pdf_context_enhanced",
+                app=frame.app_name,
+                window=frame.window_title,
+                original_len=len(ocr_text),
+                enhanced_len=len(pdf_text),
+            )
+            return pdf_text, merged_urls
+
+        return ocr_text, urls
 
     async def run(self) -> None:
         self._running = True
@@ -160,6 +187,8 @@ class FishermanDaemon:
                 log.warning("ocr_failed", exc_info=True)
                 ocr_text, urls = "", []
 
+            ocr_text, urls = await self._enhance_pdf_context(frame, ocr_text, urls)
+
             await self._publish_frame(frame, diff.distance, ocr_text, urls)
 
             elapsed = asyncio.get_event_loop().time() - t0
@@ -229,11 +258,15 @@ class FishermanDaemon:
                 else:
                     distance = 64  # max distance — treat as fully new
 
+                ocr_text, urls = await self._enhance_pdf_context(
+                    frame, payload.ocr_text, payload.urls
+                )
+
                 await self._publish_frame(
                     frame,
                     distance,
-                    payload.ocr_text,
-                    payload.urls,
+                    ocr_text,
+                    urls,
                     video_path=payload.video_path,
                     video_offset=payload.video_offset,
                 )
@@ -266,6 +299,8 @@ class FishermanDaemon:
                 except Exception:
                     log.warning("ocr_failed", exc_info=True)
                     ocr_text, urls = "", []
+
+            ocr_text, urls = await self._enhance_pdf_context(frame, ocr_text, urls)
 
             await self._publish_frame(frame, dhash_distance, ocr_text, urls)
 
