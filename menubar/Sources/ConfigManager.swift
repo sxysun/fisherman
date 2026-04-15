@@ -9,6 +9,14 @@ struct Friend: Sendable {
     let activityPort: String   // e.g. "9998"
 }
 
+struct FriendCode: Codable {
+    let n: String  // display name
+    let k: String  // pubkey hex
+    let h: String  // hostname
+    let w: Int     // ws port (default 9999)
+    let a: Int     // activity port (default 9996)
+}
+
 @Observable
 final class ConfigManager {
     var serverURL: String = "ws://localhost:9999/ingest"
@@ -18,6 +26,9 @@ final class ConfigManager {
     // Ed25519 key pair (hex-encoded)
     var privateKeyHex: String = ""
     var publicKeyHex: String = ""
+
+    // Display name for friend codes
+    var displayName: String = NSFullUserName().components(separatedBy: " ").first ?? NSUserName()
 
     // P2P friends
     var friends: [Friend] = []
@@ -62,6 +73,9 @@ final class ConfigManager {
                     publicKeyHex = signing.publicKey.rawRepresentation
                         .map { String(format: "%02x", $0) }.joined()
                 }
+            } else if let value = extractValue(trimmed, key: "FISH_DISPLAY_NAME") {
+                displayName = value
+                knownKeyLines["FISH_DISPLAY_NAME"] = i
             } else if let value = extractValue(trimmed, key: "FISH_FRIENDS") {
                 knownKeyLines["FISH_FRIENDS"] = i
                 friends = parseFriends(value)
@@ -95,6 +109,7 @@ final class ConfigManager {
             ("FISH_SERVER_URL", serverURL),
             ("FISH_CONTROL_PORT", controlPort),
             ("FISH_PRIVATE_KEY", privateKeyHex),
+            ("FISH_DISPLAY_NAME", displayName),
             ("FISH_FRIENDS", friendsStr),
         ]
 
@@ -155,8 +170,120 @@ final class ConfigManager {
 
     func removeFriend(at index: Int) {
         guard index >= 0, index < friends.count else { return }
+        let friend = friends[index]
         friends.remove(at: index)
         save()
+        // Also remove from server allow-list
+        deregisterFriendOnServer(pubkey: friend.publicKey)
+    }
+
+    // MARK: - Friend codes
+
+    /// Generate a friend code encoding this user's connection info.
+    func generateFriendCode(name: String) -> String? {
+        guard !publicKeyHex.isEmpty else { return nil }
+
+        // Extract host and ws port from serverURL (e.g. "ws://1.2.3.4:9999/ingest")
+        guard let url = URL(string: serverURL),
+              let host = url.host else { return nil }
+        let wsPort = url.port ?? 9999
+        let actPort = Int(activityPort) ?? 9998
+
+        let code = FriendCode(n: name, k: publicKeyHex, h: host, w: wsPort, a: actPort)
+        guard let jsonData = try? JSONEncoder().encode(code) else { return nil }
+
+        let base64 = jsonData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        return "fish:\(base64)"
+    }
+
+    /// Parse a `fish:<base64url>` friend code string.
+    static func parseFriendCode(_ code: String) -> FriendCode? {
+        let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("fish:") else { return nil }
+
+        var base64 = String(trimmed.dropFirst(5))
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+
+        // Restore padding
+        let remainder = base64.count % 4
+        if remainder > 0 { base64 += String(repeating: "=", count: 4 - remainder) }
+
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return try? JSONDecoder().decode(FriendCode.self, from: data)
+    }
+
+    /// Add a friend from a parsed code, optionally overriding the display name.
+    func addFriendFromCode(_ code: FriendCode, overrideName: String? = nil) {
+        let name = overrideName?.isEmpty == false ? overrideName! : code.n
+        let wsURL = "ws://\(code.h):\(code.w)"
+        let actPort = String(code.a)
+
+        addFriend(name: name, publicKey: code.k, serverURL: wsURL, activityPort: actPort)
+        registerFriendOnServer(pubkey: code.k)
+    }
+
+    /// POST friend pubkey to own server's /api/friends (owner auth).
+    func registerFriendOnServer(pubkey: String) {
+        guard let authValue = signRequest() else { return }
+
+        // Build HTTP URL from WS URL
+        let httpBase = httpBaseURL()
+        guard let url = URL(string: "\(httpBase)/api/friends") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(authValue, forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["pubkey": pubkey])
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                NSLog("[Fisherman] register friend failed: \(error)")
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            NSLog("[Fisherman] register friend response: \(status)")
+        }.resume()
+    }
+
+    /// DELETE friend pubkey from own server's /api/friends.
+    private func deregisterFriendOnServer(pubkey: String) {
+        guard let authValue = signRequest() else { return }
+
+        let httpBase = httpBaseURL()
+        guard let url = URL(string: "\(httpBase)/api/friends") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(authValue, forHTTPHeaderField: "Authorization")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["pubkey": pubkey])
+
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                NSLog("[Fisherman] deregister friend failed: \(error)")
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            NSLog("[Fisherman] deregister friend response: \(status)")
+        }.resume()
+    }
+
+    /// Derive HTTP API base URL from the WS server URL.
+    private func httpBaseURL() -> String {
+        // serverURL is like "ws://host:9999/ingest" — HTTP API is on activityPort or 9998
+        guard let url = URL(string: serverURL), let host = url.host else {
+            return "http://localhost:9998"
+        }
+        // The HTTP API runs on HTTP_API_PORT (default 9998) which is stored as activityPort
+        let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
+        let port = Int(activityPort) ?? 9998
+        return "\(scheme)://\(host):\(port)"
     }
 
     // MARK: - Private helpers

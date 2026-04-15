@@ -33,6 +33,7 @@ from storage import R2Storage, LocalStorage, create_storage
 from auth import (
     load_signing_key, load_friends, verify_request,
     is_owner, is_authorized,
+    add_friend, remove_friend, get_friends_hex,
 )
 
 try:
@@ -270,6 +271,60 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _http_get_friends(request: "web.Request") -> "web.Response":
+    """GET /api/friends - list all friend pubkeys (owner only)."""
+    auth_header = request.headers.get("Authorization", "")
+    valid, pubkey = verify_request(auth_header)
+    if not valid or not is_owner(pubkey):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    friends = get_friends_hex()
+    return web.json_response({"friends": friends, "count": len(friends)})
+
+
+async def _http_add_friend(request: "web.Request") -> "web.Response":
+    """POST /api/friends - add a friend pubkey (owner only)."""
+    auth_header = request.headers.get("Authorization", "")
+    valid, pubkey = verify_request(auth_header)
+    if not valid or not is_owner(pubkey):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    pk = body.get("pubkey", "").strip()
+    if not pk or len(pk) != 64:
+        return web.json_response({"error": "pubkey must be 64 hex chars"}, status=400)
+
+    if add_friend(pk):
+        log.info("friend_added_via_api", pubkey=pk[:16])
+        return web.json_response({"ok": True, "pubkey": pk})
+    return web.json_response({"error": "Invalid pubkey hex"}, status=400)
+
+
+async def _http_delete_friend(request: "web.Request") -> "web.Response":
+    """DELETE /api/friends - remove a friend pubkey (owner only)."""
+    auth_header = request.headers.get("Authorization", "")
+    valid, pubkey = verify_request(auth_header)
+    if not valid or not is_owner(pubkey):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    pk = body.get("pubkey", "").strip()
+    if not pk:
+        return web.json_response({"error": "pubkey is required"}, status=400)
+
+    remove_friend(pk)
+    log.info("friend_removed_via_api", pubkey=pk[:16])
+    return web.json_response({"ok": True, "pubkey": pk})
+
+
 async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
     """Background task that categorizes activity every 60s."""
     loop = asyncio.get_running_loop()
@@ -390,6 +445,9 @@ async def _run(host: str, port: int) -> None:
         app = web.Application()
         app["db"] = db
         app.router.add_get("/api/current_activity", _http_current_activity)
+        app.router.add_get("/api/friends", _http_get_friends)
+        app.router.add_post("/api/friends", _http_add_friend)
+        app.router.add_delete("/api/friends", _http_delete_friend)
         http_runner = web.AppRunner(app)
         await http_runner.setup()
         http_port = int(os.environ.get("HTTP_API_PORT", "9998"))

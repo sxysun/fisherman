@@ -9,12 +9,21 @@ struct SettingsView: View {
     @State private var controlPort: String = ""
     @State private var selectedTab: SettingsTab = .server
 
-    // Add friend form
+    @State private var displayName: String = ""
+
+    // Friend code paste
+    @State private var friendCodeInput: String = ""
+    @State private var parsedFriendCode: FriendCode?
+    @State private var friendCodeOverrideName: String = ""
+    @State private var friendCodeError: String?
+
+    // Manual add friend form (power user toggle)
     @State private var newFriendName: String = ""
     @State private var newFriendPubkey: String = ""
     @State private var newFriendServer: String = ""
     @State private var newFriendPort: String = "9998"
     @State private var showAddFriend = false
+    @State private var showManualAdd = false
     @State private var addFriendError: String?
 
     enum SettingsTab: String, CaseIterable {
@@ -76,6 +85,7 @@ struct SettingsView: View {
                 Button("Save") {
                     config.serverURL = serverURL
                     config.controlPort = controlPort
+                    config.displayName = displayName
                     config.save()
                     onSave()
                 }
@@ -84,10 +94,11 @@ struct SettingsView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 400, height: 420)
+        .frame(width: 420, height: 480)
         .onAppear {
             serverURL = config.serverURL
             controlPort = config.controlPort
+            displayName = config.displayName
         }
     }
 
@@ -108,11 +119,34 @@ struct SettingsView: View {
 
     private var identityTab: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("Your Key Pair")
+            sectionHeader("Your Friend Code")
 
-            hintText("Your identity is your key pair. It was generated automatically on first launch.")
+            hintText("Share this code with friends. They paste it to add you.")
 
-            // Public key (the one you share)
+            fieldRow("Your Name", placeholder: "alice", text: $displayName)
+
+            // Friend code display
+            if let code = config.generateFriendCode(name: displayName) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Friend Code")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        copyButton(code, label: "Copy")
+                    }
+                    monoBox(code)
+                }
+            } else {
+                hintText("Configure your server URL first to generate a friend code.")
+            }
+
+            Divider()
+
+            sectionHeader("Key Pair")
+
+            hintText("Generated automatically on first launch.")
+
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Public Key")
@@ -124,11 +158,6 @@ struct SettingsView: View {
                 monoBox(config.publicKeyHex)
             }
 
-            hintText("Share your public key with friends so they can add you.")
-
-            Divider()
-
-            // Private key (keep secret, copy to server)
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Private Key")
@@ -140,36 +169,7 @@ struct SettingsView: View {
                 monoBox(String(config.privateKeyHex.prefix(16)) + "..." + String(config.privateKeyHex.suffix(8)))
             }
 
-            hintText("Add this to your server's .env file as:\nFISH_PRIVATE_KEY=\(config.privateKeyHex.prefix(8))...")
-
-            Divider()
-
-            sectionHeader("Server Setup")
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("On your server, add to .env:")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                let envSnippet = "FISH_PRIVATE_KEY=\(config.privateKeyHex)"
-                HStack {
-                    monoBox(String(envSnippet.prefix(40)) + "...")
-                    copyButton(envSnippet, label: "Copy line")
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("To let friends query your activity, add their public keys:")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
-                let friendKeys = config.friends.map(\.publicKey).joined(separator: ",")
-                let fishFriendsLine = "FISH_FRIENDS=\(friendKeys.isEmpty ? "<pubkey1>,<pubkey2>" : friendKeys)"
-                HStack {
-                    monoBox(String(fishFriendsLine.prefix(48)) + (fishFriendsLine.count > 48 ? "..." : ""))
-                    copyButton(fishFriendsLine, label: "Copy line")
-                }
-            }
+            hintText("Add FISH_PRIVATE_KEY to your server's .env:\nFISH_PRIVATE_KEY=\(config.privateKeyHex.prefix(8))...")
         }
     }
 
@@ -179,8 +179,66 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionHeader("Friends")
 
-            hintText("Add friends to see their activity in your notch. They must also add your public key to their server's FISH_FRIENDS.")
+            hintText("Paste a friend code to add someone. Both sides must add each other.")
 
+            // Friend code paste field
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Paste friend code")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("fish:eyJ...", text: $friendCodeInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .onChange(of: friendCodeInput) { _, newValue in
+                        parseFriendCodeInput(newValue)
+                    }
+            }
+
+            // Preview card when valid
+            if let code = parsedFriendCode {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(code.n)
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("\(code.h):\(code.w)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                            Text(code.k.prefix(16) + "...")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                    }
+
+                    fieldRow("Display as", placeholder: code.n, text: $friendCodeOverrideName)
+
+                    if let error = friendCodeError {
+                        Text(error)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                    }
+
+                    Button("Add") {
+                        addFriendFromCode()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if !friendCodeInput.isEmpty {
+                if let error = friendCodeError {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Divider()
+
+            // Existing friends list
             if config.friends.isEmpty {
                 HStack {
                     Spacer()
@@ -188,7 +246,7 @@ struct SettingsView: View {
                         Text("No friends yet")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
-                        Text("Add a friend to see their activity")
+                        Text("Paste a friend code above to get started")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                     }
@@ -203,21 +261,18 @@ struct SettingsView: View {
 
             Divider()
 
-            if showAddFriend {
+            // Manual add toggle for power users
+            if showManualAdd {
                 addFriendForm
             } else {
                 Button {
-                    showAddFriend = true
+                    showManualAdd = true
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 12))
-                        Text("Add Friend")
-                            .font(.system(size: 12, weight: .medium))
-                    }
+                    Text("Or add manually...")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(.plain)
             }
         }
     }
@@ -227,11 +282,11 @@ struct SettingsView: View {
     private var addFriendForm: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Add Friend")
+                Text("Add Manually")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Button("Cancel") {
-                    showAddFriend = false
+                    showManualAdd = false
                     clearAddFriendForm()
                 }
                 .font(.system(size: 11))
@@ -342,6 +397,54 @@ struct SettingsView: View {
 
     // MARK: - Actions
 
+    private func parseFriendCodeInput(_ input: String) {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            parsedFriendCode = nil
+            friendCodeError = nil
+            friendCodeOverrideName = ""
+            return
+        }
+
+        if let code = ConfigManager.parseFriendCode(trimmed) {
+            // Validate pubkey length
+            guard code.k.count == 64, code.k.allSatisfy({ $0.isHexDigit }) else {
+                parsedFriendCode = nil
+                friendCodeError = "Invalid public key in code"
+                return
+            }
+            parsedFriendCode = code
+            friendCodeOverrideName = code.n
+            friendCodeError = nil
+        } else {
+            parsedFriendCode = nil
+            if trimmed.hasPrefix("fish:") {
+                friendCodeError = "Invalid friend code"
+            } else {
+                friendCodeError = "Code must start with fish:"
+            }
+        }
+    }
+
+    private func addFriendFromCode() {
+        guard let code = parsedFriendCode else { return }
+
+        // Check for duplicate
+        if config.friends.contains(where: { $0.publicKey == code.k }) {
+            friendCodeError = "Already added this friend"
+            return
+        }
+
+        let name = friendCodeOverrideName.trimmingCharacters(in: .whitespaces)
+        config.addFriendFromCode(code, overrideName: name.isEmpty ? nil : name)
+
+        // Reset
+        friendCodeInput = ""
+        parsedFriendCode = nil
+        friendCodeOverrideName = ""
+        friendCodeError = nil
+    }
+
     private func addFriend() {
         addFriendError = nil
 
@@ -361,7 +464,8 @@ struct SettingsView: View {
         }
 
         config.addFriend(name: name, publicKey: pubkey, serverURL: server, activityPort: port.isEmpty ? "9998" : port)
-        showAddFriend = false
+        config.registerFriendOnServer(pubkey: pubkey)
+        showManualAdd = false
         clearAddFriendForm()
     }
 

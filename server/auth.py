@@ -1,5 +1,6 @@
 """Ed25519 key-based authentication for P2P fisherman servers."""
 
+import json
 import os
 import time
 
@@ -19,6 +20,7 @@ _public_key_bytes: bytes = b""
 _friends: set[bytes] = set()
 
 MAX_TIMESTAMP_DRIFT = 60  # seconds
+FRIENDS_FILE = os.path.join(os.path.dirname(__file__), "friends.json")
 
 
 def load_signing_key() -> tuple[Ed25519PrivateKey, bytes]:
@@ -44,11 +46,29 @@ def load_signing_key() -> tuple[Ed25519PrivateKey, bytes]:
 
 
 def load_friends() -> set[bytes]:
-    """Load allowed friend public keys from FISH_FRIENDS env var (comma-separated hex)."""
-    global _friends
+    """Load allowed friend public keys.
 
-    friends_str = os.environ.get("FISH_FRIENDS", "")
+    Reads from friends.json first; falls back to FISH_FRIENDS env var.
+    """
+    global _friends
     _friends = set()
+
+    # Try friends.json first
+    if os.path.exists(FRIENDS_FILE):
+        try:
+            with open(FRIENDS_FILE) as f:
+                data = json.load(f)
+            for hex_key in data.get("friends", []):
+                hex_key = hex_key.strip()
+                if hex_key:
+                    _friends.add(bytes.fromhex(hex_key))
+            log.info("friends_loaded", source="friends.json", count=len(_friends))
+            return _friends
+        except Exception:
+            log.warning("friends_json_load_failed", exc_info=True)
+
+    # Fall back to env var
+    friends_str = os.environ.get("FISH_FRIENDS", "")
     if friends_str:
         for hex_key in friends_str.split(","):
             hex_key = hex_key.strip()
@@ -58,8 +78,41 @@ def load_friends() -> set[bytes]:
                 except ValueError:
                     log.warning("invalid_friend_key", key=hex_key)
 
-    log.info("friends_loaded", count=len(_friends))
+    log.info("friends_loaded", source="env", count=len(_friends))
     return _friends
+
+
+def _persist_friends() -> None:
+    """Write current friends set to friends.json."""
+    data = {"friends": sorted(f.hex() for f in _friends)}
+    with open(FRIENDS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+    log.info("friends_persisted", count=len(_friends))
+
+
+def add_friend(pubkey_hex: str) -> bool:
+    """Add a friend pubkey (hex) to the allow-list and persist."""
+    try:
+        _friends.add(bytes.fromhex(pubkey_hex))
+    except ValueError:
+        return False
+    _persist_friends()
+    return True
+
+
+def remove_friend(pubkey_hex: str) -> bool:
+    """Remove a friend pubkey (hex) from the allow-list and persist."""
+    try:
+        _friends.discard(bytes.fromhex(pubkey_hex))
+    except ValueError:
+        return False
+    _persist_friends()
+    return True
+
+
+def get_friends_hex() -> list[str]:
+    """Return all friend pubkeys as hex strings."""
+    return sorted(f.hex() for f in _friends)
 
 
 def verify_request(auth_header: str) -> tuple[bool, bytes]:
