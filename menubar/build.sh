@@ -34,6 +34,13 @@ echo "Signed: ${IDENTITY:-ad-hoc}"
 
 echo "Assembled: $APP"
 
+# Sync Python daemon to ~/.fisherman/ if it exists (dev convenience)
+FISH_DIR="$HOME/.fisherman"
+if [ -d "$FISH_DIR/fisherman" ] && [ -d "../fisherman" ]; then
+    rsync -a --exclude='__pycache__' ../fisherman/ "$FISH_DIR/fisherman/"
+    echo "Synced daemon code to $FISH_DIR/fisherman/"
+fi
+
 # Deploy to /Applications and relaunch
 pkill -f FishermanMenu 2>/dev/null || true
 sleep 1

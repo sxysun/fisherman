@@ -12,15 +12,38 @@ struct CompactLeading: View {
     }
 }
 
-// MARK: - Compact Trailing (emoji row)
+// MARK: - Compact Trailing (emoji row + timeline + duration)
 
 struct CompactTrailing: View {
     let state: AppState
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             ForEach(state.allActivity.prefix(5)) { user in
-                Text(user.emoji).font(.system(size: 14))
+                HStack(spacing: 2) {
+                    // Emoji with optional working-together glow
+                    Text(user.emoji)
+                        .font(.system(size: 14))
+                        .shadow(
+                            color: user.isWorkingTogether
+                                ? Color(nsColor: .systemYellow).opacity(0.8)
+                                : .clear,
+                            radius: user.isWorkingTogether ? 4 : 0
+                        )
+
+                    // Session duration
+                    if !user.sessionDurationText.isEmpty {
+                        Text(user.sessionDurationText)
+                            .font(.system(size: 8, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    // Mini timeline bar
+                    if !user.history.isEmpty {
+                        TimelineBar(history: user.history)
+                            .frame(width: 36, height: 4)
+                    }
+                }
             }
 
             if state.allActivity.isEmpty {
@@ -28,6 +51,25 @@ struct CompactTrailing: View {
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+// MARK: - Timeline Bar
+
+struct TimelineBar: View {
+    let history: [ActivityEntry]
+
+    var body: some View {
+        GeometryReader { geo in
+            HStack(spacing: 0.5) {
+                ForEach(history.prefix(8).reversed()) { entry in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color(nsColor: ActivityCategory.from(entry.category).color))
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 2))
         }
     }
 }
@@ -40,6 +82,8 @@ struct ExpandedContent: View {
     let onViewFrames: () -> Void
     let onSettings: () -> Void
     let onQuit: () -> Void
+
+    @State private var hoveredUserId: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -64,17 +108,87 @@ struct ExpandedContent: View {
             // Multi-user activity list
             if !state.allActivity.isEmpty {
                 ForEach(state.allActivity) { user in
-                    HStack(spacing: 6) {
-                        Text(user.emoji).font(.system(size: 14))
-                        Text(user.name)
-                            .font(.system(size: 12, weight: .medium))
-                        Text(user.status)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Spacer()
+                    VStack(alignment: .leading, spacing: 4) {
+                        // Main activity row
+                        HStack(spacing: 6) {
+                            // Working-together badge
+                            if user.isWorkingTogether {
+                                Text("🤝")
+                                    .font(.system(size: 10))
+                            }
+
+                            Text(user.emoji).font(.system(size: 14))
+                                .shadow(
+                                    color: user.isWorkingTogether
+                                        ? Color(nsColor: .systemYellow).opacity(0.6)
+                                        : .clear,
+                                    radius: user.isWorkingTogether ? 3 : 0
+                                )
+
+                            Text(user.name)
+                                .font(.system(size: 12, weight: .medium))
+
+                            Text(user.category)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Color(nsColor: ActivityCategory.from(user.category).color))
+
+                            if !user.sessionDurationText.isEmpty {
+                                Text("— \(user.sessionDurationText)")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer()
+
+                            // Timeline bar in expanded view
+                            if !user.history.isEmpty {
+                                TimelineBar(history: user.history)
+                                    .frame(width: 48, height: 4)
+                            }
+                        }
+
+                        // Status line
+                        if !user.status.isEmpty {
+                            Text(user.status)
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .padding(.leading, user.isWorkingTogether ? 26 : 20)
+                        }
+
+                        // Hover history expansion
+                        if hoveredUserId == user.id, !user.history.isEmpty {
+                            VStack(alignment: .leading, spacing: 3) {
+                                ForEach(user.history.prefix(5)) { entry in
+                                    HStack(spacing: 4) {
+                                        Text(entry.emoji).font(.system(size: 10))
+                                        Text(entry.category)
+                                            .font(.system(size: 10, weight: .medium))
+                                            .foregroundStyle(Color(nsColor: ActivityCategory.from(entry.category).color))
+                                        Text("— \(entry.status)")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Text(relativeTime(entry.timestamp))
+                                            .font(.system(size: 9, design: .monospaced))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                }
+                            }
+                            .padding(.leading, 20)
+                            .padding(.top, 2)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
                     }
                     .opacity(user.stale ? 0.5 : 1.0)
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+                    .onHover { isHovering in
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            hoveredUserId = isHovering ? user.id : nil
+                        }
+                    }
                 }
             } else {
                 Text("No activity yet")
@@ -123,7 +237,7 @@ struct ExpandedContent: View {
             }
         }
         .padding(12)
-        .frame(width: 280)
+        .frame(width: 300)
     }
 
     private func processRow(name: String, ok: Bool) -> some View {
@@ -148,5 +262,14 @@ struct ExpandedContent: View {
             Text(value)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
         }
+    }
+
+    private func relativeTime(_ date: Date) -> String {
+        let seconds = Int(Date().timeIntervalSince(date))
+        if seconds < 60 { return "now" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        return "\(hours)h ago"
     }
 }

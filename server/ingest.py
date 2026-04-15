@@ -170,17 +170,30 @@ Window title: {window[:200] if window else ""}
 Visible text: {ocr_text[:500] if ocr_text else ""}
 
 Respond with ONLY this JSON:
-{{"emoji": "<single emoji that best represents the activity>", "category": "<1-2 word label>", "status": "<what they're doing, max 30 chars>"}}
+{{"emoji": "<single emoji that best represents the activity>", "category": "<one of the categories below>", "status": "<specific file, page, or context, max 30 chars>"}}
 
-Pick ANY emoji and category that fits. Be creative and specific.
-Examples:
-- {{"emoji": "💻", "category": "coding", "status": "ingest.py"}}
-- {{"emoji": "📰", "category": "news", "status": "Hacker News"}}
-- {{"emoji": "🎨", "category": "design", "status": "Figma mockups"}}
-- {{"emoji": "💬", "category": "chat", "status": "Slack #eng"}}
-- {{"emoji": "📧", "category": "email", "status": "inbox zero"}}
-- {{"emoji": "🎮", "category": "gaming", "status": "Steam"}}
-- {{"emoji": "😴", "category": "idle", "status": "away"}}
+Categories (pick the most specific one):
+- "coding" — writing or editing code (💻🔧⚙️🛠️)
+- "debugging" — fixing bugs, reading stack traces (🐛🔍)
+- "code review" — reviewing PRs, diffs (👀📝)
+- "reading docs" — documentation, API refs, tutorials (📖📚)
+- "design" — Figma, Sketch, visual/creative work (🎨✏️🖌️)
+- "writing" — prose, blog posts, docs authoring (✍️📝)
+- "chat" — Slack, Discord, iMessage, messaging apps (💬🗨️)
+- "email" — email client, composing/reading email (📧✉️)
+- "meeting" — Zoom, Meet, FaceTime, video calls (📹🎙️)
+- "browsing" — general web browsing (🌐🔍)
+- "news" — Hacker News, Reddit, Twitter, news sites (📰🗞️)
+- "reading" — articles, papers, long-form content (📖👓)
+- "gaming" — games, Steam (🎮🕹️)
+- "terminal" — shell, command line, SSH (⌨️🖥️)
+- "idle" — screensaver, lock screen, away (😴💤)
+
+Rules:
+- Be SPECIFIC in status: include the filename, page title, channel name, or conversation partner visible on screen
+- Vary your emoji choice — don't always use the same emoji for the same category
+- If the app is a code editor, check the window title for the filename
+- If it's a browser, extract the page title from visible text
 """
 
     for attempt in range(3):
@@ -268,6 +281,56 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
 
     except Exception:
         log.error("http_current_activity_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_activity_history(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: GET /api/activity_history - returns recent activity entries.
+
+    Auth: FishKey ed25519 signature (owner or friend).
+    Query params: limit (default 10, max 50)
+    """
+    auth_header = request.headers.get("Authorization", "")
+    valid, pubkey = verify_request(auth_header)
+    if not valid or not is_authorized(pubkey):
+        log.warning("http_auth_rejected", remote=request.remote)
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    limit = min(int(request.query.get("limit", "10")), 50)
+
+    db: asyncpg.Pool = request.app["db"]
+    loop = asyncio.get_running_loop()
+
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT ts, activity
+                FROM frames
+                WHERE activity IS NOT NULL
+                ORDER BY ts DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+
+        if not rows:
+            return web.json_response({"entries": []})
+
+        entries = []
+        for row in rows:
+            activity = await loop.run_in_executor(_pool, decrypt_json, row["activity"])
+            entries.append({
+                "emoji": activity.get("emoji", "❓"),
+                "category": activity.get("category", "idle"),
+                "status": activity.get("status", ""),
+                "timestamp": row["ts"].isoformat(),
+            })
+
+        return web.json_response({"entries": entries})
+
+    except Exception:
+        log.error("http_activity_history_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
@@ -445,6 +508,7 @@ async def _run(host: str, port: int) -> None:
         app = web.Application()
         app["db"] = db
         app.router.add_get("/api/current_activity", _http_current_activity)
+        app.router.add_get("/api/activity_history", _http_activity_history)
         app.router.add_get("/api/friends", _http_get_friends)
         app.router.add_post("/api/friends", _http_add_friend)
         app.router.add_delete("/api/friends", _http_delete_friend)

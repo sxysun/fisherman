@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class FishermanConfig(BaseSettings):
-    model_config = {"env_prefix": "FISH_", "env_file": ".env"}
+    model_config = {"env_prefix": "FISH_", "env_file": ".env", "extra": "ignore"}
 
     # Server
     server_url: str = "ws://localhost:9999/ingest"
@@ -19,7 +19,7 @@ class FishermanConfig(BaseSettings):
     max_dimension: int = 1920
     screenpipe_url: str = "http://127.0.0.1:3030"
     screenpipe_poll_interval: float = 3.0
-    screenpipe_search_limit: int = 50
+    screenpipe_search_limit: int = 10
 
     # Privacy — password managers, auth apps, keychains excluded by default
     excluded_bundles: list[str] = [

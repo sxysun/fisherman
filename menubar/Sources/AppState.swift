@@ -9,6 +9,45 @@ enum AppStatus: String {
     case error = "Error"
 }
 
+struct ActivityEntry: Identifiable {
+    let id = UUID()
+    let emoji: String
+    let category: String
+    let status: String
+    let timestamp: Date
+}
+
+enum ActivityCategory: String {
+    case coding, debugging, codeReview = "code review", readingDocs = "reading docs"
+    case design, writing, chat, email, meeting
+    case browsing, news, reading, gaming, terminal, idle
+
+    var color: NSColor {
+        switch self {
+        case .coding, .debugging, .codeReview, .readingDocs, .terminal:
+            return .systemBlue
+        case .reading, .writing:
+            return .systemGreen
+        case .chat, .email:
+            return .systemPurple
+        case .browsing, .news:
+            return .systemOrange
+        case .design:
+            return .systemYellow
+        case .meeting:
+            return .systemRed
+        case .gaming:
+            return .systemPink
+        case .idle:
+            return .systemGray
+        }
+    }
+
+    static func from(_ string: String) -> ActivityCategory {
+        ActivityCategory(rawValue: string) ?? .idle
+    }
+}
+
 struct UserActivity: Identifiable {
     let id: String          // "me" or friend name
     let name: String
@@ -16,6 +55,21 @@ struct UserActivity: Identifiable {
     let category: String
     let status: String
     let stale: Bool
+    var history: [ActivityEntry] = []
+    var sessionStart: Date?
+    var isWorkingTogether: Bool = false
+
+    var sessionDuration: TimeInterval {
+        guard let start = sessionStart else { return 0 }
+        return Date().timeIntervalSince(start)
+    }
+
+    var sessionDurationText: String {
+        let mins = Int(sessionDuration / 60)
+        if mins < 1 { return "" }
+        if mins < 60 { return "\(mins)m" }
+        return "\(mins / 60)h\(mins % 60)m"
+    }
 }
 
 @Observable
