@@ -78,22 +78,19 @@ final class StatusPoller: @unchecked Sendable {
     }
 
     private func pollActivity() {
-        // Extract API host from serverURL (ws://host:9999/ingest -> http://host:9998/api/current_activity)
-        let serverURL = config.serverURL
-        guard let wsURL = URL(string: serverURL) else { return }
+        // Build activity API URL from server URL + configurable activity port
+        // e.g. ws://host:9999/ingest -> http://host:9998/api/current_activity
+        guard let wsURL = URL(string: config.serverURL),
+              let host = wsURL.host else { return }
 
-        var httpURL = serverURL
-            .replacingOccurrences(of: "ws://", with: "http://")
-            .replacingOccurrences(of: "wss://", with: "https://")
-            .replacingOccurrences(of: ":9999", with: ":9998")
-            .replacingOccurrences(of: "/ingest", with: "/api/current_activity")
+        let scheme = config.serverURL.hasPrefix("wss://") ? "https" : "http"
+        let httpURL = "\(scheme)://\(host):\(config.activityPort)/api/current_activity"
 
         guard let url = URL(string: httpURL) else { return }
 
         var request = URLRequest(url: url)
-        request.timeoutInterval = 2.0
+        request.timeoutInterval = 5.0
 
-        // Add Bearer token if configured
         if !config.authToken.isEmpty {
             request.setValue("Bearer \(config.authToken)", forHTTPHeaderField: "Authorization")
         }
@@ -103,10 +100,7 @@ final class StatusPoller: @unchecked Sendable {
                   let data = data,
                   error == nil,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                // On error, keep last known activity
-                return
-            }
+            else { return }
 
             let category = json["category"] as? String
             let status = json["status"] as? String

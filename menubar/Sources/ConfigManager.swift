@@ -6,6 +6,7 @@ final class ConfigManager {
     var serverURL: String = "ws://localhost:9999/ingest"
     var authToken: String = ""
     var controlPort: String = "7892"
+    var activityPort: String = "9998"
 
     /// Lines from .env that we don't manage (comments, unknown keys)
     private var passthroughLines: [(index: Int, line: String)] = []
@@ -37,6 +38,9 @@ final class ConfigManager {
             } else if let value = extractValue(trimmed, key: "FISH_CONTROL_PORT") {
                 controlPort = value
                 knownKeyLines["FISH_CONTROL_PORT"] = i
+            } else if let value = extractValue(trimmed, key: "FISH_ACTIVITY_PORT") {
+                activityPort = value
+                knownKeyLines["FISH_ACTIVITY_PORT"] = i
             } else {
                 passthroughLines.append((index: i, line: line))
             }
