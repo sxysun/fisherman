@@ -106,7 +106,6 @@ struct ExpandedContent: View {
     let onQuit: () -> Void
     var onPoke: ((String) -> Void)?       // friend name -> send poke
     var onClearPokes: (() -> Void)?
-    var onToggleTier: ((String) -> Void)?  // friend name -> toggle low/high
 
     @State private var hoveredUserId: String?
     @State private var pokedUsers: Set<String> = []
@@ -206,7 +205,7 @@ struct ExpandedContent: View {
 
                             Spacer()
 
-                            // Poke + tier toggle (for friends, not "me")
+                            // Poke button (for friends, not "me")
                             if user.id != "me" {
                                 Button(action: {
                                     pokedUsers.insert(user.id)
@@ -221,16 +220,6 @@ struct ExpandedContent: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.mini)
                                 .disabled(pokedUsers.contains(user.id))
-
-                                Button(action: {
-                                    onToggleTier?(user.name)
-                                }) {
-                                    Text(user.sharingTier == .high ? "◉" : "○")
-                                        .font(.system(size: 10))
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
-                                .help(user.sharingTier == .high ? "Full detail" : "Minimal — tap to expand")
                             }
 
                             // Timeline bar in expanded view

@@ -332,6 +332,25 @@ struct SettingsView: View {
                     .foregroundStyle(.tertiary)
             }
             Spacer()
+
+            // Sharing tier toggle
+            Button {
+                config.toggleFriendTier(name: friend.name)
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: friend.sharingTier == .high ? "eye" : "eye.slash")
+                        .font(.system(size: 11))
+                    Text(friend.sharingTier == .high ? "Full" : "Minimal")
+                        .font(.system(size: 10))
+                }
+                .foregroundStyle(friend.sharingTier == .high ? .primary : .secondary)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .help(friend.sharingTier == .high
+                  ? "Showing full status detail — click for minimal"
+                  : "Showing emoji + category only — click for full detail")
+
             Button {
                 config.removeFriend(at: index)
             } label: {
