@@ -2,11 +2,17 @@ import CryptoKit
 import Foundation
 import Observation
 
+enum SharingTier: String, Sendable {
+    case low = "low"    // emoji + category only (is this person free?)
+    case high = "high"  // full status + history (what are they working on?)
+}
+
 struct Friend: Sendable {
     let name: String
     let publicKey: String      // hex
     let serverURL: String      // e.g. "ws://1.2.3.4:9999"
     let activityPort: String   // e.g. "9998"
+    var sharingTier: SharingTier = .high
 }
 
 struct FriendCode: Codable {
@@ -102,7 +108,7 @@ final class ConfigManager {
         var outputLines = existingLines
         var keysWritten = Set<String>()
 
-        let friendsStr = friends.map { "\($0.name)|\($0.publicKey)|\($0.serverURL)|\($0.activityPort)" }
+        let friendsStr = friends.map { "\($0.name)|\($0.publicKey)|\($0.serverURL)|\($0.activityPort)|\($0.sharingTier.rawValue)" }
             .joined(separator: ",")
 
         let updates: [(String, String)] = [
@@ -165,6 +171,13 @@ final class ConfigManager {
     func addFriend(name: String, publicKey: String, serverURL: String, activityPort: String) {
         let friend = Friend(name: name, publicKey: publicKey, serverURL: serverURL, activityPort: activityPort)
         friends.append(friend)
+        save()
+    }
+
+    func toggleFriendTier(name: String) {
+        guard let idx = friends.firstIndex(where: { $0.name == name }) else { return }
+        let current = friends[idx].sharingTier
+        friends[idx].sharingTier = (current == .high) ? .low : .high
         save()
     }
 
@@ -298,13 +311,15 @@ final class ConfigManager {
     private func parseFriends(_ value: String) -> [Friend] {
         guard !value.isEmpty else { return [] }
         return value.split(separator: ",").compactMap { entry in
-            let parts = entry.split(separator: "|", maxSplits: 3)
-            guard parts.count == 4 else { return nil }
+            let parts = entry.split(separator: "|", maxSplits: 4)
+            guard parts.count >= 4 else { return nil }
+            let tier = parts.count >= 5 ? (SharingTier(rawValue: String(parts[4])) ?? .high) : .high
             return Friend(
                 name: String(parts[0]),
                 publicKey: String(parts[1]),
                 serverURL: String(parts[2]),
-                activityPort: String(parts[3])
+                activityPort: String(parts[3]),
+                sharingTier: tier
             )
         }
     }

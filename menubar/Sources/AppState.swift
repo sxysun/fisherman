@@ -66,6 +66,7 @@ struct UserActivity: Identifiable {
     var isWorkingTogether: Bool = false
     var inFlow: Bool = false
     var pokes: [Poke] = []
+    var sharingTier: SharingTier = .high
 
     var sessionDuration: TimeInterval {
         guard let start = sessionStart else { return 0 }

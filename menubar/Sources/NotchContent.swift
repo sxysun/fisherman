@@ -61,6 +61,13 @@ struct CompactTrailing: View {
                 }
             }
 
+            // Hangout suggestion in compact view
+            if state.hangoutSuggestion != nil {
+                Text("🍿")
+                    .font(.system(size: 12))
+                    .opacity(0.9)
+            }
+
             if state.allActivity.isEmpty {
                 Text("\(state.framesSent)")
                     .font(.system(size: 10, design: .monospaced))
@@ -99,6 +106,7 @@ struct ExpandedContent: View {
     let onQuit: () -> Void
     var onPoke: ((String) -> Void)?       // friend name -> send poke
     var onClearPokes: (() -> Void)?
+    var onToggleTier: ((String) -> Void)?  // friend name -> toggle low/high
 
     @State private var hoveredUserId: String?
     @State private var pokedUsers: Set<String> = []
@@ -198,12 +206,11 @@ struct ExpandedContent: View {
 
                             Spacer()
 
-                            // Poke button (for friends, not "me")
+                            // Poke + tier toggle (for friends, not "me")
                             if user.id != "me" {
                                 Button(action: {
                                     pokedUsers.insert(user.id)
                                     onPoke?(user.name)
-                                    // Reset after 3s
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                                         pokedUsers.remove(user.id)
                                     }
@@ -214,6 +221,16 @@ struct ExpandedContent: View {
                                 .buttonStyle(.bordered)
                                 .controlSize(.mini)
                                 .disabled(pokedUsers.contains(user.id))
+
+                                Button(action: {
+                                    onToggleTier?(user.name)
+                                }) {
+                                    Text(user.sharingTier == .high ? "◉" : "○")
+                                        .font(.system(size: 10))
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.mini)
+                                .help(user.sharingTier == .high ? "Full detail" : "Minimal — tap to expand")
                             }
 
                             // Timeline bar in expanded view
@@ -223,8 +240,8 @@ struct ExpandedContent: View {
                             }
                         }
 
-                        // Status line
-                        if !user.status.isEmpty {
+                        // Status line (only for high-tier or "me")
+                        if !user.status.isEmpty && (user.id == "me" || user.sharingTier == .high) {
                             Text(user.status)
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
@@ -232,8 +249,9 @@ struct ExpandedContent: View {
                                 .padding(.leading, user.isWorkingTogether ? 26 : 20)
                         }
 
-                        // Hover history expansion
-                        if hoveredUserId == user.id, !user.history.isEmpty {
+                        // Hover history expansion (only for high-tier or "me")
+                        if hoveredUserId == user.id, !user.history.isEmpty,
+                           (user.id == "me" || user.sharingTier == .high) {
                             VStack(alignment: .leading, spacing: 3) {
                                 ForEach(user.history.prefix(5)) { entry in
                                     HStack(spacing: 4) {

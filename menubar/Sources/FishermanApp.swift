@@ -70,6 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 },
                 onClearPokes: {
                     poller.clearMyPokes()
+                },
+                onToggleTier: { friendName in
+                    cfg.toggleFriendTier(name: friendName)
                 }
             )
         } compactLeading: {

@@ -143,15 +143,18 @@ final class StatusPoller: @unchecked Sendable {
             guard let self else { return }
             var activities = collector.sorted()
 
-            // Compute working-together: compare each friend's category to "me"
+            // Set sharing tier + working-together for each friend
             let myCategory = activities.first(where: { $0.id == "me" })?.category
-            if let myCategory {
-                activities = activities.map { user in
-                    if user.id == "me" { return user }
-                    var updated = user
-                    updated.isWorkingTogether = (user.category == myCategory && myCategory != "idle")
-                    return updated
+            activities = activities.map { user in
+                if user.id == "me" { return user }
+                var updated = user
+                if let myCategory, myCategory != "idle" {
+                    updated.isWorkingTogether = (user.category == myCategory)
                 }
+                if let friend = self.config.friends.first(where: { $0.name == user.name }) {
+                    updated.sharingTier = friend.sharingTier
+                }
+                return updated
             }
 
             // Preserve history from previous state
