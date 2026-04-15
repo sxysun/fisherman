@@ -215,52 +215,31 @@ async def _categorize_activity(
     if not _openai_client:
         return None
 
-    prompt = f"""Analyze this user's current screen activity and respond with JSON.
+    prompt = f"""You are generating a short ambient status for a person, like what they'd say if a friend texted "what are you up to?" Use the screen context below to infer their mindset and activity — but do NOT just report which app or file is open. Synthesize it into a natural, human status.
 
 App: {app or "unknown"}
 Window title: {window[:200] if window else ""}
 Visible text: {ocr_text[:500] if ocr_text else ""}
 
 Respond with ONLY this JSON:
-{{"emoji": "<single emoji that best represents the activity>", "category": "<one of the categories below>", "status": "<specific file, page, or context, max 30 chars>"}}
+{{"emoji": "<single emoji>", "category": "<category>", "status": "<natural ambient status, max 30 chars>"}}
 
-Categories (pick the most specific one):
-- "coding" — writing or editing code (💻🔧⚙️🛠️)
-- "debugging" — fixing bugs, reading stack traces (🐛🔍)
-- "code review" — reviewing PRs, diffs (👀📝)
-- "reading docs" — documentation, API refs, tutorials (📖📚)
-- "design" — Figma, Sketch, visual/creative work (🎨✏️🖌️)
-- "writing" — prose, blog posts, docs authoring (✍️📝)
-- "chat" — Slack, Discord, iMessage, messaging apps (💬🗨️)
-- "email" — email client, composing/reading email (📧✉️)
-- "meeting" — Zoom, Meet, FaceTime, video calls (📹🎙️)
-- "browsing" — general web browsing (🌐🔍)
-- "news" — Hacker News, Reddit, Twitter, news sites (📰🗞️)
-- "reading" — articles, papers, long-form content (📖👓)
-- "gaming" — games, Steam (🎮🕹️)
-- "terminal" — shell, command line, SSH (⌨️🖥️)
-- "idle" — screensaver, lock screen, away (😴💤)
+Categories:
+"coding", "debugging", "code review", "reading docs", "design", "writing", "chat", "email", "meeting", "browsing", "news", "reading", "gaming", "terminal", "idle"
 
-Rules:
-- Vary your emoji choice — don't always use the same emoji for the same category
-- If the app is a code editor, check the window title for the filename
-- If it's a browser, extract the page title from visible text
-- Be specific where SAFE: filenames, app names, channel names (not people)
+STATUS STYLE — write like a human, not a screen recorder:
+- GOOD: "deep in a refactor", "catching up on tech news", "sketching out a new flow", "rabbit-holing on auth", "winding down", "in the zone", "reviewing a PR", "exploring an idea"
+- BAD: "VS Code — ingest.py", "Chrome — Hacker News", "Slack — #eng", "Terminal"
+- The status should convey the VIBE of what they're doing, not the literal tool
+- Use the screen content to be specific about the TOPIC when possible (e.g. "researching caching strategies" not just "browsing")
+- Vary your emoji — don't always use the same one for a category
 
-PRIVACY RULES — the status field is shared with friends. NEVER include:
-- People's names, usernames, or @handles (say "Slack #channel" not "DM with Sarah")
-- Health, medical, or body-related queries (say "browsing" not "WebMD headaches")
-- Financial information (say "spreadsheet" not "budget-deficit.xlsx")
-- Relationship or dating content (say "browsing" not "Tinder profile")
-- Legal, HR, or job-search content (say "reading" not "wrongful-termination.pdf")
-- Passwords, tokens, keys, or credentials
-- NSFW or adult content descriptions
-- Email subjects, message previews, or chat message content
-
-SAFE status examples: "ingest.py", "Hacker News", "#eng", "Figma mockups", "VS Code", "Terminal"
-UNSAFE status examples: "DM with Sarah", "WebMD headaches", "divorce-lawyer.pdf", "salary-negotiation.xlsx"
-
-When in doubt, use the app name or a generic descriptor. Better to be vague than to leak.
+PRIVACY — the status is shared with friends. NEVER include:
+- People's names, usernames, or @handles
+- Health, medical, financial, legal, relationship, or NSFW content
+- Email subjects, message previews, or chat content
+- Passwords, tokens, or credentials
+When in doubt, keep it vague. Better ambient than invasive.
 """
 
     for attempt in range(3):
