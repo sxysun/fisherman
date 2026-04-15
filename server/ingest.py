@@ -39,7 +39,10 @@ from auth import (
 
 try:
     from openai import AsyncOpenAI
-    _openai_client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    _openai_client = AsyncOpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        base_url=os.environ.get("OPENAI_BASE_URL"),
+    )
 except ImportError:
     _openai_client = None
     log.warning("openai_not_installed", msg="Install openai package for activity categorization")
@@ -249,7 +252,7 @@ When in doubt about privacy, use a generic topic descriptor.
     for attempt in range(3):
         try:
             response = await _openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 temperature=0.2,
