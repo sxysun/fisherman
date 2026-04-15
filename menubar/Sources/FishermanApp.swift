@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         controlPort = configManager.controlPort
         appState = AppState()
         processManager = ProcessManager(controlPort: controlPort)
-        statusPoller = StatusPoller(state: appState, controlPort: controlPort)
+        statusPoller = StatusPoller(state: appState, controlPort: controlPort, config: configManager)
 
         let state = appState!
         let pm = processManager!

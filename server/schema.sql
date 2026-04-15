@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS frames (
     tier_hint   INT,
     routing     JSONB,
     scene       BYTEA,          -- Fernet-encrypted VLM description
+    activity    BYTEA,          -- Fernet-encrypted activity status (category + detail)
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 

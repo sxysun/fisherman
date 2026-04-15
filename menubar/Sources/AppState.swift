@@ -28,6 +28,11 @@ final class AppState {
     // Error detail
     var errorDetail: String?
 
+    // Activity (NEW)
+    var currentActivity: String?  // e.g. "coding: main.py"
+    var activityCategory: String?  // e.g. "coding", "reading", "browsing", "idle"
+    var activityUpdatedAt: String?
+
     var statusColor: NSColor {
         switch status {
         case .starting: return .systemGray

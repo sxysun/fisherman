@@ -3,13 +3,15 @@ import Foundation
 final class StatusPoller: @unchecked Sendable {
     private let state: AppState
     private let controlPort: String
+    private let config: ConfigManager
     private var timer: Timer?
     private let interval: TimeInterval = 3.0
     private let session: URLSession
 
-    init(state: AppState, controlPort: String) {
+    init(state: AppState, controlPort: String, config: ConfigManager) {
         self.state = state
         self.controlPort = controlPort
+        self.config = config
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2.0
@@ -33,6 +35,7 @@ final class StatusPoller: @unchecked Sendable {
     private func poll() {
         pollScreenpipe()
         pollFisherman()
+        pollActivity()
     }
 
     private func pollScreenpipe() {
@@ -70,6 +73,49 @@ final class StatusPoller: @unchecked Sendable {
                     screenpipeOK: self?.state.screenpipeHealthy ?? false,
                     fishermanStatus: fishermanStatus
                 )
+            }
+        }.resume()
+    }
+
+    private func pollActivity() {
+        // Extract API host from serverURL (ws://host:9999/ingest -> http://host:9998/api/current_activity)
+        let serverURL = config.serverURL
+        guard let wsURL = URL(string: serverURL) else { return }
+
+        var httpURL = serverURL
+            .replacingOccurrences(of: "ws://", with: "http://")
+            .replacingOccurrences(of: "wss://", with: "https://")
+            .replacingOccurrences(of: ":9999", with: ":9998")
+            .replacingOccurrences(of: "/ingest", with: "/api/current_activity")
+
+        guard let url = URL(string: httpURL) else { return }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2.0
+
+        // Add Bearer token if configured
+        if !config.authToken.isEmpty {
+            request.setValue("Bearer \(config.authToken)", forHTTPHeaderField: "Authorization")
+        }
+
+        session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self = self,
+                  let data = data,
+                  error == nil,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                // On error, keep last known activity
+                return
+            }
+
+            let category = json["category"] as? String
+            let status = json["status"] as? String
+            let updatedAt = json["updated_at"] as? String
+
+            DispatchQueue.main.async {
+                self.state.activityCategory = category
+                self.state.currentActivity = status
+                self.state.activityUpdatedAt = updatedAt
             }
         }.resume()
     }

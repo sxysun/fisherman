@@ -18,9 +18,25 @@ struct CompactTrailing: View {
     let state: AppState
 
     var body: some View {
-        Text("\(state.framesSent)")
-            .font(.system(size: 10, design: .monospaced))
-            .foregroundStyle(.secondary)
+        HStack(spacing: 4) {
+            // Pixel character (placeholder emoji)
+            Text(characterEmoji(for: state.activityCategory))
+                .font(.system(size: 16))
+
+            Text("\(state.framesSent)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func characterEmoji(for category: String?) -> String {
+        switch category {
+        case "coding": return "👨‍💻"
+        case "reading": return "📖"
+        case "browsing": return "🔍"
+        case "idle": return "😴"
+        default: return "❓"
+        }
     }
 }
 
@@ -50,6 +66,21 @@ struct ExpandedContent: View {
             // Process rows
             processRow(name: "screenpipe", ok: state.screenpipeHealthy)
             processRow(name: "fisherman", ok: state.fishermanRunning && state.fishermanConnected)
+
+            Divider()
+
+            // Activity status (NEW)
+            if let category = state.activityCategory, let status = state.currentActivity {
+                HStack(spacing: 6) {
+                    Text(characterEmoji(for: category))
+                        .font(.system(size: 14))
+                    Text("\(category): \(status)")
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .padding(.vertical, 2)
+            }
 
             Divider()
 
@@ -116,6 +147,16 @@ struct ExpandedContent: View {
                 .foregroundStyle(.tertiary)
             Text(value)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
+        }
+    }
+
+    private func characterEmoji(for category: String?) -> String {
+        switch category {
+        case "coding": return "👨‍💻"
+        case "reading": return "📖"
+        case "browsing": return "🔍"
+        case "idle": return "😴"
+        default: return "❓"
         }
     }
 }
