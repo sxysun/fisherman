@@ -39,6 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         let state = appState!
         let pm = processManager!
         let port = controlPort
+        let poller = statusPoller!
+        let cfg = configManager!
 
         notch = DynamicNotch(
             hoverBehavior: .all,
@@ -60,6 +62,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                 onQuit: {
                     pm.stopAll()
                     NSApp.terminate(nil)
+                },
+                onPoke: { friendName in
+                    if let friend = cfg.friends.first(where: { $0.name == friendName }) {
+                        poller.sendPoke(to: friend)
+                    }
+                },
+                onClearPokes: {
+                    poller.clearMyPokes()
                 }
             )
         } compactLeading: {

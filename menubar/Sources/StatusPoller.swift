@@ -165,6 +165,22 @@ final class StatusPoller: @unchecked Sendable {
             }
 
             self.state.allActivity = activities
+
+            // Surface pokes from "me" entry
+            if let me = activities.first(where: { $0.id == "me" }), !me.pokes.isEmpty {
+                self.state.incomingPokes = me.pokes
+            }
+
+            // Hangout suggestion: 2+ friends in low-key states simultaneously
+            let lowKeyCategories: Set<String> = ["browsing", "news", "reading", "idle"]
+            let lowKeyFriends = activities.filter { $0.id != "me" && lowKeyCategories.contains($0.category) && !$0.stale }
+            let meIsLowKey = activities.first(where: { $0.id == "me" }).map { lowKeyCategories.contains($0.category) } ?? false
+            if meIsLowKey && lowKeyFriends.count >= 1 {
+                let names = lowKeyFriends.map { $0.name }.joined(separator: " & ")
+                self.state.hangoutSuggestion = "\(names) also free"
+            } else {
+                self.state.hangoutSuggestion = nil
+            }
         }
     }
 
@@ -212,15 +228,78 @@ final class StatusPoller: @unchecked Sendable {
             let category = json["category"] as? String ?? "idle"
             let status = json["status"] as? String ?? ""
             let stale = json["stale"] as? Bool ?? false
+            let inFlow = json["flow"] as? Bool ?? false
 
-            completion(UserActivity(
+            // Parse pokes
+            var pokes: [Poke] = []
+            if let rawPokes = json["pokes"] as? [[String: Any]] {
+                let fmt = ISO8601DateFormatter()
+                fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let fmt2 = ISO8601DateFormatter()
+                fmt2.formatOptions = [.withInternetDateTime]
+                pokes = rawPokes.compactMap { p in
+                    guard let from = p["from"] as? String,
+                          let atStr = p["at"] as? String else { return nil }
+                    let at = fmt.date(from: atStr) ?? fmt2.date(from: atStr) ?? Date()
+                    return Poke(fromShort: from, at: at)
+                }
+            }
+
+            var activity = UserActivity(
                 id: id,
                 name: name,
                 emoji: emoji,
                 category: category,
                 status: status,
                 stale: stale
-            ))
+            )
+            activity.inFlow = inFlow
+            activity.pokes = pokes
+            completion(activity)
+        }.resume()
+    }
+
+    // MARK: - Poke
+
+    func sendPoke(to friend: Friend) {
+        guard let wsURL = URL(string: friend.serverURL),
+              let host = wsURL.host else { return }
+        let scheme = friend.serverURL.hasPrefix("wss://") ? "https" : "http"
+        let httpURL = "\(scheme)://\(host):\(friend.activityPort)/api/poke"
+        guard let url = URL(string: httpURL) else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5.0
+        if let authValue = config.signRequest() {
+            request.setValue(authValue, forHTTPHeaderField: "Authorization")
+        }
+
+        session.dataTask(with: request) { _, response, error in
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                NSLog("poke_sent to \(friend.name)")
+            }
+        }.resume()
+    }
+
+    func clearMyPokes() {
+        guard let wsURL = URL(string: config.serverURL),
+              let host = wsURL.host else { return }
+        let scheme = config.serverURL.hasPrefix("wss://") ? "https" : "http"
+        let httpURL = "\(scheme)://\(host):\(config.activityPort)/api/pokes"
+        guard let url = URL(string: httpURL) else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 5.0
+        if let authValue = config.signRequest() {
+            request.setValue(authValue, forHTTPHeaderField: "Authorization")
+        }
+
+        session.dataTask(with: request) { _, _, _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.state.incomingPokes = []
+            }
         }.resume()
     }
 

@@ -19,17 +19,32 @@ struct CompactTrailing: View {
 
     var body: some View {
         HStack(spacing: 4) {
+            // Poke indicator
+            if !state.incomingPokes.isEmpty {
+                Text("👋")
+                    .font(.system(size: 12))
+                    .opacity(0.9)
+            }
+
             ForEach(state.allActivity.prefix(5)) { user in
                 HStack(spacing: 2) {
-                    // Emoji with optional working-together glow
+                    // Emoji with flow/working-together indicators
                     Text(user.emoji)
                         .font(.system(size: 14))
                         .shadow(
-                            color: user.isWorkingTogether
-                                ? Color(nsColor: .systemYellow).opacity(0.8)
-                                : .clear,
-                            radius: user.isWorkingTogether ? 4 : 0
+                            color: user.inFlow
+                                ? Color(nsColor: .systemRed).opacity(0.7)
+                                : user.isWorkingTogether
+                                    ? Color(nsColor: .systemYellow).opacity(0.8)
+                                    : .clear,
+                            radius: (user.inFlow || user.isWorkingTogether) ? 4 : 0
                         )
+
+                    // Flow indicator
+                    if user.inFlow {
+                        Text("🔥")
+                            .font(.system(size: 8))
+                    }
 
                     // Session duration
                     if !user.sessionDurationText.isEmpty {
@@ -82,8 +97,11 @@ struct ExpandedContent: View {
     let onViewFrames: () -> Void
     let onSettings: () -> Void
     let onQuit: () -> Void
+    var onPoke: ((String) -> Void)?       // friend name -> send poke
+    var onClearPokes: (() -> Void)?
 
     @State private var hoveredUserId: String?
+    @State private var pokedUsers: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -104,6 +122,39 @@ struct ExpandedContent: View {
             processRow(name: "fisherman", ok: state.fishermanRunning && state.fishermanConnected)
 
             Divider()
+
+            // Incoming pokes
+            if !state.incomingPokes.isEmpty {
+                HStack(spacing: 6) {
+                    Text("👋")
+                        .font(.system(size: 14))
+                    Text("\(state.incomingPokes.count) poke\(state.incomingPokes.count == 1 ? "" : "s")")
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    Button("Clear") {
+                        onClearPokes?()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+                .padding(6)
+                .background(Color(nsColor: .systemYellow).opacity(0.15))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
+            // Hangout suggestion
+            if let suggestion = state.hangoutSuggestion {
+                HStack(spacing: 6) {
+                    Text("🍿")
+                        .font(.system(size: 12))
+                    Text(suggestion)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(6)
+                .background(Color(nsColor: .systemGreen).opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
 
             // Multi-user activity list
             if !state.allActivity.isEmpty {
@@ -138,7 +189,32 @@ struct ExpandedContent: View {
                                     .foregroundStyle(.secondary)
                             }
 
+                            // Flow state badge
+                            if user.inFlow {
+                                Text("🔥")
+                                    .font(.system(size: 10))
+                                    .help("In the zone for 30+ min")
+                            }
+
                             Spacer()
+
+                            // Poke button (for friends, not "me")
+                            if user.id != "me" {
+                                Button(action: {
+                                    pokedUsers.insert(user.id)
+                                    onPoke?(user.name)
+                                    // Reset after 3s
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                        pokedUsers.remove(user.id)
+                                    }
+                                }) {
+                                    Text(pokedUsers.contains(user.id) ? "✓" : "👋")
+                                        .font(.system(size: 10))
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.mini)
+                                .disabled(pokedUsers.contains(user.id))
+                            }
 
                             // Timeline bar in expanded view
                             if !user.history.isEmpty {

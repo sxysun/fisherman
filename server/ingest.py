@@ -215,31 +215,35 @@ async def _categorize_activity(
     if not _openai_client:
         return None
 
-    prompt = f"""You are generating a short ambient status for a person, like what they'd say if a friend texted "what are you up to?" Use the screen context below to infer their mindset and activity — but do NOT just report which app or file is open. Synthesize it into a natural, human status.
+    prompt = f"""Generate a short ambient status (max 30 chars) describing what this person is doing, based on their screen.
 
 App: {app or "unknown"}
 Window title: {window[:200] if window else ""}
 Visible text: {ocr_text[:500] if ocr_text else ""}
 
 Respond with ONLY this JSON:
-{{"emoji": "<single emoji>", "category": "<category>", "status": "<natural ambient status, max 30 chars>"}}
+{{"emoji": "<single emoji>", "category": "<category>", "status": "<status, max 30 chars>"}}
 
 Categories:
 "coding", "debugging", "code review", "reading docs", "design", "writing", "chat", "email", "meeting", "browsing", "news", "reading", "gaming", "terminal", "idle"
 
-STATUS STYLE — write like a human, not a screen recorder:
-- GOOD: "deep in a refactor", "catching up on tech news", "sketching out a new flow", "rabbit-holing on auth", "winding down", "in the zone", "reviewing a PR", "exploring an idea"
-- BAD: "VS Code — ingest.py", "Chrome — Hacker News", "Slack — #eng", "Terminal"
-- The status should convey the VIBE of what they're doing, not the literal tool
-- Use the screen content to be specific about the TOPIC when possible (e.g. "researching caching strategies" not just "browsing")
-- Vary your emoji — don't always use the same one for a category
+STATUS RULES:
+- Be SPECIFIC about the domain/topic — extract it from the screen content
+- Do NOT just name the app or filename
+- Do NOT be vague or flowery — no "tinkering with magic", "exploring ideas", "in the zone"
+- State WHAT they are actually working on in plain language
 
-PRIVACY — the status is shared with friends. NEVER include:
+GOOD: "websocket auth logic", "privacy filter for status", "reading about CRDT sync", "reviewing deploy pipeline", "team standup thread", "HN comments on LLMs", "onboarding flow mockup"
+BAD: "tinkering with some code", "doing AI stuff", "deep in a refactor", "exploring an idea", "VS Code — main.py", "Chrome — Google"
+
+The status should answer "working on what specifically?" not "what app?" and not "what vibe?"
+
+PRIVACY — this is shared with friends. NEVER include:
 - People's names, usernames, or @handles
 - Health, medical, financial, legal, relationship, or NSFW content
 - Email subjects, message previews, or chat content
 - Passwords, tokens, or credentials
-When in doubt, keep it vague. Better ambient than invasive.
+When in doubt about privacy, use a generic topic descriptor.
 """
 
     for attempt in range(3):
@@ -248,7 +252,7 @@ When in doubt, keep it vague. Better ambient than invasive.
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0.3,
+                temperature=0.2,
                 max_tokens=100,
             )
             result = json.loads(response.choices[0].message.content)
@@ -320,12 +324,51 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
 
         activity = await loop.run_in_executor(_pool, decrypt_json, row["activity"])
 
+        # Flow detection: check if same category for 30+ min
+        flow = False
+        try:
+            async with db.acquire() as conn:
+                flow_rows = await conn.fetch(
+                    """
+                    SELECT ts, activity FROM frames
+                    WHERE activity IS NOT NULL AND ts > now() - interval '45 minutes'
+                    ORDER BY ts DESC LIMIT 30
+                    """,
+                )
+            if len(flow_rows) >= 2:
+                current_cat = activity.get("category", "idle")
+                if current_cat not in ("idle", "browsing"):
+                    earliest_match = ts
+                    for fr in flow_rows[1:]:
+                        fa = await loop.run_in_executor(_pool, decrypt_json, fr["activity"])
+                        if fa.get("category") == current_cat:
+                            earliest_match = fr["ts"]
+                        else:
+                            break
+                    flow_minutes = (ts.timestamp() - earliest_match.timestamp()) / 60
+                    flow = flow_minutes >= 30
+        except Exception:
+            pass  # flow detection is best-effort
+
+        # Check for unread pokes
+        pokes = []
+        try:
+            async with db.acquire() as conn:
+                poke_rows = await conn.fetch(
+                    "SELECT from_pubkey, created_at FROM pokes ORDER BY created_at DESC LIMIT 10"
+                )
+            pokes = [{"from": r["from_pubkey"][:16], "at": r["created_at"].isoformat()} for r in poke_rows]
+        except Exception:
+            pass
+
         return web.json_response({
             "emoji": activity.get("emoji", "❓"),
             "category": activity.get("category", "idle"),
             "status": activity.get("status", ""),
             "updated_at": ts.isoformat(),
             "stale": False,
+            "flow": flow,
+            "pokes": pokes,
         })
 
     except Exception:
@@ -435,6 +478,43 @@ async def _http_delete_friend(request: "web.Request") -> "web.Response":
     remove_friend(pk)
     log.info("friend_removed_via_api", pubkey=pk[:16])
     return web.json_response({"ok": True, "pubkey": pk})
+
+
+async def _http_send_poke(request: "web.Request") -> "web.Response":
+    """POST /api/poke — send a nudge. Auth: friend or owner."""
+    auth_header = request.headers.get("Authorization", "")
+    valid, pubkey = verify_request(auth_header)
+    if not valid or not is_authorized(pubkey):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    db: asyncpg.Pool = request.app["db"]
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO pokes (from_pubkey) VALUES ($1)", pubkey
+            )
+        log.info("poke_received", from_pubkey=pubkey[:16])
+        return web.json_response({"ok": True})
+    except Exception:
+        log.error("poke_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_clear_pokes(request: "web.Request") -> "web.Response":
+    """DELETE /api/pokes — clear all pokes (owner only, after reading them)."""
+    auth_header = request.headers.get("Authorization", "")
+    valid, pubkey = verify_request(auth_header)
+    if not valid or not is_owner(pubkey):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    db: asyncpg.Pool = request.app["db"]
+    try:
+        async with db.acquire() as conn:
+            await conn.execute("DELETE FROM pokes")
+        return web.json_response({"ok": True})
+    except Exception:
+        log.error("clear_pokes_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
 
 
 async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
@@ -561,6 +641,8 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/api/friends", _http_get_friends)
         app.router.add_post("/api/friends", _http_add_friend)
         app.router.add_delete("/api/friends", _http_delete_friend)
+        app.router.add_post("/api/poke", _http_send_poke)
+        app.router.add_delete("/api/pokes", _http_clear_pokes)
         http_runner = web.AppRunner(app)
         await http_runner.setup()
         http_port = int(os.environ.get("HTTP_API_PORT", "9998"))

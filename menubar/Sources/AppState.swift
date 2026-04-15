@@ -48,6 +48,12 @@ enum ActivityCategory: String {
     }
 }
 
+struct Poke: Identifiable {
+    let id = UUID()
+    let fromShort: String   // first 16 chars of pubkey
+    let at: Date
+}
+
 struct UserActivity: Identifiable {
     let id: String          // "me" or friend name
     let name: String
@@ -58,6 +64,8 @@ struct UserActivity: Identifiable {
     var history: [ActivityEntry] = []
     var sessionStart: Date?
     var isWorkingTogether: Bool = false
+    var inFlow: Bool = false
+    var pokes: [Poke] = []
 
     var sessionDuration: TimeInterval {
         guard let start = sessionStart else { return 0 }
@@ -93,6 +101,10 @@ final class AppState {
 
     // Multi-user activity
     var allActivity: [UserActivity] = []
+
+    // Hangout suggestion
+    var hangoutSuggestion: String?   // e.g. "You and 2 friends are winding down"
+    var incomingPokes: [Poke] = []   // pokes received on "me"
 
     var statusColor: NSColor {
         switch status {
