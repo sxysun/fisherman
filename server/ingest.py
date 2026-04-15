@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -151,6 +152,57 @@ async def _handle_vlm(
     log.info("vlm_stored", ts=ts, rows=result)
 
 
+def _sanitize_status(status: str) -> str:
+    """Deterministic backup filter: strip potentially sensitive content from status.
+
+    Returns empty string when the status is unsafe — caller falls back to
+    showing just {emoji} {category}, which is always safe.
+    """
+    if not status:
+        return status
+
+    # Email addresses
+    if re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', status):
+        return ""
+    # Phone numbers
+    if re.search(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', status):
+        return ""
+    # @mentions / usernames
+    if re.search(r'@\w{2,}', status):
+        return re.sub(r'@\w+', '', status).strip() or ""
+    # "DM with..." / "chat with..." / "message to..." / "call with..."
+    if re.search(r'\b(DM|chat|message|call|talking)\s+(with|to|from)\b', status, re.I):
+        return ""
+    # Health/medical keywords
+    _health_terms = {'symptom', 'diagnosis', 'prescription', 'therapy', 'medication',
+                     'doctor', 'hospital', 'clinic', 'webmd', 'mayo clinic', 'health',
+                     'medical', 'patient', 'surgery', 'disease'}
+    if any(term in status.lower() for term in _health_terms):
+        return ""
+    # Financial keywords
+    _finance_terms = {'salary', 'debt', 'loan', 'mortgage', 'tax return', 'bank account',
+                      'credit score', 'budget', 'invoice', '401k', 'payroll', 'bank statement',
+                      'net worth', 'stock portfolio'}
+    if any(term in status.lower() for term in _finance_terms):
+        return ""
+    # Legal/HR keywords
+    _legal_terms = {'lawyer', 'attorney', 'lawsuit', 'termination', 'resignation',
+                    'harassment', 'complaint', 'severance', 'legal counsel', 'subpoena'}
+    if any(term in status.lower() for term in _legal_terms):
+        return ""
+    # Dating/relationship keywords
+    _dating_terms = {'tinder', 'bumble', 'hinge', 'match.com', 'dating', 'breakup',
+                     'divorce', 'custody', 'grindr', 'okcupid'}
+    if any(term in status.lower() for term in _dating_terms):
+        return ""
+    # NSFW keywords
+    _nsfw_terms = {'porn', 'nsfw', 'xxx', 'onlyfans', 'adult content'}
+    if any(term in status.lower() for term in _nsfw_terms):
+        return ""
+
+    return status
+
+
 async def _categorize_activity(
     app: str | None,
     window: str,
@@ -190,10 +242,25 @@ Categories (pick the most specific one):
 - "idle" — screensaver, lock screen, away (😴💤)
 
 Rules:
-- Be SPECIFIC in status: include the filename, page title, channel name, or conversation partner visible on screen
 - Vary your emoji choice — don't always use the same emoji for the same category
 - If the app is a code editor, check the window title for the filename
 - If it's a browser, extract the page title from visible text
+- Be specific where SAFE: filenames, app names, channel names (not people)
+
+PRIVACY RULES — the status field is shared with friends. NEVER include:
+- People's names, usernames, or @handles (say "Slack #channel" not "DM with Sarah")
+- Health, medical, or body-related queries (say "browsing" not "WebMD headaches")
+- Financial information (say "spreadsheet" not "budget-deficit.xlsx")
+- Relationship or dating content (say "browsing" not "Tinder profile")
+- Legal, HR, or job-search content (say "reading" not "wrongful-termination.pdf")
+- Passwords, tokens, keys, or credentials
+- NSFW or adult content descriptions
+- Email subjects, message previews, or chat message content
+
+SAFE status examples: "ingest.py", "Hacker News", "#eng", "Figma mockups", "VS Code", "Terminal"
+UNSAFE status examples: "DM with Sarah", "WebMD headaches", "divorce-lawyer.pdf", "salary-negotiation.xlsx"
+
+When in doubt, use the app name or a generic descriptor. Better to be vague than to leak.
 """
 
     for attempt in range(3):
@@ -213,7 +280,10 @@ Rules:
                 emoji = "❓"
 
             category = result.get("category", "idle")[:20]
-            status = result.get("status", "")[:30]
+            raw_status = result.get("status", "")[:30]
+            status = _sanitize_status(raw_status)
+            if status != raw_status:
+                log.info("status_sanitized", original=raw_status, sanitized=status)
 
             return {"emoji": emoji, "category": category, "status": status}
 
