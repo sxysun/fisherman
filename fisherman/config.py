@@ -7,6 +7,8 @@ class FishermanConfig(BaseSettings):
     # Server
     server_url: str = "ws://localhost:9999/ingest"
     private_key: str = ""  # ed25519 private key (hex)
+    activity_port: int = 9998  # HTTP API port (used by menu bar, ignored by daemon)
+    auth_token: str = ""  # deprecated, kept for .env compat
 
     # Capture
     capture_backend: str = "screenpipe"
