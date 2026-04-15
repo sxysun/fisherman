@@ -133,7 +133,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         )
 
         let hostingView = NSHostingView(rootView: settingsView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: 340)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 400, height: 420)
 
         let window = NSPanel(
             contentRect: hostingView.frame,

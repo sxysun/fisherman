@@ -9,6 +9,15 @@ enum AppStatus: String {
     case error = "Error"
 }
 
+struct UserActivity: Identifiable {
+    let id: String          // "me" or friend name
+    let name: String
+    let emoji: String
+    let category: String
+    let status: String
+    let stale: Bool
+}
+
 @Observable
 final class AppState {
     var status: AppStatus = .starting
@@ -28,10 +37,8 @@ final class AppState {
     // Error detail
     var errorDetail: String?
 
-    // Activity (NEW)
-    var currentActivity: String?  // e.g. "coding: main.py"
-    var activityCategory: String?  // e.g. "coding", "reading", "browsing", "idle"
-    var activityUpdatedAt: String?
+    // Multi-user activity
+    var allActivity: [UserActivity] = []
 
     var statusColor: NSColor {
         switch status {

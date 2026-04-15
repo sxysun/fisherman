@@ -12,30 +12,22 @@ struct CompactLeading: View {
     }
 }
 
-// MARK: - Compact Trailing (frame count)
+// MARK: - Compact Trailing (emoji row)
 
 struct CompactTrailing: View {
     let state: AppState
 
     var body: some View {
-        HStack(spacing: 4) {
-            // Pixel character (placeholder emoji)
-            Text(characterEmoji(for: state.activityCategory))
-                .font(.system(size: 16))
+        HStack(spacing: 2) {
+            ForEach(state.allActivity.prefix(5)) { user in
+                Text(user.emoji).font(.system(size: 14))
+            }
 
-            Text("\(state.framesSent)")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private func characterEmoji(for category: String?) -> String {
-        switch category {
-        case "coding": return "👨‍💻"
-        case "reading": return "📖"
-        case "browsing": return "🔍"
-        case "idle": return "😴"
-        default: return "❓"
+            if state.allActivity.isEmpty {
+                Text("\(state.framesSent)")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -69,17 +61,25 @@ struct ExpandedContent: View {
 
             Divider()
 
-            // Activity status (NEW)
-            if let category = state.activityCategory, let status = state.currentActivity {
-                HStack(spacing: 6) {
-                    Text(characterEmoji(for: category))
-                        .font(.system(size: 14))
-                    Text("\(category): \(status)")
-                        .font(.system(size: 12))
-                        .lineLimit(1)
-                    Spacer()
+            // Multi-user activity list
+            if !state.allActivity.isEmpty {
+                ForEach(state.allActivity) { user in
+                    HStack(spacing: 6) {
+                        Text(user.emoji).font(.system(size: 14))
+                        Text(user.name)
+                            .font(.system(size: 12, weight: .medium))
+                        Text(user.status)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer()
+                    }
+                    .opacity(user.stale ? 0.5 : 1.0)
                 }
-                .padding(.vertical, 2)
+            } else {
+                Text("No activity yet")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
             }
 
             Divider()
@@ -147,16 +147,6 @@ struct ExpandedContent: View {
                 .foregroundStyle(.tertiary)
             Text(value)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
-        }
-    }
-
-    private func characterEmoji(for category: String?) -> String {
-        switch category {
-        case "coding": return "👨‍💻"
-        case "reading": return "📖"
-        case "browsing": return "🔍"
-        case "idle": return "😴"
-        default: return "❓"
         }
     }
 }

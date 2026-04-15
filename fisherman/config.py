@@ -6,7 +6,7 @@ class FishermanConfig(BaseSettings):
 
     # Server
     server_url: str = "ws://localhost:9999/ingest"
-    auth_token: str = ""
+    private_key: str = ""  # ed25519 private key (hex)
 
     # Capture
     capture_backend: str = "screenpipe"

@@ -30,7 +30,7 @@ class FishermanDaemon:
         self._differ = FrameDiffer(threshold=config.diff_threshold)
         self._privacy = PrivacyFilter(config)
         self._router = TierRouter(config)
-        self._streamer = Streamer(config.server_url, config.auth_token)
+        self._streamer = Streamer(config.server_url, config.private_key)
         self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
         self._screenpipe = ScreenpipeCaptureClient(
             config.screenpipe_url,

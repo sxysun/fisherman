@@ -15,7 +15,7 @@ final class StatusPoller: @unchecked Sendable {
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2.0
-        config.httpMaximumConnectionsPerHost = 2
+        config.httpMaximumConnectionsPerHost = 4
         self.session = URLSession(configuration: config)
     }
 
@@ -35,7 +35,7 @@ final class StatusPoller: @unchecked Sendable {
     private func poll() {
         pollScreenpipe()
         pollFisherman()
-        pollActivity()
+        pollAllActivity()
     }
 
     private func pollScreenpipe() {
@@ -77,40 +77,119 @@ final class StatusPoller: @unchecked Sendable {
         }.resume()
     }
 
-    private func pollActivity() {
-        // Build activity API URL from server URL + configurable activity port
-        // e.g. ws://host:9999/ingest -> http://host:9998/api/current_activity
-        guard let wsURL = URL(string: config.serverURL),
-              let host = wsURL.host else { return }
+    // MARK: - Multi-user activity polling
 
-        let scheme = config.serverURL.hasPrefix("wss://") ? "https" : "http"
-        let httpURL = "\(scheme)://\(host):\(config.activityPort)/api/current_activity"
+    /// Thread-safe collector for concurrent activity polling results.
+    private final class ActivityCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [UserActivity] = []
 
-        guard let url = URL(string: httpURL) else { return }
+        func append(_ item: UserActivity) {
+            lock.lock()
+            items.append(item)
+            lock.unlock()
+        }
+
+        func sorted() -> [UserActivity] {
+            lock.lock()
+            let result = items.sorted { a, b in
+                if a.id == "me" { return true }
+                if b.id == "me" { return false }
+                return a.name < b.name
+            }
+            lock.unlock()
+            return result
+        }
+    }
+
+    private func pollAllActivity() {
+        let group = DispatchGroup()
+        let collector = ActivityCollector()
+
+        // Poll own server
+        group.enter()
+        pollSingleActivity(
+            id: "me",
+            name: "me",
+            serverURL: config.serverURL,
+            activityPort: config.activityPort
+        ) { activity in
+            if let activity { collector.append(activity) }
+            group.leave()
+        }
+
+        // Poll each friend's server
+        for friend in config.friends {
+            group.enter()
+            pollSingleActivity(
+                id: friend.name,
+                name: friend.name,
+                serverURL: friend.serverURL,
+                activityPort: friend.activityPort
+            ) { activity in
+                if let activity { collector.append(activity) }
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) { [weak self] in
+            self?.state.allActivity = collector.sorted()
+        }
+    }
+
+    private func pollSingleActivity(
+        id: String,
+        name: String,
+        serverURL: String,
+        activityPort: String,
+        completion: @Sendable @escaping (UserActivity?) -> Void
+    ) {
+        guard let wsURL = URL(string: serverURL),
+              let host = wsURL.host else {
+            completion(nil)
+            return
+        }
+
+        let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
+        let httpURL = "\(scheme)://\(host):\(activityPort)/api/current_activity"
+
+        guard let url = URL(string: httpURL) else {
+            completion(nil)
+            return
+        }
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 5.0
 
-        if !config.authToken.isEmpty {
-            request.setValue("Bearer \(config.authToken)", forHTTPHeaderField: "Authorization")
+        // Sign with FishKey
+        if let authValue = config.signRequest() {
+            request.setValue(authValue, forHTTPHeaderField: "Authorization")
         }
 
-        session.dataTask(with: request) { [weak self] data, response, error in
-            guard let self = self,
-                  let data = data,
+        session.dataTask(with: request) { data, response, error in
+            guard let data = data,
                   error == nil,
+                  let http = response as? HTTPURLResponse,
+                  http.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return }
-
-            let category = json["category"] as? String
-            let status = json["status"] as? String
-            let updatedAt = json["updated_at"] as? String
-
-            DispatchQueue.main.async {
-                self.state.activityCategory = category
-                self.state.currentActivity = status
-                self.state.activityUpdatedAt = updatedAt
+            else {
+                completion(nil)
+                return
             }
+
+            let emoji = json["emoji"] as? String ?? "❓"
+            let category = json["category"] as? String ?? "idle"
+            let status = json["status"] as? String ?? ""
+            let stale = json["stale"] as? Bool ?? false
+
+            completion(UserActivity(
+                id: id,
+                name: name,
+                emoji: emoji,
+                category: category,
+                status: status,
+                stale: stale
+            ))
         }.resume()
     }
 }

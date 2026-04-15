@@ -30,6 +30,10 @@ except ImportError:
 
 from crypto import encrypt_json, encrypt_text, decrypt_text, decrypt_json
 from storage import R2Storage, LocalStorage, create_storage
+from auth import (
+    load_signing_key, load_friends, verify_request,
+    is_owner, is_authorized,
+)
 
 try:
     from openai import AsyncOpenAI
@@ -44,14 +48,16 @@ _pool = ThreadPoolExecutor(max_workers=4)
 
 
 def _auth_check(connection, request):
-    """Reject WebSocket connections that don't carry a valid Bearer token."""
-    token = os.environ.get("INGEST_AUTH_TOKEN", "")
-    if not token:
-        return  # no auth configured, allow all
+    """Reject WebSocket connections without valid FishKey auth (owner only)."""
     auth = request.headers.get("Authorization", "")
-    if auth != f"Bearer {token}":
-        log.warning("auth_rejected", remote=connection.remote_address)
-        return Response(HTTPStatus.UNAUTHORIZED, "Unauthorized", Headers())
+
+    if auth.startswith("FishKey "):
+        valid, pubkey = verify_request(auth)
+        if valid and is_owner(pubkey):
+            return  # owner authenticated
+
+    log.warning("ws_auth_rejected", remote=connection.remote_address)
+    return Response(HTTPStatus.UNAUTHORIZED, "Unauthorized", Headers())
 
 
 async def _init_db(pool: asyncpg.Pool) -> None:
@@ -149,33 +155,33 @@ async def _categorize_activity(
     window: str,
     ocr_text: str,
 ) -> dict | None:
-    """Call OpenAI API to categorize activity. Returns {category, status} or None on error."""
+    """Call OpenAI API to categorize activity with open-ended emoji + category.
+
+    Returns {"emoji": "...", "category": "...", "status": "..."} or None on error.
+    """
     if not _openai_client:
         return None
 
-    prompt = f"""Analyze this user's current activity and respond with JSON.
+    prompt = f"""Analyze this user's current screen activity and respond with JSON.
 
 App: {app or "unknown"}
 Window title: {window[:200] if window else ""}
 Visible text: {ocr_text[:500] if ocr_text else ""}
 
-Respond with ONLY this JSON structure:
-{{"category": "<one of: coding|reading|browsing|idle>", "status": "<brief description, max 30 chars>"}}
+Respond with ONLY this JSON:
+{{"emoji": "<single emoji that best represents the activity>", "category": "<1-2 word label>", "status": "<what they're doing, max 30 chars>"}}
 
-Rules:
-- "coding" = text editors, IDEs, terminals with code
-- "reading" = documentation, articles, PDFs, long-form content
-- "browsing" = web browsing, social media, shopping
-- "idle" = no significant activity, screensaver, empty screens
-
-Status examples:
-- coding: "main.py", "debugging auth"
-- reading: "API docs", "HN comments"
-- browsing: "Twitter", "YouTube"
-- idle: "away"
+Pick ANY emoji and category that fits. Be creative and specific.
+Examples:
+- {{"emoji": "💻", "category": "coding", "status": "ingest.py"}}
+- {{"emoji": "📰", "category": "news", "status": "Hacker News"}}
+- {{"emoji": "🎨", "category": "design", "status": "Figma mockups"}}
+- {{"emoji": "💬", "category": "chat", "status": "Slack #eng"}}
+- {{"emoji": "📧", "category": "email", "status": "inbox zero"}}
+- {{"emoji": "🎮", "category": "gaming", "status": "Steam"}}
+- {{"emoji": "😴", "category": "idle", "status": "away"}}
 """
 
-    # Retry logic: 3 attempts with exponential backoff (0s, 2s, 4s)
     for attempt in range(3):
         try:
             response = await _openai_client.chat.completions.create(
@@ -187,15 +193,15 @@ Status examples:
             )
             result = json.loads(response.choices[0].message.content)
 
-            # Validate category
-            category = result.get("category", "idle")
-            if category not in ("coding", "reading", "browsing", "idle"):
-                log.warning("invalid_category", category=category)
-                category = "idle"
+            emoji = result.get("emoji", "")
+            # Validate emoji is non-empty and not ASCII-only
+            if not emoji or emoji.isascii():
+                emoji = "❓"
 
-            status = result.get("status", "")[:30]  # truncate to 30 chars
+            category = result.get("category", "idle")[:20]
+            status = result.get("status", "")[:30]
 
-            return {"category": category, "status": status}
+            return {"emoji": emoji, "category": category, "status": status}
 
         except json.JSONDecodeError:
             log.warning("openai_json_decode_error", attempt=attempt)
@@ -206,24 +212,24 @@ Status examples:
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
 
-    return None  # all retries exhausted
+    return None
 
 
 async def _http_current_activity(request: "web.Request") -> "web.Response":
-    """HTTP endpoint: GET /api/current_activity - returns latest activity with Bearer token auth."""
-    # Check Bearer token auth
-    token = os.environ.get("INGEST_AUTH_TOKEN", "")
-    if token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header != f"Bearer {token}":
-            log.warning("http_auth_rejected", remote=request.remote)
-            return web.json_response({"error": "Unauthorized"}, status=401)
+    """HTTP endpoint: GET /api/current_activity - returns latest activity.
+
+    Auth: FishKey ed25519 signature (owner or friend).
+    """
+    auth_header = request.headers.get("Authorization", "")
+    valid, pubkey = verify_request(auth_header)
+    if not valid or not is_authorized(pubkey):
+        log.warning("http_auth_rejected", remote=request.remote)
+        return web.json_response({"error": "Unauthorized"}, status=401)
 
     db: asyncpg.Pool = request.app["db"]
     loop = asyncio.get_running_loop()
 
     try:
-        # Read latest frame with activity
         async with db.acquire() as conn:
             row = await conn.fetchrow(
                 """
@@ -238,21 +244,21 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
         if not row:
             return web.json_response({"activity": None, "message": "No activity yet"})
 
-        # Check staleness (>5min old = idle)
         ts = row["ts"]
         age_seconds = time.time() - ts.timestamp()
-        if age_seconds > 300:  # 5 minutes
+        if age_seconds > 300:
             return web.json_response({
+                "emoji": "😴",
                 "category": "idle",
                 "status": f"away (last seen {int(age_seconds / 60)}m ago)",
                 "updated_at": ts.isoformat(),
                 "stale": True,
             })
 
-        # Decrypt activity
         activity = await loop.run_in_executor(_pool, decrypt_json, row["activity"])
 
         return web.json_response({
+            "emoji": activity.get("emoji", "❓"),
             "category": activity.get("category", "idle"),
             "status": activity.get("status", ""),
             "updated_at": ts.isoformat(),
@@ -359,6 +365,10 @@ async def _handle_connection(
 
 
 async def _run(host: str, port: int) -> None:
+    # Load ed25519 signing key and friends list
+    load_signing_key()
+    load_friends()
+
     database_url = os.environ["DATABASE_URL"]
     db = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     await _init_db(db)

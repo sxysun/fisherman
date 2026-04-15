@@ -5,6 +5,8 @@ import time
 
 import structlog
 import websockets
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
 
 from fisherman.capture import ScreenFrame
 from fisherman.router import RoutingDecision
@@ -15,6 +17,30 @@ _MAX_QUEUE = 32
 _MAX_BACKOFF = 30.0
 
 
+def _load_signing_key(private_key_hex: str):
+    """Load ed25519 key from hex string. Returns (private_key, public_key_hex) or (None, "")."""
+    if not private_key_hex:
+        return None, ""
+    try:
+        key_bytes = bytes.fromhex(private_key_hex)
+        priv = Ed25519PrivateKey.from_private_bytes(key_bytes)
+        pub_bytes = priv.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+        return priv, pub_bytes.hex()
+    except Exception:
+        log.warning("invalid_private_key")
+        return None, ""
+
+
+def _sign_fishkey(priv: Ed25519PrivateKey, pub_hex: str) -> str:
+    """Create FishKey auth header value: pubkey_hex:timestamp:signature_hex."""
+    ts = int(time.time())
+    message = f"fisherman:{ts}".encode()
+    sig = priv.sign(message)
+    return f"FishKey {pub_hex}:{ts}:{sig.hex()}"
+
+
 class Streamer:
     """
     Persistent WebSocket connection to server.
@@ -22,9 +48,9 @@ class Streamer:
     Non-blocking send: drops oldest frames if server is slow.
     """
 
-    def __init__(self, url: str, auth_token: str):
+    def __init__(self, url: str, private_key_hex: str):
         self._url = url
-        self._auth_token = auth_token
+        self._priv_key, self._pub_hex = _load_signing_key(private_key_hex)
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_MAX_QUEUE)
         self._connected_event = asyncio.Event()
@@ -131,8 +157,8 @@ class Streamer:
         while True:
             try:
                 headers = {}
-                if self._auth_token:
-                    headers["Authorization"] = f"Bearer {self._auth_token}"
+                if self._priv_key:
+                    headers["Authorization"] = _sign_fishkey(self._priv_key, self._pub_hex)
                 self._ws = await websockets.connect(
                     self._url,
                     additional_headers=headers,
