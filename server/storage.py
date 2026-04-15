@@ -45,9 +45,13 @@ class R2Storage:
 class LocalStorage:
     """Fallback: store encrypted frames on local disk when R2 is not configured."""
 
-    def __init__(self, base_dir: str = "./frames"):
+    def __init__(self, base_dir: str | None = None):
         self._fernet = Fernet(os.environ["ENCRYPTION_KEY"].encode())
-        self._base = pathlib.Path(base_dir)
+        if base_dir is None:
+            # Keep storage path stable regardless of process CWD.
+            default_base = pathlib.Path(__file__).resolve().parent / "frames"
+            base_dir = os.environ.get("FISHERMAN_FRAMES_DIR", str(default_base))
+        self._base = pathlib.Path(base_dir).expanduser().resolve()
         self._base.mkdir(parents=True, exist_ok=True)
 
     def upload(self, jpeg_data: bytes, timestamp: float) -> str:
@@ -74,5 +78,6 @@ def create_storage():
     """Return R2Storage if credentials are configured, otherwise LocalStorage."""
     if os.environ.get("R2_ACCOUNT_ID") and os.environ.get("R2_ACCESS_KEY_ID"):
         return R2Storage()
-    log.info("r2_not_configured, using local file storage in ./frames/")
-    return LocalStorage()
+    storage = LocalStorage()
+    log.info("r2_not_configured", local_frames_dir=str(storage._base))
+    return storage
