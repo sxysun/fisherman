@@ -8,6 +8,9 @@ dist/
 build/
 server/.venv/
 server/uv.lock
+server/frames/
+server/*.log
+server/.watchdog_state.json
 menubar/.build/
 menubar/icon.iconset/
 *.app
