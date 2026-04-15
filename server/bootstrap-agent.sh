@@ -36,12 +36,36 @@ echo "SERVER_WS_URL=ws://localhost:${PORT}/ingest"
 echo "INGEST_HOST=${HOST}"
 echo "INGEST_PORT=${PORT}"
 echo "CLIENT_AUTH_TOKEN=${TOKEN}"
-# Generate setup code for client app
+
+# Derive public key from private key (if available)
+FISH_PRIVATE_KEY=$(grep '^FISH_PRIVATE_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2-)
+if [ -n "$FISH_PRIVATE_KEY" ]; then
+    FISH_PUBLIC_KEY=$("${PY_RUN[@]}" -c "
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+k = Ed25519PrivateKey.from_private_bytes(bytes.fromhex('${FISH_PRIVATE_KEY}'))
+print(k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex())
+" 2>/dev/null || echo "")
+    echo "FISH_PUBLIC_KEY=${FISH_PUBLIC_KEY}"
+fi
+
+# Generate setup code for client app (fishsetup: prefix — distinct from fish: friend codes)
 SETUP_JSON="{\"url\":\"ws://localhost:${PORT}/ingest\",\"token\":\"${TOKEN}\"}"
-SETUP_CODE="fish:$(echo -n "$SETUP_JSON" | base64 | tr -d '\n')"
+SETUP_CODE="fishsetup:$(echo -n "$SETUP_JSON" | base64 | tr -d '\n')"
 echo "SETUP_CODE=${SETUP_CODE}"
 echo ""
-echo "Paste this setup code into the Fisherman app to connect:"
-echo "  ${SETUP_CODE}"
+echo "=== Client setup ==="
+echo "In Fisherman app → Settings → Server, set:"
+echo "  Server URL: ws://localhost:${PORT}"
+echo "  (replace localhost with your public hostname if remote)"
 echo ""
-echo "If this server will be accessed remotely, replace localhost with the public host name and use wss:// when terminated behind TLS/proxy."
+echo "=== Friend codes ==="
+echo "After setup, go to Settings → Identity to see your friend code."
+echo "Share it with friends — they paste it in Settings → Friends to add you."
+echo ""
+if [ -n "$FISH_PRIVATE_KEY" ]; then
+    echo "Copy this private key to your client's .env as FISH_PRIVATE_KEY:"
+    echo "  ${FISH_PRIVATE_KEY}"
+    echo "(The client and server must share the same key pair.)"
+    echo ""
+fi

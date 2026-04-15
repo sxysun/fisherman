@@ -69,8 +69,10 @@ Then read `INGEST_HOST`, `INGEST_PORT`, and `INGEST_AUTH_TOKEN` from `server/.en
 
 ```bash
 SETUP_JSON='{"url":"wss://your-host/ingest","token":"<the token from .env>"}'
-echo -n "$SETUP_JSON" | base64 | tr -d '\n' | sed 's/^/fish:/'
+echo -n "$SETUP_JSON" | base64 | tr -d '\n' | sed 's/^/fishsetup:/'
 ```
+
+> **Note:** `fishsetup:` is for server connection codes. `fish:` is for friend codes (sharing identity with other users). Don't mix them up.
 
 ### Step 4. Verify the server is up
 
@@ -86,7 +88,7 @@ Tell the user, in this exact shape:
 
 - **Server WebSocket URL:** `ws://...` or `wss://...`
 - **Auth token:** the value of `INGEST_AUTH_TOKEN`
-- **Setup code (paste into Fisherman → Settings → Quick Setup):** `fish:...`
+- **Setup code:** `fishsetup:...` (or just the raw URL + token for manual entry)
 - **Storage:** local disk under `server/frames/` *or* R2 (whichever is configured)
 - **Process status:** running as PID `<pid>`, logs at `server/ingest.log`
 
@@ -94,7 +96,13 @@ If a token already existed in `.env`, say so and confirm you reused it rather th
 
 ### Auth model (for your understanding)
 
-`INGEST_AUTH_TOKEN` is just a shared bearer password between client and server. The client sets `FISH_AUTH_TOKEN` to the same value. If the user wants to rotate it, edit `server/.env`, restart the server, and regenerate the setup code.
+**Ed25519 key auth (primary):** The server and client share an ed25519 key pair via `FISH_PRIVATE_KEY`. The client signs each request with a timestamp; the server verifies the signature. This is used for WebSocket ingest, the activity API, and the friends API.
+
+**Bearer token auth (legacy):** `INGEST_AUTH_TOKEN` is a shared bearer password. The client sets `FISH_AUTH_TOKEN` to the same value. Still supported for backward compatibility.
+
+**Friends:** The server maintains a `friends.json` allow-list of friend public keys. Friends can query your activity via `GET /api/current_activity`. Manage friends via `POST/DELETE /api/friends` (owner-only) or through the client's Settings → Friends tab using friend codes.
+
+**Friend codes:** A `fish:<base64url(json)>` URI encoding display name, public key, hostname, and ports. Users share these to add each other — no SSH or .env editing needed. The client auto-registers friends on the server via the `/api/friends` endpoint.
 
 ---
 

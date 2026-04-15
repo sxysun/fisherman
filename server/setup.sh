@@ -63,6 +63,25 @@ elif [ -z "$ENCRYPTION_KEY" ]; then
     AUTH_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 fi
 
+# --- Ed25519 key pair (for FishKey auth + friend codes) ---
+FISH_PRIVATE_KEY=$($PY -c "
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+k = Ed25519PrivateKey.generate()
+print(k.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw).hex())
+" 2>/dev/null || true)
+
+if [ -z "$FISH_PRIVATE_KEY" ] && command -v uv &>/dev/null; then
+    FISH_PRIVATE_KEY=$(uv run python -c "
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+k = Ed25519PrivateKey.generate()
+print(k.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw).hex())
+")
+fi
+
+echo "    Generated ed25519 key pair"
+
 # --- .env ---
 if [ -f .env ]; then
     echo "    .env already exists, not overwriting"
@@ -84,9 +103,16 @@ ENCRYPTION_KEY=${ENCRYPTION_KEY}
 # Server
 INGEST_HOST=0.0.0.0
 INGEST_PORT=9999
+HTTP_API_PORT=9998
 
 # Auth token (auto-generated — copy this to the client's FISH_AUTH_TOKEN)
 INGEST_AUTH_TOKEN=${AUTH_TOKEN}
+
+# Ed25519 identity (auto-generated — used for FishKey auth and friend codes)
+FISH_PRIVATE_KEY=${FISH_PRIVATE_KEY}
+
+# Friends allow-list (managed via /api/friends — no need to edit manually)
+# FISH_FRIENDS=
 EOF
     echo "    Created .env with auto-generated keys"
 fi
