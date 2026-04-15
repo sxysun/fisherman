@@ -1,50 +1,111 @@
 # Fisherman
 
-Lightweight macOS screen streamer. Captures your screen + OCR locally and streams it to your own server so your agents can see what you've been doing.
+Know what your friends are up to — without asking. Fisherman captures your screen locally, runs OCR, and shares a privacy-safe ambient status with friends in real time. Think AIM away messages meets macOS notch.
 
-## Setup
+Your status lives in the notch: a short phrase like "websocket auth logic" or "reading about CRDT sync" — specific enough to be useful, private enough to share. No app names, no filenames, no surveillance. Just vibes with substance.
 
-Two steps. That's it.
+## What you see
 
-**1. Install the client (macOS):**
+**The notch** shows your friends' status at a glance:
+
+- Emoji + status per friend (e.g. `💻 websocket auth logic`)
+- `🔥` flow indicator when someone's been focused 30+ minutes
+- `👋` poke — tap to nudge a friend
+- `🍿` hangout suggestion when you and friends are both free
+- Timeline bar showing recent activity categories
+- Session duration ("47m") per friend
+
+Hover the notch to expand and see full detail. Everything updates every few seconds.
+
+## Install (macOS)
+
+One command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
 ```
 
-**2. Set up the server.** Point any shell-capable agent (Claude Code, OpenCode, Hermes, ...) at the skill file:
+This installs [Screenpipe](https://github.com/mediar-ai/screenpipe) (screen capture), builds the menu bar app, and drops it in `/Applications`. Grant Screen Recording permission when prompted.
+
+Then open the app — it lives in your notch. First launch opens Settings automatically.
+
+## Set up your server
+
+Your screen data goes to *your own server* — not ours. Point any shell-capable agent at the skill file:
 
 ```text
 Read https://raw.githubusercontent.com/sxysun/fisherman/main/SKILL.md and set up Fisherman for me. Give me the setup code when you're done.
 ```
 
-If your agent is already running inside a clone of this repo, just say:
+Or if your agent is already in the repo:
 
 ```text
 Read SKILL.md and set up Fisherman for me.
 ```
 
-When the agent finishes, hover the notch in Fisherman, open **Settings**, and paste the setup code it gives you. Done.
+The agent runs `server/bootstrap-agent.sh`, which sets up Postgres, generates encryption keys, starts the ingest server, and gives you a setup code. Paste that into Settings and you're live.
 
-[`SKILL.md`](SKILL.md) is the canonical agent guide — it covers server setup, querying captured data, and maintaining a durable memory wiki. The agent reads it once and knows everything it needs.
+[`SKILL.md`](SKILL.md) is the full agent guide — server setup, querying data, and maintaining a durable memory wiki. The agent reads it once and knows everything.
 
----
+### What the server does
 
-## What it does
+- Receives encrypted frames over WebSocket (port 9999)
+- Stores them in Postgres with Fernet encryption
+- Runs an LLM (gpt-4o-mini) to generate your ambient status from OCR text
+- Serves a friends API (port 9998) so friends can see your status
+- Applies a two-layer privacy filter: LLM prompt rules + deterministic keyword/regex sanitizer
+- Images go to Cloudflare R2 or local disk (encrypted either way)
 
-Screenpipe captures your screen and runs OCR locally. Fisherman polls it, applies privacy filters and dedup, then streams frames to your server over WebSocket. Frames are also kept locally at `~/.fisherman/frames/` with a built-in viewer at `http://127.0.0.1:7892/viewer`.
+### Server watchdog
 
-## Friends & Activity
+`server/ingest-watchdog.sh` auto-restarts the ingest server if it goes down. Add it to cron:
 
-See what your friends are doing in real time. Each user runs their own server; friend codes let you connect without touching server configs.
+```bash
+* * * * * /path/to/server/ingest-watchdog.sh
+```
 
-**Share your code** (1 step): Settings → Identity → copy your friend code → send to a friend.
+## Add friends
 
-**Add a friend** (1 step): Settings → Friends → paste their `fish:` code → click Add.
+Each user runs their own server. Friend codes let you connect without touching configs.
 
-Both sides do this, and you can see each other's activity in the notch. No SSH, no .env editing, no server restart.
+**Share your code:** Settings → Identity → copy your `fish:` code → send to a friend.
 
-A friend code looks like `fish:eyJuIjoiYW...` (~120 chars) and encodes your display name, public key, server host, and ports.
+**Add a friend:** Settings → Friends → paste their `fish:` code → click Add.
+
+Both sides do this. Then you see each other in the notch. No SSH, no `.env` editing, no server restart.
+
+A friend code looks like `fish:eyJuIjoiYW...` (~120 chars) and encodes your display name, public key, server host, and activity port.
+
+### Sharing tiers
+
+Each friend has a sharing tier you can set in Settings → Friends:
+
+- **Full** (default): emoji + category + status text + history
+- **Minimal**: emoji + category only — just enough to know if they're free
+
+The toggle is in Settings so the default stays on Full for most people.
+
+## Features
+
+### Ambient status
+Your status is generated by an LLM from your screen content. It answers "what are you working on?" without exposing private details. Examples: "websocket auth logic", "reading about CRDT sync", "browsing hacker news". Never includes names, health info, finances, or anything NSFW.
+
+### Poke 👋
+Tap a friend's row in the expanded notch to send a nudge. They see 👋 in their notch. Pokes clear after you dismiss them. A lightweight "hey, thinking of you" — no message composition needed.
+
+### Flow detection 🔥
+When someone stays in the same activity category (e.g. coding) for 30+ minutes, they get a 🔥 indicator. You can see who's in deep work and decide whether to interrupt.
+
+### Hangout suggestion 🍿
+When you and one or more friends are both in low-key states (browsing, reading, idle), the 🍿 icon appears in the compact notch. A subtle "you're both free — maybe hang out?"
+
+### Activity history
+The expanded notch shows each friend's last few status changes with relative timestamps:
+```
+💻 websocket auth logic      2 min ago
+📖 reading about CRDT sync   15 min ago
+💬 slack discussion           45 min ago
+```
 
 ## CLI
 
@@ -53,14 +114,17 @@ fisherman start | stop | status | pause | resume
 fisherman install-service     # macOS LaunchAgent for auto-start
 ```
 
+The app manages screenpipe and the daemon automatically — you don't need the CLI for normal use.
+
 ## Configuration
 
-All config is `FISH_`-prefixed env vars in `~/.fisherman/.env`. The key ones:
+All config lives in `~/.fisherman/.env` with `FISH_` prefix. The Settings UI handles the important ones.
 
 | Variable | Description |
 |---|---|
-| `FISH_SERVER_URL` | WebSocket server URL (e.g. `ws://your-server:9999`) |
-| `FISH_PRIVATE_KEY` | Ed25519 private key (hex). Shared between client and server. Auto-generated on first launch. |
+| `FISH_SERVER_URL` | WebSocket server URL (e.g. `ws://your-server:9999/ingest`) |
+| `FISH_PRIVATE_KEY` | Ed25519 private key (hex). Auto-generated. Shared with your server. |
+| `FISH_DISPLAY_NAME` | Your name in friend codes and the notch |
 
 <details>
 <summary>All options</summary>
@@ -68,16 +132,15 @@ All config is `FISH_`-prefixed env vars in `~/.fisherman/.env`. The key ones:
 | Variable | Default | Description |
 |---|---|---|
 | `FISH_AUTH_TOKEN` | — | Legacy bearer token (if server uses `INGEST_AUTH_TOKEN`) |
-| `FISH_DISPLAY_NAME` | macOS username | Your name shown in friend codes |
-| `FISH_ACTIVITY_PORT` | `9998` | HTTP API port on your server (for activity + friends API) |
+| `FISH_ACTIVITY_PORT` | `9998` | HTTP API port on your server (activity + friends API) |
 | `FISH_CAPTURE_BACKEND` | `screenpipe` | Capture backend (`screenpipe` or `native`) |
 | `FISH_SCREENPIPE_URL` | `http://127.0.0.1:3030` | Screenpipe local API |
 | `FISH_SCREENPIPE_POLL_INTERVAL` | `3.0` | Seconds between polls |
-| `FISH_SCREENPIPE_SEARCH_LIMIT` | `50` | OCR records per poll |
+| `FISH_SCREENPIPE_SEARCH_LIMIT` | `10` | OCR records per poll |
 | `FISH_DIFF_THRESHOLD` | `3` | dHash distance below which frames are skipped |
 | `FISH_JPEG_QUALITY` | `60` | JPEG compression quality (0-100) |
 | `FISH_MAX_DIMENSION` | `1920` | Max width/height for frames |
-| `FISH_CONTROL_PORT` | `7892` | Local HTTP port for CLI control |
+| `FISH_CONTROL_PORT` | `7892` | Local HTTP port for CLI control + frame viewer |
 | `FISH_EXCLUDED_BUNDLES` | `[]` | Bundle IDs to never capture |
 | `FISH_EXCLUDED_APPS` | `[]` | App names to never capture |
 | `FISH_FRAMES_DIR` | `~/.fisherman/frames` | Local frame storage |
@@ -87,9 +150,7 @@ All config is `FISH_`-prefixed env vars in `~/.fisherman/.env`. The key ones:
 
 ## Querying from agents
 
-Once data is flowing, agents read it via the `fisherman` CLI on the server. The full query playbook (commands, mismatch traps, recovery patterns) lives in [`SKILL.md`](SKILL.md) — agents that read it know how to reliably answer *"what was I doing?"* questions.
-
-Quick reference:
+Once data is flowing, agents query it via the CLI on the server. The full playbook lives in [`SKILL.md`](SKILL.md).
 
 ```bash
 cd server
@@ -99,19 +160,68 @@ uv run python cli.py summary --since "2h ago"     # activity by app
 uv run python cli.py image "<image_key>" -o out.jpg
 ```
 
+## Architecture
+
+```
+┌─────────────────────┐     WebSocket     ┌─────────────────────┐
+│   macOS Client      │ ──────────────→   │   Your Server       │
+│                     │                   │                     │
+│  Screenpipe (OCR)   │                   │  ingest.py          │
+│  Fisherman daemon   │                   │  ├─ Postgres (enc)  │
+│  Notch menu bar app │   HTTP API        │  ├─ R2/local (enc)  │
+│                     │ ←──────────────   │  ├─ LLM categorize  │
+│  ~/.fisherman/.env  │   activity+pokes  │  └─ friends API     │
+└─────────────────────┘                   └─────────────────────┘
+        ↕ friend codes (fish:...)                ↕
+┌─────────────────────┐                   ┌─────────────────────┐
+│  Friend's Client    │ ──── queries ──→  │  Friend's Server    │
+└─────────────────────┘                   └─────────────────────┘
+```
+
+Each user runs their own server. Clients poll friends' servers directly for activity status. All data is Fernet-encrypted at rest. Ed25519 signatures authenticate every request.
+
+## Cost
+
+The server uses gpt-4o-mini to generate ambient status from OCR. Typical usage is well under $0.10/day — a few cents at most. You bring your own OpenAI API key.
+
+## Privacy
+
+- Screen capture and OCR happen **locally** on your Mac
+- Frames are **Fernet-encrypted** before leaving your machine
+- Status is generated by an LLM with strict privacy rules — no names, health, finance, relationship, legal, or NSFW content
+- A deterministic regex/keyword filter catches anything the LLM misses
+- Friends can only see your ambient status, not your raw screen data
+- Each user controls their own server and encryption keys
+- Sharing tier lets you limit what specific friends see
+
+## Troubleshooting
+
+- **Screenpipe not running** — `brew install screenpipe` and grant Screen Recording in System Settings → Privacy & Security.
+- **Screen Recording permission lost** — After macOS updates, re-grant Screen Recording for Screenpipe in System Settings.
+- **Port already in use** — `lsof -ti tcp:7892 | xargs kill`
+- **App won't open after rebuild** — `xattr -cr /Applications/Fisherman.app`
+- **Server unreachable** — Daemon logs `server_unreachable`; frames save locally. Check `FISH_SERVER_URL`.
+- **Status too vague** — The LLM prompt targets concrete topics. If you see generic statuses, check that `OPENAI_API_KEY` is set in the server's `.env`.
+- **Friend not appearing** — Both sides must add each other. Check that `FISH_ACTIVITY_PORT` (default 9998) is open on both servers.
+
 ## Uninstall
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/uninstall.sh | bash
 ```
 
-## Troubleshooting
-
-- **Screenpipe not running** — `brew install screenpipe` and grant Screen Recording permission.
-- **Port already in use** — `lsof -ti tcp:7892 | xargs kill`
-- **App won't open after rebuild** — `xattr -cr /Applications/Fisherman.app`
-- **Server unreachable** — daemon logs `server_unreachable`; frames still save locally. Check `FISH_SERVER_URL`.
-
 ## Requirements
 
 macOS 13+, Python 3.12+, Screenpipe.
+
+## Development
+
+```bash
+# Build and deploy the menu bar app (dev)
+cd menubar && bash build.sh
+
+# Run server locally
+cd server && uv run python ingest.py
+
+# build.sh auto-syncs daemon code to ~/.fisherman/
+```
