@@ -23,6 +23,8 @@ import websockets
 from websockets.datastructures import Headers
 from websockets.http11 import Response
 
+log = structlog.get_logger()
+
 try:
     from aiohttp import web
 except ImportError:
