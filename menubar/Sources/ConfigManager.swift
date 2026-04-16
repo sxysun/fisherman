@@ -42,7 +42,7 @@ final class ConfigManager {
     /// Lines from .env that we don't manage (comments, unknown keys)
     private var passthroughLines: [(index: Int, line: String)] = []
     /// Track which line indices hold our known keys
-    private var knownKeyLines: [String: Int] = [:]
+    private var knownKeyLines: [String: [Int]] = [:]
 
     private var envPath: String {
         findProjectDir() + "/.env"
@@ -62,16 +62,16 @@ final class ConfigManager {
 
             if let value = extractValue(trimmed, key: "FISH_SERVER_URL") {
                 serverURL = value
-                knownKeyLines["FISH_SERVER_URL"] = i
+                knownKeyLines["FISH_SERVER_URL", default: []].append(i)
             } else if let value = extractValue(trimmed, key: "FISH_CONTROL_PORT") {
                 controlPort = value
-                knownKeyLines["FISH_CONTROL_PORT"] = i
+                knownKeyLines["FISH_CONTROL_PORT", default: []].append(i)
             } else if let value = extractValue(trimmed, key: "FISH_ACTIVITY_PORT") {
                 activityPort = value
-                knownKeyLines["FISH_ACTIVITY_PORT"] = i
+                knownKeyLines["FISH_ACTIVITY_PORT", default: []].append(i)
             } else if let value = extractValue(trimmed, key: "FISH_PRIVATE_KEY") {
                 privateKeyHex = value
-                knownKeyLines["FISH_PRIVATE_KEY"] = i
+                knownKeyLines["FISH_PRIVATE_KEY", default: []].append(i)
                 // Derive public key
                 if let privData = hexToData(value),
                    let signing = try? Curve25519.Signing.PrivateKey(rawRepresentation: privData)
@@ -81,9 +81,9 @@ final class ConfigManager {
                 }
             } else if let value = extractValue(trimmed, key: "FISH_DISPLAY_NAME") {
                 displayName = value
-                knownKeyLines["FISH_DISPLAY_NAME"] = i
+                knownKeyLines["FISH_DISPLAY_NAME", default: []].append(i)
             } else if let value = extractValue(trimmed, key: "FISH_FRIENDS") {
-                knownKeyLines["FISH_FRIENDS"] = i
+                knownKeyLines["FISH_FRIENDS", default: []].append(i)
                 friends = parseFriends(value)
             } else {
                 passthroughLines.append((index: i, line: line))
@@ -119,10 +119,27 @@ final class ConfigManager {
             ("FISH_FRIENDS", friendsStr),
         ]
 
+        // Track which line indices to delete (duplicates of any tracked key)
+        var indicesToDelete = Set<Int>()
+
         for (key, value) in updates {
-            if let lineIndex = knownKeyLines[key], lineIndex < outputLines.count {
-                outputLines[lineIndex] = "\(key)=\(value)"
+            guard let indices = knownKeyLines[key], !indices.isEmpty else { continue }
+            let sorted = indices.sorted()
+            // Update the first occurrence
+            if sorted[0] < outputLines.count {
+                outputLines[sorted[0]] = "\(key)=\(value)"
                 keysWritten.insert(key)
+            }
+            // Mark the rest as duplicates to delete
+            for dupIndex in sorted.dropFirst() {
+                indicesToDelete.insert(dupIndex)
+            }
+        }
+
+        // Remove duplicates (in reverse order so indices stay valid)
+        for index in indicesToDelete.sorted(by: >) {
+            if index < outputLines.count {
+                outputLines.remove(at: index)
             }
         }
 
