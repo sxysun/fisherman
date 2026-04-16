@@ -63,7 +63,6 @@ struct UserActivity: Identifiable {
     let stale: Bool
     var history: [ActivityEntry] = []
     var sessionStart: Date?
-    var isWorkingTogether: Bool = false
     var inFlow: Bool = false
     var pokes: [Poke] = []
     var sharingTier: SharingTier = .high

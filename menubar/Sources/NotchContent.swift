@@ -18,45 +18,27 @@ struct CompactTrailing: View {
     let state: AppState
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 3) {
             // Poke indicator
             if !state.incomingPokes.isEmpty {
                 Text("👋")
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .opacity(0.9)
             }
 
+            // Emoji + flow badge only — duration/timeline live in expanded view
+            // to keep the compact strip narrow and the menu bar visible.
             ForEach(state.allActivity.prefix(5)) { user in
-                HStack(spacing: 2) {
-                    // Emoji with flow/working-together indicators
+                HStack(spacing: 1) {
                     Text(user.emoji)
-                        .font(.system(size: 14))
+                        .font(.system(size: 12))
                         .shadow(
-                            color: user.inFlow
-                                ? Color(nsColor: .systemRed).opacity(0.7)
-                                : user.isWorkingTogether
-                                    ? Color(nsColor: .systemYellow).opacity(0.8)
-                                    : .clear,
-                            radius: (user.inFlow || user.isWorkingTogether) ? 4 : 0
+                            color: user.inFlow ? Color(nsColor: .systemRed).opacity(0.7) : .clear,
+                            radius: user.inFlow ? 3 : 0
                         )
-
-                    // Flow indicator
                     if user.inFlow {
                         Text("🔥")
                             .font(.system(size: 8))
-                    }
-
-                    // Session duration
-                    if !user.sessionDurationText.isEmpty {
-                        Text(user.sessionDurationText)
-                            .font(.system(size: 8, weight: .medium, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    // Mini timeline bar
-                    if !user.history.isEmpty {
-                        TimelineBar(history: user.history)
-                            .frame(width: 36, height: 4)
                     }
                 }
             }
@@ -64,13 +46,13 @@ struct CompactTrailing: View {
             // Hangout suggestion in compact view
             if state.hangoutSuggestion != nil {
                 Text("🍿")
-                    .font(.system(size: 12))
+                    .font(.system(size: 11))
                     .opacity(0.9)
             }
 
             if state.allActivity.isEmpty {
                 Text("\(state.framesSent)")
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
         }
@@ -169,19 +151,7 @@ struct ExpandedContent: View {
                     VStack(alignment: .leading, spacing: 4) {
                         // Main activity row
                         HStack(spacing: 6) {
-                            // Working-together badge
-                            if user.isWorkingTogether {
-                                Text("🤝")
-                                    .font(.system(size: 10))
-                            }
-
                             Text(user.emoji).font(.system(size: 14))
-                                .shadow(
-                                    color: user.isWorkingTogether
-                                        ? Color(nsColor: .systemYellow).opacity(0.6)
-                                        : .clear,
-                                    radius: user.isWorkingTogether ? 3 : 0
-                                )
 
                             Text(user.name)
                                 .font(.system(size: 12, weight: .medium))
@@ -235,7 +205,7 @@ struct ExpandedContent: View {
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
-                                .padding(.leading, user.isWorkingTogether ? 26 : 20)
+                                .padding(.leading, 20)
                         }
 
                         // Hover history expansion (only for high-tier or "me")

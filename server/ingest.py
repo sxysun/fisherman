@@ -301,6 +301,16 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
     db: asyncpg.Pool = request.app["db"]
     loop = asyncio.get_running_loop()
 
+    async def _fetch_pokes() -> list[dict]:
+        try:
+            async with db.acquire() as conn:
+                poke_rows = await conn.fetch(
+                    "SELECT from_pubkey, created_at FROM pokes ORDER BY created_at DESC LIMIT 10"
+                )
+            return [{"from": r["from_pubkey"][:16], "at": r["created_at"].isoformat()} for r in poke_rows]
+        except Exception:
+            return []
+
     try:
         async with db.acquire() as conn:
             row = await conn.fetchrow(
@@ -314,7 +324,11 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
             )
 
         if not row:
-            return web.json_response({"activity": None, "message": "No activity yet"})
+            return web.json_response({
+                "activity": None,
+                "message": "No activity yet",
+                "pokes": await _fetch_pokes(),
+            })
 
         ts = row["ts"]
         age_seconds = time.time() - ts.timestamp()
@@ -325,11 +339,15 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
                 "status": f"away (last seen {int(age_seconds / 60)}m ago)",
                 "updated_at": ts.isoformat(),
                 "stale": True,
+                "flow": False,
+                "pokes": await _fetch_pokes(),
             })
 
         activity = await loop.run_in_executor(_pool, decrypt_json, row["activity"])
 
-        # Flow detection: check if same category for 30+ min
+        # Flow detection: same category for 30+ min with no disconnects.
+        # A "disconnect" = gap between adjacent frames > 3 min, which implies
+        # the daemon stopped sending (AFK / screen locked / laptop closed).
         flow = False
         try:
             async with db.acquire() as conn:
@@ -344,27 +362,22 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
                 current_cat = activity.get("category", "idle")
                 if current_cat not in ("idle", "browsing"):
                     earliest_match = ts
+                    prev_ts = ts
+                    GAP_THRESHOLD_SECONDS = 180
                     for fr in flow_rows[1:]:
+                        gap_seconds = (prev_ts - fr["ts"]).total_seconds()
+                        if gap_seconds > GAP_THRESHOLD_SECONDS:
+                            break  # disconnect detected, flow chain breaks
                         fa = await loop.run_in_executor(_pool, decrypt_json, fr["activity"])
                         if fa.get("category") == current_cat:
                             earliest_match = fr["ts"]
+                            prev_ts = fr["ts"]
                         else:
                             break
                     flow_minutes = (ts.timestamp() - earliest_match.timestamp()) / 60
                     flow = flow_minutes >= 30
         except Exception:
             pass  # flow detection is best-effort
-
-        # Check for unread pokes
-        pokes = []
-        try:
-            async with db.acquire() as conn:
-                poke_rows = await conn.fetch(
-                    "SELECT from_pubkey, created_at FROM pokes ORDER BY created_at DESC LIMIT 10"
-                )
-            pokes = [{"from": r["from_pubkey"][:16], "at": r["created_at"].isoformat()} for r in poke_rows]
-        except Exception:
-            pass
 
         return web.json_response({
             "emoji": activity.get("emoji", "❓"),
@@ -373,7 +386,7 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
             "updated_at": ts.isoformat(),
             "stale": False,
             "flow": flow,
-            "pokes": pokes,
+            "pokes": await _fetch_pokes(),
         })
 
     except Exception:
