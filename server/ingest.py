@@ -505,13 +505,14 @@ async def _http_send_poke(request: "web.Request") -> "web.Response":
     if not valid or not is_authorized(pubkey):
         return web.json_response({"error": "Unauthorized"}, status=401)
 
+    pubkey_hex = pubkey.hex()
     db: asyncpg.Pool = request.app["db"]
     try:
         async with db.acquire() as conn:
             await conn.execute(
-                "INSERT INTO pokes (from_pubkey) VALUES ($1)", pubkey
+                "INSERT INTO pokes (from_pubkey) VALUES ($1)", pubkey_hex
             )
-        log.info("poke_received", from_pubkey=pubkey[:16])
+        log.info("poke_received", from_pubkey=pubkey_hex[:16])
         return web.json_response({"ok": True})
     except Exception:
         log.error("poke_error", exc_info=True)

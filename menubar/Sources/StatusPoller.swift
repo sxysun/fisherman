@@ -275,8 +275,16 @@ final class StatusPoller: @unchecked Sendable {
         }
 
         session.dataTask(with: request) { _, response, error in
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                NSLog("poke_sent to \(friend.name)")
+            if let error {
+                NSLog("poke_failed to \(friend.name): \(error.localizedDescription)")
+                return
+            }
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 200 {
+                    NSLog("poke_sent to \(friend.name)")
+                } else {
+                    NSLog("poke_failed to \(friend.name): HTTP \(http.statusCode)")
+                }
             }
         }.resume()
     }
