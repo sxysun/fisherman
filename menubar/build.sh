@@ -41,6 +41,18 @@ if [ -d "$FISH_DIR/fisherman" ] && [ -d "../fisherman" ]; then
     echo "Synced daemon code to $FISH_DIR/fisherman/"
 fi
 
+# Pre-sync the uv venv so the daemon can be launched directly via
+# .venv/bin/python — never via `uv run` at launch time. Launching via uv
+# re-resolves/installs on every start, and we've hit cases where that
+# race wedges pyobjc imports and hangs the daemon forever.
+if command -v uv &>/dev/null; then
+    for DIR in "$(cd .. && pwd)" "$FISH_DIR"; do
+        if [ -f "$DIR/pyproject.toml" ]; then
+            (cd "$DIR" && uv sync --quiet 2>&1 | tail -5) && echo "Synced venv in $DIR"
+        fi
+    done
+fi
+
 # Deploy to /Applications and relaunch
 pkill -f FishermanMenu 2>/dev/null || true
 sleep 1

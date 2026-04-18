@@ -18,6 +18,16 @@ func findUV() -> String? {
     return whichBinary("uv")
 }
 
+/// Return the project's own .venv python if it exists. Launching the daemon
+/// via this path (instead of `uv run python ...`) avoids `uv sync` racing
+/// pyobjc imports at startup — a hang we've hit multiple times where the
+/// daemon would freeze forever mid-import because uv reinstalled the editable
+/// package while the child was already importing pyobjc modules.
+func findVenvPython(projectDir: String) -> String? {
+    let path = projectDir + "/.venv/bin/python"
+    return FileManager.default.isExecutableFile(atPath: path) ? path : nil
+}
+
 func findScreenpipe() -> String? {
     let home = NSHomeDirectory()
     for candidate in [

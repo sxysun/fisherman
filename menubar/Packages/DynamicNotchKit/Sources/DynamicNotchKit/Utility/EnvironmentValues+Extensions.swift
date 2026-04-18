@@ -1,0 +1,38 @@
+//
+//  EnvironmentValues+Extensions.swift
+//  DynamicNotchKit
+//
+//  Created by Kai Azim on 2025-03-26.
+//
+//  NOTE: Manually expanded from `@Entry` to plain EnvironmentKey types so
+//  that the package builds with CommandLineTools-only Swift (no Xcode).
+//  The @Entry macro requires the SwiftUIMacros plugin which isn't bundled
+//  with CLT.
+//
+
+import SwiftUI
+
+private struct NotchStyleKey: EnvironmentKey {
+    static let defaultValue: DynamicNotchStyle = .auto
+}
+
+private struct NotchSectionKey: EnvironmentKey {
+    static let defaultValue: DynamicNotchSection = .expanded
+}
+
+extension EnvironmentValues {
+    var notchStyle: DynamicNotchStyle {
+        get { self[NotchStyleKey.self] }
+        set { self[NotchStyleKey.self] = newValue }
+    }
+    var notchSection: DynamicNotchSection {
+        get { self[NotchSectionKey.self] }
+        set { self[NotchSectionKey.self] = newValue }
+    }
+}
+
+enum DynamicNotchSection {
+    case expanded
+    case compactLeading
+    case compactTrailing
+}
