@@ -1,0 +1,29 @@
+[Unit]
+Description=Fisherman ingest server (WebSocket + pokes HTTP)
+Documentation=https://github.com/sxysun/suapp
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/fisherman/server
+# ingest.py calls python-dotenv's load_dotenv() which reads ./.env.
+# We don't use systemd's EnvironmentFile so we don't have to worry about
+# systemd's stricter parser rejecting quoted/complex values.
+ExecStart=/home/ubuntu/fisherman/server/.venv/bin/python -u ingest.py
+Restart=always
+RestartSec=3
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+StandardOutput=append:/home/ubuntu/fisherman/server/ingest.log
+StandardError=append:/home/ubuntu/fisherman/server/ingest.log
+
+NoNewPrivileges=true
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
