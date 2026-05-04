@@ -118,14 +118,28 @@ class Streamer:
                 pass
         await self._queue.put(payload)
 
-    async def send_vlm(self, ts: float, scene: str) -> None:
-        """Send a VLM scene description to the server, linked by timestamp."""
-        msg = json.dumps({"type": "vlm", "ts": ts, "scene": scene})
+    async def send_audio(
+        self,
+        ts: float,
+        transcript: str,
+        meeting_app: str | None,
+        device_name: str | None,
+        is_input_device: bool,
+    ) -> None:
+        """Send a meeting audio transcript to the server."""
+        msg = json.dumps({
+            "type": "audio",
+            "ts": ts,
+            "transcript": transcript,
+            "meeting_app": meeting_app,
+            "device_name": device_name,
+            "is_input_device": is_input_device,
+        })
         if self._queue.full():
             try:
                 self._queue.get_nowait()
                 self._frames_dropped += 1
-                log.warning("queue_full_dropping_vlm")
+                log.warning("queue_full_dropping_audio")
             except asyncio.QueueEmpty:
                 pass
         await self._queue.put(msg)

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import structlog
@@ -9,6 +10,7 @@ from fisherman.config import FishermanConfig
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
+from fisherman.meeting_detector import MeetingDetector
 from fisherman.ocr import maybe_extract_pdf_context, ocr_fast
 from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
@@ -40,6 +42,10 @@ class FishermanDaemon:
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
         self._consecutive_capture_failures = 0
+        self._meeting_detector = MeetingDetector()
+        self._in_call = False
+        self._call_app: str | None = None
+        self._audio_sent = 0
 
     async def _enhance_pdf_context(self, frame, ocr_text: str, urls: list[str]) -> tuple[str, list[str]]:
         loop = asyncio.get_running_loop()
@@ -97,6 +103,10 @@ class FishermanDaemon:
             capture_backend=self._capture_backend,
         )
 
+        audio_task: asyncio.Task | None = None
+        if self._config.audio_enabled and self._capture_backend == "screenpipe":
+            audio_task = asyncio.create_task(self._audio_loop())
+
         try:
             if _SWIFT_CAPTURE:
                 await self._process_loop()
@@ -108,6 +118,12 @@ class FishermanDaemon:
             pass
         finally:
             self._running = False
+            if audio_task is not None:
+                audio_task.cancel()
+                try:
+                    await audio_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             await self._streamer.stop()
             await control.stop()
             self._pool.shutdown(wait=False)
@@ -314,6 +330,10 @@ class FishermanDaemon:
             "on_battery": on_battery(),
             "capture_interval": self._get_interval(),
             "capture_backend": self._capture_backend,
+            "audio_enabled": self._config.audio_enabled,
+            "in_call": self._in_call,
+            "call_app": self._call_app,
+            "audio_sent": self._audio_sent,
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
             if self._capture_backend == "screenpipe":
@@ -321,6 +341,75 @@ class FishermanDaemon:
             else:
                 status["error"] = "screen_recording_not_granted"
         return status
+
+    async def _audio_loop(self) -> None:
+        """Detect calls and forward screenpipe audio transcripts only while in one.
+
+        Two cadences interleave on a single timer:
+          - meeting_detect_interval: cheap window-title scan
+          - audio_poll_interval: only fires when in_call is true; pulls
+            new transcripts from screenpipe and ships them via streamer
+        """
+        loop = asyncio.get_running_loop()
+        cfg = self._config
+        last_detect = 0.0
+        last_audio_poll = 0.0
+        # On the rising edge of in_call, drop a fresh dedupe so we don't
+        # flush stale (pre-call) transcripts that were buffered while idle.
+        prev_in_call = False
+
+        while self._running:
+            now = loop.time()
+            try:
+                if now - last_detect >= cfg.meeting_detect_interval:
+                    last_detect = now
+                    sig = await loop.run_in_executor(
+                        self._pool, self._meeting_detector.detect
+                    )
+                    self._in_call = sig.in_call
+                    self._call_app = sig.app
+
+                    if sig.in_call and not prev_in_call:
+                        # Reset audio cursor so we only ship utterances
+                        # observed from this point forward.
+                        self._screenpipe._seen_audio.clear()
+                        self._screenpipe._seen_audio_lookup.clear()
+                        self._screenpipe._last_audio_timestamp = time.time()
+                    prev_in_call = sig.in_call
+
+                if (
+                    self._in_call
+                    and not self._privacy.is_paused
+                    and now - last_audio_poll >= cfg.audio_poll_interval
+                ):
+                    last_audio_poll = now
+                    try:
+                        audio_payloads = await loop.run_in_executor(
+                            self._pool, self._screenpipe.poll_audio
+                        )
+                    except ScreenpipeCaptureError as e:
+                        log.debug("audio_poll_failed", error=str(e))
+                        audio_payloads = []
+                    except Exception:
+                        log.debug("audio_poll_error", exc_info=True)
+                        audio_payloads = []
+
+                    for ap in audio_payloads:
+                        await self._streamer.send_audio(
+                            ts=ap.timestamp,
+                            transcript=ap.transcription,
+                            meeting_app=self._call_app,
+                            device_name=ap.device_name,
+                            is_input_device=ap.is_input_device,
+                        )
+                        self._audio_sent += 1
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.warning("audio_loop_iteration_failed", exc_info=True)
+
+            await asyncio.sleep(1.0)
 
     async def _publish_frame(
         self,

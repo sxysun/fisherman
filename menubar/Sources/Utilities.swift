@@ -108,6 +108,27 @@ func findProjectDir() -> String {
 
 // MARK: - .env parsing
 
+func audioEnabled() -> Bool {
+    // Default true. Set FISH_AUDIO_ENABLED=0 in .env to disable.
+    let projDir = findProjectDir()
+    let envPath = projDir + "/.env"
+    guard let contents = try? String(contentsOfFile: envPath, encoding: .utf8) else {
+        return true
+    }
+    for line in contents.components(separatedBy: "\n") {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        if trimmed.hasPrefix("FISH_AUDIO_ENABLED=") {
+            let val = String(trimmed.dropFirst("FISH_AUDIO_ENABLED=".count))
+                .trimmingCharacters(in: .whitespaces)
+                .lowercased()
+            if val == "0" || val == "false" || val == "no" || val == "off" {
+                return false
+            }
+        }
+    }
+    return true
+}
+
 func readControlPort() -> String {
     let projDir = findProjectDir()
     let envPath = projDir + "/.env"

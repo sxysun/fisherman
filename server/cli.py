@@ -47,7 +47,7 @@ async def _get_pool() -> asyncpg.Pool:
 def _decrypt_row(row: asyncpg.Record) -> dict:
     """Decrypt a frames row into a plain dict."""
     d = dict(row)
-    for field in ("ocr_text", "window", "scene"):
+    for field in ("ocr_text", "window"):
         raw = d.get(field)
         if raw:
             try:
@@ -109,7 +109,6 @@ async def _query_frames(
                 r for r in results
                 if (r.get("ocr_text") and search_lower in r["ocr_text"].lower())
                 or (r.get("window") and search_lower in r["window"].lower())
-                or (r.get("scene") and search_lower in r["scene"].lower())
             ]
 
         return results
@@ -144,7 +143,7 @@ def cli():
 @click.option("--since", "-s", help="Start time (e.g. '2h ago', '2026-04-01T09:00:00')")
 @click.option("--until", "-u", help="End time")
 @click.option("--app", "-a", help="Filter by app name (substring match)")
-@click.option("--search", "-q", help="Search OCR text, window titles, and scene descriptions")
+@click.option("--search", "-q", help="Search OCR text and window titles")
 @click.option("--limit", "-n", default=50, help="Max results (default 50)")
 @click.option("--json-output", "-j", "as_json", is_flag=True, help="Output as JSON (for agent consumption)")
 @click.option("--with-ocr/--no-ocr", default=True, help="Include OCR text in output")
@@ -175,8 +174,6 @@ def query(since, until, app, search, limit, as_json, with_ocr):
         if r.get("urls"):
             for url in r["urls"]:
                 click.echo(f"  url: {url}")
-        if r.get("scene"):
-            click.echo(f"  scene: {r['scene']}")
         if r.get("image_key"):
             click.echo(f"  image: {r['image_key']}")
         click.echo()

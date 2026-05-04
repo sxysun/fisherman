@@ -62,14 +62,19 @@ final class ProcessManager: @unchecked Sendable {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: binary)
-        proc.arguments = [
+        var args: [String] = [
             "--fps", "1",
-            "--disable-audio",
             "--disable-telemetry",
             "--use-pii-removal",
             "--data-dir", screenpipeDataDir,
             "--auto-destruct-pid", "\(ProcessInfo.processInfo.processIdentifier)",
         ]
+        // Audio is opt-out via FISH_AUDIO_ENABLED=0. Default-on so the
+        // daemon's meeting detector can ship transcripts during calls.
+        if !audioEnabled() {
+            args.append("--disable-audio")
+        }
+        proc.arguments = args
         proc.environment = buildEnvironment()
 
         let log = logFileHandle(name: "screenpipe")

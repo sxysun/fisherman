@@ -11,7 +11,6 @@ CREATE TABLE IF NOT EXISTS frames (
     height      INT,
     tier_hint   INT,
     routing     JSONB,
-    scene       BYTEA,          -- Fernet-encrypted VLM description
     activity    BYTEA,          -- Fernet-encrypted activity status (category + detail)
     created_at  TIMESTAMPTZ DEFAULT now()
 );
@@ -27,3 +26,18 @@ CREATE TABLE IF NOT EXISTS pokes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_pokes_created ON pokes (created_at);
+
+-- Audio transcripts captured during meetings/calls. Daemon only forwards
+-- these while its meeting detector says the user is in a call.
+CREATE TABLE IF NOT EXISTS audio_transcripts (
+    id              BIGSERIAL PRIMARY KEY,
+    ts              TIMESTAMPTZ NOT NULL,
+    meeting_app     TEXT,           -- e.g. "zoom", "google_meet", "wechat"
+    device_name     TEXT,           -- audio device the transcript came from
+    is_input_device BOOLEAN,        -- true = mic, false = system output
+    transcript      BYTEA,          -- Fernet-encrypted
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audio_ts ON audio_transcripts (ts);
+CREATE INDEX IF NOT EXISTS idx_audio_app ON audio_transcripts (meeting_app);

@@ -41,6 +41,15 @@ class ScreenpipeFramePayload:
     video_offset: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class ScreenpipeAudioPayload:
+    timestamp: float
+    transcription: str
+    device_name: str | None
+    is_input_device: bool
+    audio_chunk_id: int | None
+
+
 class ScreenpipeCaptureClient:
     def __init__(
         self,
@@ -57,6 +66,11 @@ class ScreenpipeCaptureClient:
         self._seen_ids: deque[int] = deque(maxlen=dedupe_cache_size)
         self._seen_lookup: set[int] = set()
         self._last_seen_timestamp: float | None = None
+        # Audio dedupe by (timestamp, device, transcription) hash; the audio
+        # API doesn't expose a stable per-utterance id across polls.
+        self._seen_audio: deque[int] = deque(maxlen=dedupe_cache_size)
+        self._seen_audio_lookup: set[int] = set()
+        self._last_audio_timestamp: float | None = None
 
     def poll(self) -> list[ScreenpipeFramePayload]:
         payload = self._fetch_json("/search", self._build_search_params())
@@ -121,6 +135,79 @@ class ScreenpipeCaptureClient:
             )
             params["start_time"] = _isoformat_z(start_time)
         return params
+
+    def poll_audio(self) -> list[ScreenpipeAudioPayload]:
+        """Fetch new audio transcriptions since the last poll.
+
+        Screenpipe transcribes input + output devices (with `--disable-audio`
+        off) and exposes them via /search?content_type=audio. We dedupe on
+        a content hash because the API doesn't return a stable utterance id.
+        """
+        params = {
+            "content_type": "audio",
+            "limit": str(self._search_limit),
+        }
+        if self._last_audio_timestamp is not None:
+            start_time = datetime.fromtimestamp(
+                max(self._last_audio_timestamp - self._lookback_seconds, 0.0),
+                tz=timezone.utc,
+            )
+            params["start_time"] = _isoformat_z(start_time)
+
+        payload = self._fetch_json("/search", params)
+        results: list[ScreenpipeAudioPayload] = []
+        for item in payload.get("data", []):
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("type", "")
+            if kind not in ("Audio", "AudioTranscription"):
+                continue
+            content = item.get("content")
+            if not isinstance(content, dict):
+                continue
+
+            transcription = content.get("transcription") or content.get("text") or ""
+            transcription = transcription.strip()
+            if not transcription:
+                continue
+
+            ts = _parse_timestamp(content.get("timestamp"))
+            if ts is None:
+                continue
+
+            device_name = content.get("device_name")
+            if not isinstance(device_name, str):
+                device_name = None
+            is_input = bool(content.get("is_input_device", True))
+            chunk_id = content.get("audio_chunk_id")
+            if not isinstance(chunk_id, int):
+                chunk_id = None
+
+            key = hash((round(ts, 2), device_name, transcription))
+            if key in self._seen_audio_lookup:
+                continue
+
+            results.append(
+                ScreenpipeAudioPayload(
+                    timestamp=ts,
+                    transcription=transcription,
+                    device_name=device_name,
+                    is_input_device=is_input,
+                    audio_chunk_id=chunk_id,
+                )
+            )
+            self._remember_audio(key, ts)
+
+        results.sort(key=lambda p: p.timestamp)
+        return results
+
+    def _remember_audio(self, key: int, ts: float) -> None:
+        if len(self._seen_audio) == self._seen_audio.maxlen:
+            evicted = self._seen_audio.popleft()
+            self._seen_audio_lookup.discard(evicted)
+        self._seen_audio.append(key)
+        self._seen_audio_lookup.add(key)
+        self._last_audio_timestamp = max(self._last_audio_timestamp or 0.0, ts)
 
     def _fetch_video_info(self, frame_ids: list[int]) -> dict[int, dict]:
         """Batch-fetch video chunk file_path and offset_index for frame IDs."""

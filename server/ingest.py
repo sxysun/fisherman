@@ -135,26 +135,40 @@ async def _handle_frame(
     log.info("frame_stored", ts=ts, image_key=image_key, app=msg.get("app"))
 
 
-async def _handle_vlm(
+async def _handle_audio(
     msg: dict,
     db: asyncpg.Pool,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
-    """Attach an encrypted VLM scene description to an existing frame row."""
+    """Store a meeting audio transcript (encrypted)."""
     ts = msg["ts"]
-    scene = msg.get("scene", "")
-    enc_scene = await loop.run_in_executor(_pool, encrypt_text, scene)
+    transcript = msg.get("transcript", "")
+    if not transcript:
+        return
+
+    enc_transcript = await loop.run_in_executor(_pool, encrypt_text, transcript)
 
     async with db.acquire() as conn:
-        result = await conn.execute(
+        await conn.execute(
             """
-            UPDATE frames SET scene = $1
-            WHERE ts = to_timestamp($2)
+            INSERT INTO audio_transcripts
+                (ts, meeting_app, device_name, is_input_device, transcript)
+            VALUES (to_timestamp($1), $2, $3, $4, $5)
             """,
-            enc_scene,
             ts,
+            msg.get("meeting_app"),
+            msg.get("device_name"),
+            msg.get("is_input_device"),
+            enc_transcript,
         )
-    log.info("vlm_stored", ts=ts, rows=result)
+
+    log.info(
+        "audio_stored",
+        ts=ts,
+        app=msg.get("meeting_app"),
+        chars=len(transcript),
+        input=msg.get("is_input_device"),
+    )
 
 
 def _sanitize_status(status: str) -> str:
@@ -620,8 +634,8 @@ async def _handle_connection(
                 msg = json.loads(raw)
                 if msg.get("type") == "frame":
                     await _handle_frame(msg, db, r2, loop)
-                elif msg.get("type") == "vlm":
-                    await _handle_vlm(msg, db, loop)
+                elif msg.get("type") == "audio":
+                    await _handle_audio(msg, db, loop)
             except Exception:
                 log.warning("frame_processing_failed", exc_info=True)
     except websockets.ConnectionClosed:

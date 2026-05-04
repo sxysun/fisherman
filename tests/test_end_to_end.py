@@ -179,9 +179,6 @@ class FakeConn:
                 }
             )
             return "INSERT 0 1"
-        if normalized.startswith("UPDATE frames SET scene"):
-            self._pool.scene_rows.append({"scene": args[0], "ts": args[1]})
-            return "UPDATE 1"
         return "OK"
 
 
@@ -200,7 +197,6 @@ class FakePool:
     def __init__(self):
         self.schema_initialized = False
         self.frame_rows: list[dict] = []
-        self.scene_rows: list[dict] = []
 
     def acquire(self):
         return FakeAcquire(self)

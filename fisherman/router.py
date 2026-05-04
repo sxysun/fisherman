@@ -14,7 +14,7 @@ class RoutingSignals:
 
 @dataclass(frozen=True, slots=True)
 class RoutingDecision:
-    tier_hint: int  # 1 or 2 (daemon never recommends 3)
+    tier_hint: int  # 1 = text-only sufficient; 2 = visual content, needs richer processing
     signals: RoutingSignals
 
     def to_wire(self) -> dict:
@@ -57,5 +57,5 @@ class TierRouter:
         # Tier 1: any app with abundant OCR text and small visual change
         if ocr_len >= 150 and low_visual_change:
             return 1
-        # Everything else → Tier 2 (server decides if Tier 3 needed)
+        # Visual content or large change — server can apply richer processing
         return 2

@@ -21,6 +21,13 @@ class FishermanConfig(BaseSettings):
     screenpipe_poll_interval: float = 3.0
     screenpipe_search_limit: int = 10
 
+    # Ambient audio (meeting transcripts). Only forwarded while the meeting
+    # detector says the user is in a call. Requires screenpipe to have audio
+    # capture enabled (i.e. menubar launched it without --disable-audio).
+    audio_enabled: bool = True
+    audio_poll_interval: float = 5.0
+    meeting_detect_interval: float = 4.0
+
     # Privacy — password managers, auth apps, keychains excluded by default
     excluded_bundles: list[str] = [
         "com.1password.1password",          # 1Password 8+
@@ -48,7 +55,7 @@ class FishermanConfig(BaseSettings):
         "co.zeit.hyper",
         "com.panic.Nova",
     ]
-    dhash_escalation_threshold: int = 20  # 0–64, above = needs VLM
+    dhash_escalation_threshold: int = 20  # 0–64; above = visual change too large for text-only routing
     ocr_min_text_length: int = 50  # below = probably visual content
 
     # Local frame viewer
