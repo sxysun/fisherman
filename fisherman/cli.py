@@ -1,8 +1,10 @@
 import asyncio
+import datetime
 import json
 import os
 import signal
 import sys
+import urllib.parse
 import urllib.request
 
 import click
@@ -81,23 +83,51 @@ def start(server_url: str | None, daemonize: bool):
         loop.close()
 
 
-def _control_request(method: str, path: str, port: int = 7892) -> dict:
+def _control_request(method: str, path: str, port: int = 7892, timeout: float = 5.0):
     url = f"http://127.0.0.1:{port}{path}"
     req = urllib.request.Request(url, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=2) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except Exception as e:
         click.echo(f"Could not connect to fisherman on port {port}: {e}", err=True)
         sys.exit(1)
 
 
+def _build_query(**params) -> str:
+    """Build a query string, dropping None/empty values."""
+    clean = {k: v for k, v in params.items() if v not in (None, "")}
+    if not clean:
+        return ""
+    return "?" + urllib.parse.urlencode(clean)
+
+
+def _fmt_ts(ts: float) -> str:
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+
 @main.command()
 @click.option("--port", default=7892, help="Control server port")
-def status(port: int):
+@click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
+def status(port: int, as_text: bool):
     """Show daemon status."""
     data = _control_request("GET", "/status", port)
-    click.echo(json.dumps(data, indent=2))
+    if not as_text:
+        click.echo(json.dumps(data, indent=2))
+        return
+    click.echo(f"running:        {data.get('running')}")
+    click.echo(f"paused:         {data.get('paused')}")
+    backend = data.get("capture_backend") or "?"
+    interval = data.get("capture_interval")
+    interval_str = f"{interval:.1f}s" if isinstance(interval, (int, float)) else "—"
+    click.echo(f"capture:        {backend} ({interval_str})")
+    click.echo(f"connected:      {data.get('connected')}")
+    click.echo(f"frames sent:    {data.get('frames_sent')}")
+    if data.get("audio_enabled"):
+        click.echo(f"in call:        {data.get('in_call')} ({data.get('call_app') or '—'})")
+        click.echo(f"audio sent:     {data.get('audio_sent')}")
+    if data.get("error"):
+        click.echo(f"error:          {data['error']}", err=True)
 
 
 @main.command()
@@ -114,6 +144,67 @@ def resume(port: int):
     """Resume screen capture."""
     data = _control_request("POST", "/resume", port)
     click.echo("Resumed." if not data.get("paused") else "Failed.")
+
+
+@main.command()
+@click.option("--since", default=None, help="Time window start, e.g. '5m', '2h', '1d'")
+@click.option("--until", default=None, help="Time window end")
+@click.option("--app", default=None, help="Filter by app name (substring match)")
+@click.option("--bundle", default=None, help="Filter by exact bundle ID")
+@click.option("--search", "-q", default=None, help="Substring match in OCR text + window title")
+@click.option("--limit", "-n", default=50, show_default=True, help="Max rows")
+@click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
+@click.option("--port", default=7892, help="Control server port")
+def query(since, until, app, bundle, search, limit, as_text, port):
+    """Read your local capture history (OCR + window + URLs)."""
+    qs = _build_query(
+        since=since, until=until, app=app, bundle=bundle,
+        search=search, limit=limit,
+    )
+    rows = _control_request("GET", f"/query{qs}", port, timeout=10.0)
+    if not as_text:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo("(no rows)")
+        return
+    for r in rows:
+        ts = _fmt_ts(r.get("ts", 0))
+        app_n = r.get("app") or "?"
+        win = r.get("window") or ""
+        click.echo(f"[{ts}] {app_n} — {win}")
+        ocr = (r.get("ocr_text") or "").strip()
+        if ocr:
+            preview = ocr.replace("\n", " ")[:200]
+            click.echo(f"    {preview}{'…' if len(ocr) > 200 else ''}")
+
+
+@main.command()
+@click.option("--since", default=None, help="Time window start, e.g. '5m', '2h', '1d'")
+@click.option("--until", default=None, help="Time window end")
+@click.option("--meeting-app", "meeting_app", default=None, help="zoom | google_meet | wechat | …")
+@click.option("--search", "-q", default=None, help="Substring match in transcript")
+@click.option("--limit", "-n", default=200, show_default=True, help="Max rows")
+@click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
+@click.option("--port", default=7892, help="Control server port")
+def transcripts(since, until, meeting_app, search, limit, as_text, port):
+    """Read meeting audio transcripts captured during calls."""
+    qs = _build_query(
+        since=since, until=until, meeting_app=meeting_app,
+        search=search, limit=limit,
+    )
+    rows = _control_request("GET", f"/transcripts{qs}", port, timeout=10.0)
+    if not as_text:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo("(no transcripts)")
+        return
+    for r in rows:
+        ts = _fmt_ts(r.get("ts", 0))
+        app_n = r.get("meeting_app") or "?"
+        side = "→" if r.get("is_input_device") else "←"
+        click.echo(f"[{ts}] {app_n} {side} {r.get('transcript', '')}")
 
 
 @main.command()

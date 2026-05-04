@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import structlog
 
+from fisherman.audio_store import AudioStore
 from fisherman.capture import capture_screen
 from fisherman.config import FishermanConfig
 from fisherman.control import ControlServer
@@ -34,6 +35,7 @@ class FishermanDaemon:
         self._router = TierRouter(config)
         self._streamer = Streamer(config.server_url, config.private_key)
         self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
+        self._audio_store = AudioStore(config.audio_dir, config.audio_max_days)
         self._screenpipe = ScreenpipeCaptureClient(
             config.screenpipe_url,
             search_limit=config.screenpipe_search_limit,
@@ -85,6 +87,7 @@ class FishermanDaemon:
             pause_fn=self._privacy.pause,
             resume_fn=self._privacy.resume,
             frame_store=self._frame_store,
+            audio_store=self._audio_store,
             frame_queue=self._frame_queue if _SWIFT_CAPTURE else None,
             screenpipe_data_dir=os.path.expanduser(self._config.screenpipe_data_dir)
             if self._capture_backend == "screenpipe" else None,
@@ -395,6 +398,16 @@ class FishermanDaemon:
                         audio_payloads = []
 
                     for ap in audio_payloads:
+                        # Persist locally first — local store is ground truth
+                        await loop.run_in_executor(
+                            self._pool,
+                            self._audio_store.save,
+                            ap.timestamp,
+                            ap.transcription,
+                            self._call_app,
+                            ap.device_name,
+                            ap.is_input_device,
+                        )
                         await self._streamer.send_audio(
                             ts=ap.timestamp,
                             transcript=ap.transcription,

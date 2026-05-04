@@ -72,18 +72,30 @@ class FrameStore:
 
     def list_recent(self, count: int = 50) -> list[dict]:
         """Return metadata for the most recent `count` frames."""
-        all_meta = []
+        return self.query(limit=count)
+
+    def query(
+        self,
+        since_ts: float | None = None,
+        until_ts: float | None = None,
+        app: str | None = None,
+        bundle: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        """Return metadata filtered by time/app/search, newest first."""
         if not os.path.isdir(self._base):
             return []
+        app_lower = app.lower() if app else None
+        search_lower = search.lower() if search else None
+        results: list[dict] = []
 
-        # Walk day dirs in reverse order
-        days = sorted(os.listdir(self._base), reverse=True)
-        for day in days:
+        for day in sorted(os.listdir(self._base), reverse=True):
             day_dir = os.path.join(self._base, day)
             if not os.path.isdir(day_dir):
                 continue
             jsons = sorted(
-                [f for f in os.listdir(day_dir) if f.endswith(".json")],
+                (f for f in os.listdir(day_dir) if f.endswith(".json")),
                 reverse=True,
             )
             for jf in jsons:
@@ -91,15 +103,41 @@ class FrameStore:
                 try:
                     with open(path) as f:
                         meta = json.load(f)
-                    meta["_day"] = day
-                    jpg_path = os.path.join(day_dir, jf[:-5] + ".jpg")
-                    meta["has_image"] = os.path.isfile(jpg_path)
-                    all_meta.append(meta)
                 except Exception:
                     continue
-                if len(all_meta) >= count:
-                    return all_meta
-        return all_meta
+
+                ts = meta.get("ts", 0.0)
+                if since_ts is not None and ts < since_ts:
+                    # Day dir is sorted reverse — once we drop below since,
+                    # everything earlier in this day and all earlier days
+                    # is also too old. Bail on the day; outer loop will
+                    # not produce anything newer either.
+                    return results
+                if until_ts is not None and ts > until_ts:
+                    continue
+                if app_lower:
+                    a = (meta.get("app") or "").lower()
+                    if app_lower not in a:
+                        continue
+                if bundle:
+                    b = meta.get("bundle") or ""
+                    if bundle != b:
+                        continue
+                if search_lower:
+                    haystack = " ".join([
+                        meta.get("ocr_text") or "",
+                        meta.get("window") or "",
+                    ]).lower()
+                    if search_lower not in haystack:
+                        continue
+
+                meta["_day"] = day
+                jpg_path = os.path.join(day_dir, jf[:-5] + ".jpg")
+                meta["has_image"] = os.path.isfile(jpg_path)
+                results.append(meta)
+                if len(results) >= limit:
+                    return results
+        return results
 
     def get_image_path(self, ts_ms: int) -> str | None:
         """Find the JPEG path for a given timestamp (milliseconds)."""

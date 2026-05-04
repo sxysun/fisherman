@@ -2,7 +2,9 @@ import asyncio
 import base64
 import json
 import os
-from urllib.parse import unquote
+import re
+import time
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import structlog
 
@@ -138,15 +140,67 @@ loadFrames();
 """
 
 
+_DURATION_RE = re.compile(r"^(\d+)([smhd])$")
+
+
+def _parse_duration(s: str) -> float | None:
+    """Parse '5m', '2h', '1d', '30s' to seconds. Return None if invalid."""
+    m = _DURATION_RE.match(s.strip().lower())
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    return n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+
+
+def _parse_since(s: str) -> float | None:
+    """Convert '5m' / '2h' / unix-seconds string to absolute unix ts."""
+    if not s:
+        return None
+    delta = _parse_duration(s)
+    if delta is not None:
+        return time.time() - delta
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _parse_query(path: str) -> dict[str, str]:
+    """Extract query string params from a path, returning the first value per key."""
+    qs = urlsplit(path).query
+    return {k: v[0] for k, v in parse_qs(qs).items()}
+
+
+def _parse_int(s: str | None, default: int, lo: int, hi: int) -> int:
+    if s is None:
+        return default
+    try:
+        n = int(s)
+    except ValueError:
+        return default
+    return max(lo, min(hi, n))
+
+
 class ControlServer:
     """Tiny HTTP server for local pause/resume/status control and frame viewer."""
 
-    def __init__(self, port: int, get_status_fn, pause_fn, resume_fn, frame_store=None, frame_queue: asyncio.Queue | None = None, screenpipe_data_dir: str | None = None):
+    def __init__(
+        self,
+        port: int,
+        get_status_fn,
+        pause_fn,
+        resume_fn,
+        frame_store=None,
+        audio_store=None,
+        frame_queue: asyncio.Queue | None = None,
+        screenpipe_data_dir: str | None = None,
+    ):
         self._port = port
         self._get_status = get_status_fn
         self._pause = pause_fn
         self._resume = resume_fn
         self._frame_store = frame_store
+        self._audio_store = audio_store
         self._frame_queue = frame_queue
         self._screenpipe_data_dir = screenpipe_data_dir
         self._server: asyncio.Server | None = None
@@ -208,6 +262,10 @@ class ControlServer:
                 await self._handle_video(path, range_header, writer)
             elif method == "GET" and path.startswith("/frames"):
                 await self._handle_frames(path, writer)
+            elif method == "GET" and (path == "/query" or path.startswith("/query?")):
+                await self._handle_query(path, writer)
+            elif method == "GET" and (path == "/transcripts" or path.startswith("/transcripts?")):
+                await self._handle_transcripts(path, writer)
             else:
                 writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
 
@@ -260,6 +318,35 @@ class ControlServer:
             return
 
         writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+
+    async def _handle_query(self, path: str, writer: asyncio.StreamWriter) -> None:
+        if not self._frame_store:
+            writer.write(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+            return
+        params = _parse_query(path)
+        result = self._frame_store.query(
+            since_ts=_parse_since(params.get("since", "")),
+            until_ts=_parse_since(params.get("until", "")),
+            app=params.get("app") or None,
+            bundle=params.get("bundle") or None,
+            search=params.get("search") or None,
+            limit=_parse_int(params.get("limit"), default=50, lo=1, hi=1000),
+        )
+        self._send_json(writer, json.dumps(result))
+
+    async def _handle_transcripts(self, path: str, writer: asyncio.StreamWriter) -> None:
+        if not self._audio_store:
+            writer.write(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+            return
+        params = _parse_query(path)
+        result = self._audio_store.query(
+            since_ts=_parse_since(params.get("since", "")),
+            until_ts=_parse_since(params.get("until", "")),
+            meeting_app=params.get("meeting_app") or None,
+            search=params.get("search") or None,
+            limit=_parse_int(params.get("limit"), default=200, lo=1, hi=2000),
+        )
+        self._send_json(writer, json.dumps(result))
 
     async def _handle_video(self, path: str, range_header: str | None, writer: asyncio.StreamWriter) -> None:
         """Serve MP4 video chunks from screenpipe data dir with Range support."""
