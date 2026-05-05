@@ -13,18 +13,13 @@
 | PHALA_NODE_ID | ✅ var = 18 | prod9 node |
 | PHALA_GATEWAY | ✅ var | `dstack-pha-prod9.phala.network` |
 | FISHERMAN_APP_AUTH_ETH_SEPOLIA | ✅ var | `0x55b25e…e922` |
-| CF_API_TOKEN | ❌ **needs user** | mint at https://dash.cloudflare.com/profile/api-tokens (Zone.DNS:Edit on the chosen zone) |
-| CF_ZONE_ID | ❌ **needs user** | from CF dashboard → domain → overview → zone id |
-| MIRROR_DOMAIN | ❌ **needs user** | e.g. `mirror.fisherman.example` (must be on the CF zone above) |
+| CF_API_TOKEN | ✅ set | from `hivemind-core/.env` — Zone.DNS:Edit on `teleport.computer` (verified by round-trip TXT create/delete) |
+| CF_ZONE_ID | ✅ set | `6deffd560011f6ae96ad3d44cde5d7e7` (teleport.computer) |
+| MIRROR_DOMAIN | ✅ set | `fisherman.teleport.computer` |
 
-Once those three are populated:
+Bootstrap the CVM:
 
 ```sh
-gh secret set CF_API_TOKEN -R sxysun/fisherman --body "<your-token>"
-gh variable set CF_ZONE_ID  -R sxysun/fisherman --body "<your-zone-id>"
-gh variable set MIRROR_DOMAIN -R sxysun/fisherman --body "<your-domain>"
-
-# Then bootstrap the CVM
 gh workflow run bootstrap-cvm.yml -R sxysun/fisherman -f confirm=yes
 ```
 
