@@ -29,6 +29,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions:  write
     env:
       COMPOSE_FILE:  mirror/deploy/docker-compose.phala.yaml
       MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
@@ -62,10 +63,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Compute compose_hash
+      - name: Read Phala-reported compose_hash for current CVM
         id: hash
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
-          HASH=$(sha256sum "$COMPOSE_FILE" | awk '{print $1}')
+          set -euo pipefail
+          HASH=$(curl -s "https://cloud-api.phala.com/api/v1/cvms" \
+              -H "X-API-Key: $PHALA_CLOUD_API_KEY" \
+              | jq -r --arg id "${{ vars.CVM_VM_UUID }}" '.[] | select(.vm_uuid == $id) | .compose_hash' \
+              | head -1)
+          if [[ -z "$HASH" || "$HASH" == "null" ]]; then
+              echo "::error::could not read compose_hash for CVM ${{ vars.CVM_VM_UUID }}"
+              exit 1
+          fi
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
           echo "compose_hash: 0x$HASH"
 

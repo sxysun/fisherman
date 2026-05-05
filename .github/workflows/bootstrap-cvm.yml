@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions:  write   # for `gh variable set` to persist CVM ids
     env:
       CVM_NAME:     fisherman-mirror
       NODE_ID:      ${{ vars.PHALA_NODE_ID }}
@@ -140,8 +141,9 @@ jobs:
 
       - name: Compute compose_hash + publish on-chain
         env:
+          PHALA_CLOUD_API_KEY:  ${{ secrets.PHALA_CLOUD_API_KEY }}
           OWNER_PK:             ${{ secrets.OWNER_PK }}
-          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          ETH_SEPOLIA_RPC_URL:  ${{ secrets.ETH_SEPOLIA_RPC_URL }}
           CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
         run: |
           set -euo pipefail
@@ -149,8 +151,17 @@ jobs:
             echo "::warning::FISHERMAN_APP_AUTH_ETH_SEPOLIA variable not set; skipping on-chain step"
             exit 0
           fi
-          HASH=$(sha256sum "$COMPOSE_FILE" | awk '{print $1}')
-          echo "compose_hash: 0x$HASH"
+          # Use the compose_hash dstack actually computed (normalized YAML +
+          # env substitution) — sha256 of the raw file would diverge.
+          HASH=$(curl -s "https://cloud-api.phala.com/api/v1/cvms" \
+              -H "X-API-Key: $PHALA_CLOUD_API_KEY" \
+              | jq -r --arg n "$CVM_NAME" '.[] | select(.name == $n) | .compose_hash' \
+              | head -1)
+          if [[ -z "$HASH" || "$HASH" == "null" ]]; then
+              echo "::error::could not read compose_hash from Phala API"
+              exit 1
+          fi
+          echo "compose_hash (Phala-reported): 0x$HASH"
           # Idempotent: skip if already allowed
           ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x$HASH" \
               --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false")
