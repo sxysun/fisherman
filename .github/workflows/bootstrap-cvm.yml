@@ -82,13 +82,18 @@ jobs:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
         run: |
           set -euo pipefail
-          EXISTING=$(phala cvms list --api-token "$PHALA_CLOUD_API_KEY" -j 2>/dev/null \
-              | jq -r --arg n "$CVM_NAME" '.[] | select(.name == $n) | .vm_uuid' || true)
+          # Use the raw API directly — phala CLI's `cvms list -j` output
+          # format is unstable across versions and missed an orphan once.
+          EXISTING=$(curl -s "https://cloud-api.phala.com/api/v1/cvms" \
+              -H "X-API-Key: $PHALA_CLOUD_API_KEY" \
+              | jq -r --arg n "$CVM_NAME" '.[] | select(.name == $n) | .vm_uuid' \
+              | head -1 || true)
           if [[ -n "$EXISTING" ]]; then
             echo "::error::CVM '$CVM_NAME' already exists at vm_uuid=$EXISTING"
             echo "::error::Delete with: phala cvms delete $EXISTING"
             exit 1
           fi
+          echo "no existing CVM with name '$CVM_NAME' — clear to deploy"
 
       - name: phala deploy
         id: deploy
