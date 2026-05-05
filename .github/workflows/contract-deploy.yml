@@ -66,15 +66,24 @@ jobs:
         run: |
           cd contracts
           set -o pipefail
-          OUT=$(forge script script/Deploy.s.sol \
+          # Stream forge output to BOTH the CI log and a file we can grep.
+          forge script script/Deploy.s.sol \
               --rpc-url ${{ inputs.chain }} \
               --broadcast \
               --slow \
-              --json 2>&1 | tee /tmp/forge.log)
-          # Extract deployed address from forge's logs
+              -vvvv 2>&1 | tee /tmp/forge.log
+          # Extract deployed address — the contract logs "FishermanAppAuth deployed at 0x…"
           ADDR=$(grep -oE 'FishermanAppAuth deployed at 0x[a-fA-F0-9]+' /tmp/forge.log | head -1 | awk '{print $NF}')
           if [[ -z "$ADDR" ]]; then
-              echo "::error::could not parse deployed address from forge output"
+              # Fallback: parse the broadcast file which always contains the address
+              BROADCAST_FILE=$(ls -t broadcast/Deploy.s.sol/*/run-latest.json 2>/dev/null | head -1 || true)
+              if [[ -n "$BROADCAST_FILE" ]]; then
+                  ADDR=$(jq -r '.transactions[] | select(.contractName=="FishermanAppAuth") | .contractAddress' "$BROADCAST_FILE" | head -1)
+              fi
+          fi
+          if [[ -z "$ADDR" ]]; then
+              echo "::error::could not parse deployed address from forge output or broadcast files"
+              ls -la broadcast/ 2>&1 || echo "(no broadcast/ dir)"
               exit 1
           fi
           echo "address=$ADDR" >> "$GITHUB_OUTPUT"
