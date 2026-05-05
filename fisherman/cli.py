@@ -109,10 +109,12 @@ def _fmt_ts(ts: float) -> str:
 @main.command()
 @click.option("--port", default=7892, help="Control server port")
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
-def status(port: int, as_text: bool):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or mirror (secondary)")
+def status(port: int, as_text: bool, source_pref: str | None):
     """Show daemon status."""
     if _is_remote_mode():
-        data = _remote_call("status", {})
+        data = _remote_call("status", {}, source_pref=source_pref)
     else:
         data = _control_request("GET", "/status", port)
     if not as_text:
@@ -158,7 +160,9 @@ def resume(port: int):
 @click.option("--limit", "-n", default=50, show_default=True, help="Max rows")
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--port", default=7892, help="Control server port")
-def query(since, until, app, bundle, search, limit, as_text, port):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or mirror (secondary)")
+def query(since, until, app, bundle, search, limit, as_text, port, source_pref):
     """Read your local capture history (OCR + window + URLs).
 
     Auto-routes via the relay when a deputy config is present
@@ -169,7 +173,7 @@ def query(since, until, app, bundle, search, limit, as_text, port):
             "since_ts": _parse_since_to_ts(since),
             "until_ts": _parse_since_to_ts(until),
             "app": app, "bundle": bundle, "search": search, "limit": limit,
-        }) or []
+        }, source_pref=source_pref) or []
     else:
         qs = _build_query(
             since=since, until=until, app=app, bundle=bundle,
@@ -201,14 +205,16 @@ def query(since, until, app, bundle, search, limit, as_text, port):
 @click.option("--limit", "-n", default=200, show_default=True, help="Max rows")
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--port", default=7892, help="Control server port")
-def transcripts(since, until, meeting_app, search, limit, as_text, port):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or mirror (secondary)")
+def transcripts(since, until, meeting_app, search, limit, as_text, port, source_pref):
     """Read meeting audio transcripts captured during calls."""
     if _is_remote_mode():
         rows = _remote_call("transcripts", {
             "since_ts": _parse_since_to_ts(since),
             "until_ts": _parse_since_to_ts(until),
             "meeting_app": meeting_app, "search": search, "limit": limit,
-        }) or []
+        }, source_pref=source_pref) or []
     else:
         qs = _build_query(
             since=since, until=until, meeting_app=meeting_app,
@@ -479,6 +485,28 @@ def publish_status(emoji, category, status, flow, from_stdin):
     click.echo(f"published event_id={eid}")
 
 
+@main.group(name="agent")
+def agent_group():
+    """Optional companion: status-publishing loop using OpenRouter/OpenAI."""
+
+
+@agent_group.command(name="run")
+@click.option("--interval", default=300, show_default=True, help="Seconds between cycles")
+@click.option("--since", default="5m", show_default=True, help="Context window")
+@click.option("--model", default=None, help="LLM model id (default: $AGENT_MODEL or openai/gpt-4o-mini)")
+@click.option("--once", is_flag=True, help="One iteration and exit")
+def agent_run(interval, since, model, once):
+    """Run the status loop (reads context, calls LLM, publishes)."""
+    from fisherman.agent_loop import main as _agent_main
+    # Re-exec via click's main with the same args so option parsing matches
+    args = ["--interval", str(interval), "--since", since]
+    if model:
+        args += ["--model", model]
+    if once:
+        args.append("--once")
+    _agent_main.main(args=args, standalone_mode=False)
+
+
 @main.group(name="ledger")
 def ledger_group():
     """Inspect or change the relay (ledger) URL."""
@@ -528,9 +556,12 @@ def _is_remote_mode() -> bool:
     return _deputy_config_path() is not None
 
 
-def _remote_call(command: str, args: dict) -> dict:
+def _remote_call(command: str, args: dict, source_pref: str | None = None) -> dict:
     """Run an RPC call from a deputy host through the relay. Returns the
     decrypted response dict (which itself has {ok, data} or {error}).
+
+    source_pref ∈ {None, "primary", "secondary", "auto"} — passed to relay
+    to override the default routing policy.
     """
     from fisherman import deputy as _d
     from fisherman import keys as _k
@@ -560,8 +591,11 @@ def _remote_call(command: str, args: dict) -> dict:
         ts=_t.time(),
     )
 
+    rpc_body = built.body
+    if source_pref:
+        rpc_body = {**rpc_body, "source_pref": source_pref}
     url = relay_url.rstrip("/") + "/rpc"
-    body = json.dumps(built.body).encode()
+    body = json.dumps(rpc_body).encode()
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     try:
@@ -718,6 +752,78 @@ def deputy_revoke(name_or_pubkey: str):
         sys.exit(1)
 
 
+@main.group(name="mirror")
+def mirror_group():
+    """Pair a remote mirror endpoint to serve agent queries when laptop is offline."""
+
+
+@mirror_group.command(name="pair-mint")
+@click.option("--storage-config", default=None,
+              help="Path to a storage.json describing the bucket the mirror will read from. "
+                   "Defaults to the daemon's current ~/.fisherman/storage.json.")
+def mirror_pair_mint(storage_config: str | None):
+    """Mint a pairing token containing everything a mirror needs.
+
+    The token contains your X25519 private key + K_blob_at_rest + the
+    storage backend creds. It must be exchanged via a private channel
+    (DM, encrypted file, paste over SSH) — never publicly.
+    """
+    import base64 as _b64
+    from cryptography.hazmat.primitives import serialization
+    from fisherman import keys as _k
+    from fisherman import storage_config as _sc
+
+    priv, pub, _ = _load_keys()
+    seed = _k.load_seed()
+    x_priv, _x_pub = _k.encryption_keypair(seed)
+    blob_key = _k.blob_at_rest_key(seed)
+    x_priv_bytes = x_priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+    if storage_config:
+        with open(os.path.expanduser(storage_config)) as f:
+            storage = json.load(f)
+    else:
+        storage = _sc.load()
+    if storage.get("kind") == "none":
+        click.echo("error: no storage backend configured. Run "
+                   "`fisherman storage configure-...` first.", err=True)
+        sys.exit(2)
+
+    payload = {
+        "u":  pub.hex(),
+        "xp": x_priv_bytes.hex(),
+        "bk": blob_key.hex(),
+        "r":  _ledger_url(),
+        "s":  storage,
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    token = "fishmirror:" + _b64.urlsafe_b64encode(raw).decode().rstrip("=")
+    click.echo("Mirror pairing token (copy to mirror host via private channel):")
+    click.echo("")
+    click.echo(token)
+    click.echo("")
+    click.echo("On the mirror host:")
+    click.echo("  fisherman-mirror init '<token>'")
+    click.echo("  fisherman-mirror serve")
+
+
+@mirror_group.command(name="status")
+def mirror_status():
+    """Show paired-mirror state (read from /status if available)."""
+    try:
+        data = _control_request("GET", "/status")
+    except SystemExit:
+        click.echo("(daemon not reachable)")
+        return
+    online = data.get("relay_connected", False)
+    click.echo(f"laptop relay-connected: {online}")
+    click.echo(f"mirror.fisherman.cloud (default): not yet implemented")
+
+
 @main.group(name="storage")
 def storage_group():
     """Configure encrypted-mirror backup of your local context."""
@@ -793,6 +899,25 @@ def storage_configure_s3(bucket, endpoint, key_id, secret, region, prefix):
         "prefix": prefix,
     })
     click.echo(f"configured: s3 bucket={bucket} endpoint={endpoint or 'AWS'}")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
+@storage_group.command(name="configure-webdav")
+@click.option("--url", required=True, help="Base URL (e.g. https://u123456.your-storagebox.de/fisherman/)")
+@click.option("--username", required=True)
+@click.option("--password", required=True)
+@click.option("--prefix", default="", help="Path prefix inside the WebDAV root")
+def storage_configure_webdav(url, username, password, prefix):
+    """Configure a WebDAV mirror (Hetzner Storage Box, ownCloud, Nextcloud, ...)."""
+    from fisherman import storage_config
+    storage_config.save({
+        "kind": "webdav",
+        "url": url,
+        "username": username,
+        "password": password,
+        "prefix": prefix,
+    })
+    click.echo(f"configured: webdav {url}")
     click.echo("Restart the daemon for changes to take effect.")
 
 

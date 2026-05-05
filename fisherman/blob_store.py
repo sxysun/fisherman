@@ -153,6 +153,128 @@ class S3CompatibleBlobStore:
 
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+
+class WebDAVBlobStore:
+    """WebDAV backend — works against Hetzner Storage Box and any DAV server.
+
+    Auth: HTTP Basic. URL form: https://u123456.your-storagebox.de/path/.
+    Supports PUT/GET/DELETE plus PROPFIND for listing.
+    """
+
+    def __init__(self, base_url: str, username: str, password: str, prefix: str = ""):
+        self._base = base_url.rstrip("/")
+        self._username = username
+        self._password = password
+        self._prefix = prefix.strip("/") + "/" if prefix else ""
+
+    def _url(self, key: str) -> str:
+        from urllib.parse import quote
+        return f"{self._base}/{quote(self._prefix + key)}"
+
+    def _auth_header(self) -> str:
+        import base64
+        token = base64.b64encode(f"{self._username}:{self._password}".encode()).decode()
+        return f"Basic {token}"
+
+    def _request(self, method: str, key: str, body: bytes | None = None,
+                 extra_headers: dict | None = None) -> tuple[int, bytes]:
+        import urllib.request, urllib.error
+        url = self._url(key)
+        req = urllib.request.Request(url, data=body, method=method)
+        req.add_header("Authorization", self._auth_header())
+        for k, v in (extra_headers or {}).items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def _ensure_parents(self, key: str) -> None:
+        # WebDAV requires MKCOL for each parent dir before PUT can succeed.
+        parts = (self._prefix + key).split("/")[:-1]
+        partial = ""
+        for part in parts:
+            if not part:
+                continue
+            partial = f"{partial}{part}/"
+            url = f"{self._base}/{partial}"
+            import urllib.request, urllib.error
+            req = urllib.request.Request(url, method="MKCOL")
+            req.add_header("Authorization", self._auth_header())
+            try:
+                with urllib.request.urlopen(req, timeout=30):
+                    pass
+            except urllib.error.HTTPError as e:
+                # 405 = already exists, 301 = some servers; ignore both
+                if e.code not in (301, 405, 409):
+                    pass  # other errors will surface on PUT
+
+    def put(self, key: str, data: bytes) -> None:
+        self._ensure_parents(key)
+        status, body = self._request("PUT", key, body=data,
+                                     extra_headers={"Content-Type": "application/octet-stream"})
+        if status not in (200, 201, 204):
+            raise IOError(f"webdav PUT {key} → {status}: {body[:200]!r}")
+
+    def get(self, key: str) -> bytes:
+        status, body = self._request("GET", key)
+        if status == 404:
+            raise KeyError(key)
+        if status != 200:
+            raise IOError(f"webdav GET {key} → {status}")
+        return body
+
+    def list(self, prefix: str = "") -> list[str]:
+        # PROPFIND with Depth: infinity
+        full_prefix = self._prefix + prefix
+        body = (
+            b'<?xml version="1.0" encoding="utf-8"?>'
+            b'<D:propfind xmlns:D="DAV:"><D:prop>'
+            b'<D:resourcetype/><D:displayname/>'
+            b'</D:prop></D:propfind>'
+        )
+        url = f"{self._base}/{full_prefix}"
+        import urllib.request, urllib.error
+        req = urllib.request.Request(url, data=body, method="PROPFIND")
+        req.add_header("Authorization", self._auth_header())
+        req.add_header("Depth", "infinity")
+        req.add_header("Content-Type", "application/xml")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                xml = resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return []
+            raise IOError(f"webdav PROPFIND → {e.code}") from e
+
+        import re
+        from urllib.parse import unquote, urlsplit
+        out: list[str] = []
+        for href in re.findall(r"<D:href>(.*?)</D:href>", xml,
+                              re.IGNORECASE | re.DOTALL) + re.findall(
+                              r"<href>(.*?)</href>", xml,
+                              re.IGNORECASE | re.DOTALL):
+            path = unquote(urlsplit(href).path)
+            # Strip the leading base path so we get key-relative paths
+            base_path = urlsplit(self._base).path.rstrip("/") + "/"
+            if path.startswith(base_path):
+                rel = path[len(base_path):]
+            else:
+                rel = path.lstrip("/")
+            if not rel.endswith("/") and rel.startswith(self._prefix):
+                out.append(rel[len(self._prefix):])
+        return sorted(set(out))
+
+    def delete(self, key: str) -> None:
+        status, _body = self._request("DELETE", key)
+        if status not in (200, 204, 404):
+            raise IOError(f"webdav DELETE {key} → {status}")
+
+
+# ---------------------------------------------------------------------------
+
 def from_config(cfg: dict) -> BlobStore | None:
     """Build a backend from a storage.json-style config dict.
 
@@ -160,6 +282,7 @@ def from_config(cfg: dict) -> BlobStore | None:
         {"kind": "none"}                                    → None
         {"kind": "localfs", "path": "..."}                  → LocalFSBlobStore
         {"kind": "s3", "bucket": ..., "endpoint": ..., ...} → S3CompatibleBlobStore
+        {"kind": "webdav", "url", "username", "password", "prefix"?} → WebDAVBlobStore
     """
     kind = (cfg.get("kind") or "none").lower()
     if kind == "none":
@@ -174,6 +297,13 @@ def from_config(cfg: dict) -> BlobStore | None:
             access_key_id=cfg["access_key_id"],
             secret_access_key=cfg["secret_access_key"],
             region=cfg.get("region", "auto"),
+            prefix=cfg.get("prefix", ""),
+        )
+    if kind == "webdav":
+        return WebDAVBlobStore(
+            base_url=cfg["url"],
+            username=cfg["username"],
+            password=cfg["password"],
             prefix=cfg.get("prefix", ""),
         )
     raise ValueError(f"unknown storage kind: {kind!r}")

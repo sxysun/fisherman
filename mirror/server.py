@@ -44,15 +44,47 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-from fisherman import deputy as deputy_acl
 from fisherman import keys as fkeys
 from fisherman import rpc as fisher_rpc
 from fisherman.blob_store import from_config as blob_store_from_config
 from fisherman.relay_client import RelayClient
+from fisherman.sync import decrypt_uploaded
 
 from mirror.query import query_frames, query_transcripts, get_frame_jpeg
 
 log = structlog.get_logger()
+
+_ACL_CACHE_TTL = 30.0  # seconds
+
+
+def _command_to_scope(command: str) -> str | None:
+    return {
+        "status":         "read:status",
+        "query":          "read:captures",
+        "transcripts":    "read:transcripts",
+        "screenshot":     "read:screenshots",
+        "publish-status": "publish:status",
+        "pause":          "control:pause",
+        "resume":         "control:pause",
+    }.get(command)
+
+
+def _authorize_from_list(deputies: list[dict], pubkey_hex: str, command: str) -> tuple[bool, str | None]:
+    pubkey_hex = pubkey_hex.lower()
+    rec = next((d for d in deputies if d.get("pubkey", "").lower() == pubkey_hex), None)
+    if rec is None:
+        return False, "unknown_deputy"
+    expires_at = rec.get("expires_at")
+    import time as _t
+    if expires_at is not None and _t.time() > expires_at:
+        return False, "expired"
+    scopes = set(rec.get("scopes") or [])
+    required = _command_to_scope(command)
+    if required is None:
+        return False, "unknown_command"
+    if required not in scopes and "*" not in scopes:
+        return False, f"scope_missing:{required}"
+    return True, None
 
 
 def _require_env(name: str) -> str:
@@ -99,6 +131,8 @@ class MirrorServer:
         )
         self._handled = 0
         self._denied = 0
+        self._acl_cache: list[dict] = []
+        self._acl_fetched_at = 0.0
 
     @property
     def mirror_pubkey(self) -> bytes:
@@ -110,6 +144,31 @@ class MirrorServer:
     async def stop(self) -> None:
         await self._relay_client.stop()
 
+    def _load_acl(self) -> list[dict]:
+        """Fetch + decrypt deputies.json from blob storage; 30s cache."""
+        import time as _t
+        now = _t.time()
+        if self._acl_cache and now - self._acl_fetched_at < _ACL_CACHE_TTL:
+            return self._acl_cache
+        key = "config/deputies.json.enc"
+        try:
+            blob = self._store.get(key)
+            plaintext = decrypt_uploaded(self._blob_key, key, blob)
+            data = json.loads(plaintext.decode())
+            if isinstance(data, list):
+                self._acl_cache = data
+            elif isinstance(data, dict) and isinstance(data.get("deputies"), list):
+                self._acl_cache = data["deputies"]
+            else:
+                self._acl_cache = []
+        except KeyError:
+            self._acl_cache = []
+        except Exception:
+            log.warning("mirror_acl_load_failed", exc_info=True)
+            self._acl_cache = []
+        self._acl_fetched_at = now
+        return self._acl_cache
+
     async def _handle_rpc(self, body: dict) -> dict:
         try:
             parsed = fisher_rpc.parse_request(self._x25519_priv, body)
@@ -118,7 +177,9 @@ class MirrorServer:
             return {"error": f"rpc_auth:{e}"}
 
         deputy_hex = parsed.deputy_pubkey.hex()
-        ok, reason = deputy_acl.authorize(deputy_hex, parsed.command)
+        loop = asyncio.get_running_loop()
+        deputies = await loop.run_in_executor(None, self._load_acl)
+        ok, reason = _authorize_from_list(deputies, deputy_hex, parsed.command)
         if not ok:
             log.info("mirror_denied", deputy=deputy_hex[:16], cmd=parsed.command, reason=reason)
             self._denied += 1
@@ -220,8 +281,6 @@ def main():
             structlog.dev.ConsoleRenderer(),
         ],
     )
-    parser = argparse.ArgumentParser(description="fisherman-mirror")
-    parser.parse_args()
     asyncio.run(amain())
 
 

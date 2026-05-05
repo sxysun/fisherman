@@ -118,6 +118,9 @@ def _scan_dir(root: str, start_mtime: float) -> list[tuple[str, str, float]]:
     return out
 
 
+_CONFIG_FILES = ("deputies.json", "friends.json")
+
+
 class MirrorSync:
     def __init__(
         self,
@@ -125,6 +128,7 @@ class MirrorSync:
         blob_key: bytes,
         frames_dir: str,
         audio_dir: str,
+        config_dir: str = "~/.fisherman",
         interval: float = _DEFAULT_INTERVAL,
         state_path: str = _STATE_PATH,
     ):
@@ -132,6 +136,7 @@ class MirrorSync:
         self._blob_key = blob_key
         self._frames_dir = os.path.expanduser(frames_dir)
         self._audio_dir = os.path.expanduser(audio_dir)
+        self._config_dir = os.path.expanduser(config_dir)
         self._interval = interval
         self._state_path = state_path
         self._state: SyncState = _load_state(state_path)
@@ -175,32 +180,55 @@ class MirrorSync:
         start = self._state.high_watermark_mtime
         frames = _scan_dir(self._frames_dir, start)
         audio = _scan_dir(self._audio_dir, start)
+        configs = self._scan_configs(start)
         new_high = start
 
         for full, rel, mtime in frames + audio:
-            try:
-                with open(full, "rb") as f:
-                    plaintext = f.read()
-            except OSError:
-                continue
             sub = "frames" if (full.startswith(self._frames_dir)) else "audio"
             blob_key = f"{sub}/{rel}.enc"
-            try:
-                blob = _encrypt_blob(self._blob_key, blob_key, plaintext)
-                self._store.put(blob_key, blob)
-                self._state.uploaded_files += 1
-                self._state.bytes_uploaded += len(blob)
-                if mtime > new_high:
-                    new_high = mtime
-            except Exception as e:
-                self._state.failed_files += 1
-                self._state.last_error = str(e)[:200]
-                log.warning("mirror_upload_failed", key=blob_key, exc_info=True)
-                continue
+            self._upload_one(full, blob_key, mtime, new_high_ref := [new_high])
+            new_high = new_high_ref[0]
+
+        for full, blob_key, mtime in configs:
+            self._upload_one(full, blob_key, mtime, new_high_ref := [new_high])
+            new_high = new_high_ref[0]
 
         self._state.high_watermark_mtime = new_high
         self._state.last_scan_at = time.time()
         _save_state(self._state, self._state_path)
+
+    def _scan_configs(self, start_mtime: float) -> list[tuple[str, str, float]]:
+        out: list[tuple[str, str, float]] = []
+        for name in _CONFIG_FILES:
+            path = os.path.join(self._config_dir, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if mtime < start_mtime:
+                continue
+            out.append((path, f"config/{name}.enc", mtime))
+        return out
+
+    def _upload_one(self, full: str, blob_key: str, mtime: float, new_high_ref: list[float]) -> None:
+        try:
+            with open(full, "rb") as f:
+                plaintext = f.read()
+        except OSError:
+            return
+        try:
+            blob = _encrypt_blob(self._blob_key, blob_key, plaintext)
+            self._store.put(blob_key, blob)
+            self._state.uploaded_files += 1
+            self._state.bytes_uploaded += len(blob)
+            if mtime > new_high_ref[0]:
+                new_high_ref[0] = mtime
+        except Exception as e:
+            self._state.failed_files += 1
+            self._state.last_error = str(e)[:200]
+            log.warning("mirror_upload_failed", key=blob_key, exc_info=True)
 
 
 def decrypt_uploaded(key_bytes: bytes, blob_key: str, blob: bytes) -> bytes:
