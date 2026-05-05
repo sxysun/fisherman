@@ -31,7 +31,8 @@ jobs:
     name: forge script Deploy.s.sol → ${{ inputs.chain }}
     runs-on: ubuntu-24.04
     permissions:
-      contents: write   # for the variable / DEPLOYMENTS.md update
+      contents: write   # for DEPLOYMENTS.md update
+      actions:  write   # for `gh variable set`
     env:
       OWNER_PK:             ${{ secrets.OWNER_PK }}
       ETH_SEPOLIA_RPC_URL:  ${{ secrets.ETH_SEPOLIA_RPC_URL }}

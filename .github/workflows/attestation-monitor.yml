@@ -4,9 +4,9 @@ name: Attestation monitor
 # and verifies it. Opens a tracking issue if anything fails.
 #
 # Required:
-#   secrets.BASE_SEPOLIA_RPC_URL
+#   secrets.ETH_SEPOLIA_RPC_URL
 #   variables.MIRROR_DOMAIN
-#   variables.FISHERMAN_APP_AUTH_BASE_SEPOLIA
+#   variables.FISHERMAN_APP_AUTH_ETH_SEPOLIA
 
 on:
   schedule:
@@ -34,8 +34,8 @@ jobs:
         id: verify
         env:
           MIRROR_URL: https://${{ vars.MIRROR_DOMAIN }}
-          RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
-          CONTRACT: ${{ vars.FISHERMAN_APP_AUTH_BASE_SEPOLIA }}
+          RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          CONTRACT: ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
         run: |
           python <<'PY' | tee /tmp/result.txt
           import os, sys, json

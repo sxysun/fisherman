@@ -14,10 +14,10 @@ name: Bootstrap fisherman-mirror CVM (one-time)
 #   CF_API_TOKEN           Cloudflare token with Zone.DNS:Edit on your domain
 #   CF_ZONE_ID             Cloudflare zone id for fisherman.app (or your domain)
 #   OWNER_PK               private key authorized to call addComposeHash()
-#   BASE_SEPOLIA_RPC_URL   testnet RPC for the on-chain step
+#   ETH_SEPOLIA_RPC_URL    testnet RPC for the on-chain step
 #
 # Required variables:
-#   FISHERMAN_APP_AUTH_BASE_SEPOLIA   set by contract-deploy workflow
+#   FISHERMAN_APP_AUTH_ETH_SEPOLIA   set by contract-deploy workflow
 #
 # Set BEFORE running:
 #   secrets.MIRROR_DOMAIN                e.g. mirror.fisherman.app
@@ -136,25 +136,25 @@ jobs:
       - name: Compute compose_hash + publish on-chain
         env:
           OWNER_PK:             ${{ secrets.OWNER_PK }}
-          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
-          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_BASE_SEPOLIA }}
+          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
         run: |
           set -euo pipefail
           if [[ -z "$CONTRACT" ]]; then
-            echo "::warning::FISHERMAN_APP_AUTH_BASE_SEPOLIA variable not set; skipping on-chain step"
+            echo "::warning::FISHERMAN_APP_AUTH_ETH_SEPOLIA variable not set; skipping on-chain step"
             exit 0
           fi
           HASH=$(sha256sum "$COMPOSE_FILE" | awk '{print $1}')
           echo "compose_hash: 0x$HASH"
           # Idempotent: skip if already allowed
           ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x$HASH" \
-              --rpc-url "$BASE_SEPOLIA_RPC_URL" || echo "false")
+              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false")
           if [[ "$ALLOWED" == "true" ]]; then
             echo "compose_hash already on-chain — skipping addComposeHash()"
             exit 0
           fi
           cast send "$CONTRACT" 'addComposeHash(bytes32)' "0x$HASH" \
-              --rpc-url "$BASE_SEPOLIA_RPC_URL" \
+              --rpc-url "$ETH_SEPOLIA_RPC_URL" \
               --private-key "$OWNER_PK"
 
       - name: Persist CVM ids as variables

@@ -72,21 +72,21 @@ jobs:
       - name: Publish compose_hash on-chain (idempotent)
         env:
           OWNER_PK:             ${{ secrets.OWNER_PK }}
-          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
-          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_BASE_SEPOLIA }}
+          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
         run: |
           set -euo pipefail
           if [[ -z "$CONTRACT" ]]; then
-            echo "::warning::FISHERMAN_APP_AUTH_BASE_SEPOLIA not set; skipping on-chain step"
+            echo "::warning::FISHERMAN_APP_AUTH_ETH_SEPOLIA not set; skipping on-chain step"
             exit 0
           fi
           ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x${{ steps.hash.outputs.hash }}" \
-              --rpc-url "$BASE_SEPOLIA_RPC_URL" || echo "false")
+              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false")
           if [[ "$ALLOWED" == "true" ]]; then
             echo "compose_hash already on-chain"
           else
             cast send "$CONTRACT" 'addComposeHash(bytes32)' "0x${{ steps.hash.outputs.hash }}" \
-                --rpc-url "$BASE_SEPOLIA_RPC_URL" \
+                --rpc-url "$ETH_SEPOLIA_RPC_URL" \
                 --private-key "$OWNER_PK"
           fi
 
@@ -119,8 +119,8 @@ jobs:
 
       - name: Attestation verifier
         env:
-          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
-          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_BASE_SEPOLIA }}
+          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
         run: |
           python -m pip install --quiet pycryptodome
           python <<'PY'
@@ -129,7 +129,7 @@ jobs:
           import sys; sys.path.insert(0, ".")
           res = verify_attestation(
               mirror_url=f"https://{os.environ['MIRROR_DOMAIN']}",
-              rpc_url=os.environ.get("BASE_SEPOLIA_RPC_URL"),
+              rpc_url=os.environ.get("ETH_SEPOLIA_RPC_URL"),
               contract_address=os.environ.get("CONTRACT"),
           )
           print("ok=", res.ok, "errors=", res.errors)
