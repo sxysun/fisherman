@@ -231,6 +231,230 @@ def stop(port: int | None):
             pass
 
 
+def _load_keys():
+    """Load (priv, pubkey_bytes, friends_group_key) from FISH_PRIVATE_KEY env or .env."""
+    # Pull .env values into env if not already present
+    cfg = FishermanConfig()
+    if "FISH_PRIVATE_KEY" not in os.environ and cfg.private_key:
+        os.environ["FISH_PRIVATE_KEY"] = cfg.private_key
+    from fisherman import keys
+    try:
+        seed = keys.load_seed()
+    except keys.KeyError as e:
+        click.echo(f"error: {e}", err=True)
+        click.echo("Set FISH_PRIVATE_KEY or run a daemon at least once.", err=True)
+        sys.exit(2)
+    priv, pub = keys.signing_keypair(seed)
+    return priv, pub, keys.friends_group_key(seed)
+
+
+def _ledger_url() -> str:
+    cfg = FishermanConfig()
+    return cfg.ledger_url
+
+
+@main.group(name="friend")
+def friend_group():
+    """Manage friends and friend codes."""
+
+
+@friend_group.command(name="code")
+@click.option("--name", default=None, help="Display name to embed in the code (default: hostname)")
+@click.option("--text", "as_text", is_flag=True, help="Show pretty-printed details")
+def friend_code(name: str | None, as_text: bool):
+    """Print your own friend code (share with people you trust)."""
+    from fisherman.friends import encode_code
+    _priv, pub, group = _load_keys()
+    if not name:
+        import socket
+        name = socket.gethostname().split(".")[0]
+    code = encode_code(name, pub.hex(), group.hex(), _ledger_url())
+    if as_text:
+        click.echo(f"name:       {name}")
+        click.echo(f"pubkey:     {pub.hex()}")
+        click.echo(f"relay:      {_ledger_url()}")
+        click.echo("")
+        click.echo(code)
+        click.echo("")
+        click.echo("Share this code with people you trust. The 'g' field is")
+        click.echo("a symmetric key — anyone holding the code can decrypt your")
+        click.echo("status events. Exchange via DM, AirDrop, or QR — never publicly.")
+    else:
+        click.echo(code)
+
+
+@friend_group.command(name="add")
+@click.argument("code")
+@click.option("--name", default=None, help="Override the embedded display name")
+def friend_add(code: str, name: str | None):
+    """Add a friend from a fish: code."""
+    from fisherman.friends import add_friend, decode_code
+    try:
+        parsed = decode_code(code)
+    except ValueError as e:
+        click.echo(f"error: {e}", err=True)
+        sys.exit(2)
+    record = add_friend(
+        name=name or parsed["name"],
+        pubkey_hex=parsed["pubkey_hex"],
+        friends_group_key_hex=parsed["friends_group_key"],
+        relay_url=parsed.get("relay_url"),
+    )
+    click.echo(f"added: {record['name']} ({record['pubkey_hex'][:12]}…)")
+
+
+@friend_group.command(name="list")
+@click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
+def friend_list(as_text: bool):
+    """List your friends."""
+    from fisherman.friends import list_friends
+    rows = list_friends()
+    if not as_text:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo("(no friends yet)")
+        return
+    for r in rows:
+        click.echo(f"{r['name']:24}  {r['pubkey_hex'][:16]}…  "
+                   f"{r.get('relay_url') or '(default relay)'}")
+
+
+@friend_group.command(name="remove")
+@click.argument("name_or_pubkey")
+def friend_remove(name_or_pubkey: str):
+    """Remove a friend by name or pubkey."""
+    from fisherman.friends import remove_friend
+    if remove_friend(name_or_pubkey):
+        click.echo(f"removed: {name_or_pubkey}")
+    else:
+        click.echo(f"not found: {name_or_pubkey}", err=True)
+        sys.exit(1)
+
+
+@friend_group.command(name="status")
+@click.argument("name_or_pubkey", required=False)
+@click.option("--since", default=None, help="Time window start, e.g. '5m', '2h', '1d'")
+@click.option("--limit", "-n", default=10, show_default=True)
+@click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
+def friend_status(name_or_pubkey: str | None, since: str | None, limit: int, as_text: bool):
+    """Fetch a friend's recent status from the relay."""
+    from fisherman.friends import find_friend, list_friends
+    from fisherman.ledger import fetch_friend_status, LedgerError
+
+    targets = []
+    if name_or_pubkey:
+        f = find_friend(name_or_pubkey)
+        if not f:
+            click.echo(f"not found: {name_or_pubkey}", err=True)
+            sys.exit(1)
+        targets = [f]
+    else:
+        targets = list_friends()
+        if not targets:
+            click.echo("(no friends added yet — try `fisherman friend add <code>`)")
+            return
+
+    since_ts = None
+    if since:
+        delta = _parse_duration(since)
+        if delta is not None:
+            import time as _t
+            since_ts = _t.time() - delta
+
+    out: list[dict] = []
+    for f in targets:
+        relay = f.get("relay_url") or _ledger_url()
+        group_key = bytes.fromhex(f["friends_group_key"])
+        try:
+            events = fetch_friend_status(
+                relay_url=relay,
+                friend_pubkey_hex=f["pubkey_hex"],
+                friends_group_key=group_key,
+                since_ts=since_ts,
+                limit=limit,
+            )
+        except LedgerError as e:
+            click.echo(f"  [{f['name']}] error: {e}", err=True)
+            continue
+        for ev in events:
+            out.append({"friend": f["name"], "pubkey": f["pubkey_hex"], **ev})
+
+    if not as_text:
+        click.echo(json.dumps(out, indent=2))
+        return
+    if not out:
+        click.echo("(no recent status)")
+        return
+    for ev in sorted(out, key=lambda e: e["ts"], reverse=True):
+        ts = _fmt_ts(ev["ts"])
+        d = ev["digest"]
+        emoji = d.get("emoji", "")
+        cat = d.get("category", "")
+        status = d.get("status", "")
+        click.echo(f"[{ts}] {ev['friend']:18} {emoji}  {cat:12} {status}")
+
+
+def _parse_duration(s: str) -> float | None:
+    import re
+    m = re.match(r"^(\d+)([smhd])$", s.strip().lower())
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    return n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+
+
+@main.command(name="publish-status")
+@click.option("--emoji", default=None)
+@click.option("--category", default=None)
+@click.option("--status", default=None)
+@click.option("--flow/--no-flow", default=False)
+@click.option("--from-stdin", is_flag=True, help="Read JSON digest from stdin")
+def publish_status(emoji, category, status, flow, from_stdin):
+    """Sign + encrypt + post a status event to the relay.
+
+    Either pass --emoji/--category/--status or pipe JSON to stdin:
+      echo '{"emoji":"🐟","category":"coding","status":"ws auth"}' \
+        | fisherman publish-status --from-stdin
+    """
+    from fisherman.ledger import publish_status as _publish, LedgerError
+
+    if from_stdin:
+        try:
+            digest = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as e:
+            click.echo(f"invalid JSON on stdin: {e}", err=True)
+            sys.exit(2)
+    else:
+        digest = {
+            k: v for k, v in {
+                "emoji": emoji, "category": category, "status": status, "flow": flow,
+            }.items() if v not in (None, "")
+        }
+        if not digest:
+            click.echo("nothing to publish: pass --emoji/--category/--status or --from-stdin", err=True)
+            sys.exit(2)
+
+    priv, pub, group = _load_keys()
+    try:
+        eid = _publish(_ledger_url(), priv, pub, group, digest)
+    except LedgerError as e:
+        click.echo(f"error: {e}", err=True)
+        sys.exit(1)
+    click.echo(f"published event_id={eid}")
+
+
+@main.group(name="ledger")
+def ledger_group():
+    """Inspect or change the relay (ledger) URL."""
+
+
+@ledger_group.command(name="url")
+def ledger_url():
+    """Print the configured ledger URL."""
+    click.echo(_ledger_url())
+
+
 @main.command(name="install-service")
 def install_service():
     """Install a macOS LaunchAgent for auto-start."""

@@ -12,6 +12,7 @@ dependencies = [
     "imagehash>=4.3",
     "cryptography>=43.0",
     "websockets>=13.0",
+    "aiohttp>=3.10",
     "pydantic-settings>=2.0",
     "click>=8.0",
     "structlog>=24.0",

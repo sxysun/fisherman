@@ -67,3 +67,6 @@ class FishermanConfig(BaseSettings):
 
     # Control
     control_port: int = 7892
+
+    # Friend status ledger (e2ee relay) — pinned default; user can override.
+    ledger_url: str = "http://127.0.0.1:9100"
