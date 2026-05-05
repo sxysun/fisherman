@@ -8,7 +8,9 @@ import structlog
 from fisherman import deputy as deputy_acl
 from fisherman import keys as fkeys
 from fisherman import rpc as fisher_rpc
+from fisherman import storage_config
 from fisherman.audio_store import AudioStore
+from fisherman.blob_store import from_config as blob_store_from_config
 from fisherman.capture import capture_screen
 from fisherman.config import FishermanConfig
 from fisherman.control import ControlServer
@@ -22,6 +24,7 @@ from fisherman.relay_client import RelayClient
 from fisherman.router import TierRouter
 from fisherman.screenpipe_capture import ScreenpipeCaptureClient, ScreenpipeCaptureError
 from fisherman.streamer import Streamer
+from fisherman.sync import MirrorSync
 
 log = structlog.get_logger()
 
@@ -62,13 +65,16 @@ class FishermanDaemon:
         self._relay_client: RelayClient | None = None
         self._rpc_handled = 0
         self._rpc_denied = 0
+        self._blob_at_rest_key: bytes | None = None
         if config.private_key:
             try:
                 seed = bytes.fromhex(config.private_key)
                 self._signing_priv, self._signing_pub = fkeys.signing_keypair(seed)
                 self._x25519_priv, self._x25519_pub = fkeys.encryption_keypair(seed)
+                self._blob_at_rest_key = fkeys.blob_at_rest_key(seed)
             except Exception:
                 log.warning("invalid_private_key_for_relay", exc_info=True)
+        self._mirror_sync: MirrorSync | None = None
 
     async def _enhance_pdf_context(self, frame, ocr_text: str, urls: list[str]) -> tuple[str, list[str]]:
         loop = asyncio.get_running_loop()
@@ -141,6 +147,23 @@ class FishermanDaemon:
             )
             await self._relay_client.start()
 
+        # Storage mirror — uploads encrypted blobs to user-chosen backend.
+        if self._blob_at_rest_key is not None:
+            try:
+                cfg = storage_config.load()
+                store = blob_store_from_config(cfg)
+                if store is not None:
+                    self._mirror_sync = MirrorSync(
+                        store=store,
+                        blob_key=self._blob_at_rest_key,
+                        frames_dir=self._config.frames_dir,
+                        audio_dir=self._config.audio_dir,
+                    )
+                    await self._mirror_sync.start()
+                    log.info("mirror_sync_started", backend=storage_config.summary(cfg))
+            except Exception:
+                log.warning("mirror_sync_init_failed", exc_info=True)
+
         try:
             if _SWIFT_CAPTURE:
                 await self._process_loop()
@@ -160,6 +183,8 @@ class FishermanDaemon:
                     pass
             if self._relay_client is not None:
                 await self._relay_client.stop()
+            if self._mirror_sync is not None:
+                await self._mirror_sync.stop()
             await self._streamer.stop()
             await control.stop()
             self._pool.shutdown(wait=False)
@@ -373,6 +398,9 @@ class FishermanDaemon:
             "relay_connected": (self._relay_client.connected if self._relay_client else False),
             "rpc_handled": self._rpc_handled,
             "rpc_denied": self._rpc_denied,
+            "mirror_active": self._mirror_sync is not None,
+            "mirror_uploaded": (self._mirror_sync.state.uploaded_files if self._mirror_sync else 0),
+            "mirror_failed": (self._mirror_sync.state.failed_files if self._mirror_sync else 0),
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
             if self._capture_backend == "screenpipe":

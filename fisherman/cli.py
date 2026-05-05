@@ -718,6 +718,93 @@ def deputy_revoke(name_or_pubkey: str):
         sys.exit(1)
 
 
+@main.group(name="storage")
+def storage_group():
+    """Configure encrypted-mirror backup of your local context."""
+
+
+@storage_group.command(name="status")
+@click.option("--text", "as_text", is_flag=True)
+def storage_status(as_text: bool):
+    """Show current storage config and sync state."""
+    from fisherman import storage_config
+    from fisherman.sync import _load_state
+    cfg = storage_config.load()
+    state = _load_state()
+    out = {
+        "config": {**cfg, **{
+            # Redact secrets in the printed view
+            k: ("***" if cfg.get(k) else None)
+            for k in ("access_key_id", "secret_access_key")
+            if k in cfg
+        }},
+        "summary": storage_config.summary(cfg),
+        "sync": {
+            "uploaded_files": state.uploaded_files,
+            "failed_files": state.failed_files,
+            "bytes_uploaded": state.bytes_uploaded,
+            "last_scan_at": state.last_scan_at,
+            "last_error": state.last_error,
+        },
+    }
+    if not as_text:
+        click.echo(json.dumps(out, indent=2))
+        return
+    click.echo(f"backend:        {out['summary']}")
+    click.echo(f"uploaded files: {out['sync']['uploaded_files']}")
+    click.echo(f"bytes uploaded: {out['sync']['bytes_uploaded']:,}")
+    if state.last_scan_at:
+        click.echo(f"last scan:      {_fmt_ts(state.last_scan_at)}")
+    if state.failed_files:
+        click.echo(f"failures:       {state.failed_files}")
+    if state.last_error:
+        click.echo(f"last error:     {state.last_error}")
+
+
+@storage_group.command(name="configure-local")
+@click.option("--path", "fs_path", required=True, help="Mirror directory")
+def storage_configure_local(fs_path: str):
+    """Configure a local-filesystem mirror (for testing or NAS)."""
+    from fisherman import storage_config
+    storage_config.save({"kind": "localfs", "path": os.path.expanduser(fs_path)})
+    click.echo(f"configured: localfs at {fs_path}")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
+@storage_group.command(name="configure-s3")
+@click.option("--bucket", required=True)
+@click.option("--endpoint", default=None,
+              help="S3 endpoint URL (e.g. https://<acct>.r2.cloudflarestorage.com); "
+                   "omit for AWS S3")
+@click.option("--key-id", "key_id", required=True, help="Access key ID")
+@click.option("--secret", "secret", required=True, help="Secret access key")
+@click.option("--region", default="auto", show_default=True)
+@click.option("--prefix", default="", help="Key prefix inside the bucket")
+def storage_configure_s3(bucket, endpoint, key_id, secret, region, prefix):
+    """Configure an S3-compatible mirror (R2 / B2 / AWS / MinIO)."""
+    from fisherman import storage_config
+    storage_config.save({
+        "kind": "s3",
+        "bucket": bucket,
+        "endpoint": endpoint,
+        "access_key_id": key_id,
+        "secret_access_key": secret,
+        "region": region,
+        "prefix": prefix,
+    })
+    click.echo(f"configured: s3 bucket={bucket} endpoint={endpoint or 'AWS'}")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
+@storage_group.command(name="disable")
+def storage_disable():
+    """Turn off the storage mirror (keeps local capture only)."""
+    from fisherman import storage_config
+    storage_config.disable()
+    click.echo("storage mirror disabled")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
 @main.command(name="install-service")
 def install_service():
     """Install a macOS LaunchAgent for auto-start."""
