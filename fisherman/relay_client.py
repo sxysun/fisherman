@@ -52,10 +52,21 @@ class RelayClient:
         signing_priv: Ed25519PrivateKey,
         user_pubkey_bytes: bytes,
         handler: HandlerFn,
+        kind: str = "primary",
+        endpoint_pubkey_bytes: bytes | None = None,
     ):
+        """
+        kind == "primary":   signing_priv is the USER's key; endpoint_pubkey
+                             defaults to user_pubkey. (Used by the laptop daemon.)
+        kind == "secondary": signing_priv is the MIRROR's own key; the mirror
+                             also presents user_pubkey_bytes as the user it
+                             serves; endpoint_pubkey_bytes is the mirror's pubkey.
+        """
         self._relay_url = relay_url
         self._priv = signing_priv
         self._pubkey = user_pubkey_bytes
+        self._endpoint_pubkey = endpoint_pubkey_bytes or user_pubkey_bytes
+        self._kind = kind
         self._handler = handler
         self._connected = False
         self._task: asyncio.Task | None = None
@@ -97,11 +108,17 @@ class RelayClient:
     def _build_hello(self) -> dict[str, Any]:
         ts = time.time()
         nonce = secrets.token_bytes(_HELLO_NONCE_LEN)
-        msg = self._pubkey + struct.pack(">Q", int(ts)) + nonce
+        # Sign-over: signing_pubkey || u64_be(ts) || nonce. The signing pubkey
+        # is the user's key for primary endpoints, the mirror's key for
+        # secondary endpoints.
+        signing_pubkey = self._endpoint_pubkey if self._kind == "secondary" else self._pubkey
+        msg = signing_pubkey + struct.pack(">Q", int(ts)) + nonce
         sig = self._priv.sign(msg)
         return {
             "type": "hello",
             "user_pubkey": self._pubkey.hex(),
+            "endpoint_pubkey": self._endpoint_pubkey.hex(),
+            "kind": self._kind,
             "ts": ts,
             "nonce": nonce.hex(),
             "sig": sig.hex(),

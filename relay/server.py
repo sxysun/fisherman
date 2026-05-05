@@ -184,33 +184,83 @@ _RPC_TIMEOUT = 30.0
 _HELLO_DRIFT = 60         # seconds tolerated between client clock and server
 
 
+class Endpoint:
+    __slots__ = ("ws", "kind", "last_seen", "endpoint_pubkey")
+
+    def __init__(self, ws: web.WebSocketResponse, kind: str, endpoint_pubkey: str):
+        self.ws = ws
+        self.kind = kind                  # "primary" | "secondary"
+        self.last_seen = time.time()
+        self.endpoint_pubkey = endpoint_pubkey
+
+
+# Routing policy: prefer primary; fall back to most-recently-seen secondary.
+# This matches the design's "laptop is canonical, mirror is fallback".
+def _pick(endpoints: list[Endpoint], source_pref: str | None) -> Endpoint | None:
+    if not endpoints:
+        return None
+    pref = (source_pref or "auto").lower()
+    if pref == "primary":
+        primaries = [e for e in endpoints if e.kind == "primary"]
+        return primaries[0] if primaries else None
+    if pref == "secondary":
+        secondaries = [e for e in endpoints if e.kind == "secondary"]
+        return max(secondaries, key=lambda e: e.last_seen) if secondaries else None
+    # auto / any: prefer primary, else most-recently-seen of any kind
+    primaries = [e for e in endpoints if e.kind == "primary"]
+    if primaries:
+        return primaries[0]
+    return max(endpoints, key=lambda e: e.last_seen)
+
+
 class Router:
     def __init__(self):
-        # user_pubkey_hex -> ws
-        self._endpoints: dict[str, web.WebSocketResponse] = {}
+        # user_pubkey_hex -> list of Endpoint
+        self._endpoints: dict[str, list[Endpoint]] = {}
         # rpc_id -> Future awaiting the response
         self._pending: dict[str, asyncio.Future[dict]] = {}
 
-    def register(self, user_pubkey_hex: str, ws: web.WebSocketResponse) -> None:
-        # Replace any prior connection for this pubkey (newest wins)
-        old = self._endpoints.get(user_pubkey_hex)
-        if old is not None and old is not ws:
-            asyncio.create_task(old.close(code=1000, message=b"replaced"))
-        self._endpoints[user_pubkey_hex] = ws
-        log.info("endpoint_registered", user=user_pubkey_hex[:16])
+    def register(self, user_pubkey_hex: str, endpoint: Endpoint) -> None:
+        bucket = self._endpoints.setdefault(user_pubkey_hex, [])
+        # Replace any prior endpoint with the same endpoint_pubkey
+        for i, ep in enumerate(bucket):
+            if ep.endpoint_pubkey == endpoint.endpoint_pubkey:
+                asyncio.create_task(ep.ws.close(code=1000, message=b"replaced"))
+                bucket[i] = endpoint
+                log.info("endpoint_replaced", user=user_pubkey_hex[:16],
+                         kind=endpoint.kind, ep=endpoint.endpoint_pubkey[:16])
+                return
+        bucket.append(endpoint)
+        log.info("endpoint_registered", user=user_pubkey_hex[:16],
+                 kind=endpoint.kind, ep=endpoint.endpoint_pubkey[:16],
+                 total=len(bucket))
 
     def unregister(self, user_pubkey_hex: str, ws: web.WebSocketResponse) -> None:
-        if self._endpoints.get(user_pubkey_hex) is ws:
+        bucket = self._endpoints.get(user_pubkey_hex)
+        if not bucket:
+            return
+        bucket[:] = [e for e in bucket if e.ws is not ws]
+        if not bucket:
             del self._endpoints[user_pubkey_hex]
-            log.info("endpoint_unregistered", user=user_pubkey_hex[:16])
+        log.info("endpoint_unregistered", user=user_pubkey_hex[:16],
+                 remaining=len(bucket))
 
     def is_online(self, user_pubkey_hex: str) -> bool:
-        return user_pubkey_hex in self._endpoints
+        return bool(self._endpoints.get(user_pubkey_hex))
+
+    def online_summary(self, user_pubkey_hex: str) -> list[dict]:
+        bucket = self._endpoints.get(user_pubkey_hex) or []
+        return [{"kind": e.kind, "endpoint_pubkey": e.endpoint_pubkey,
+                 "last_seen": e.last_seen} for e in bucket]
 
     async def call(self, user_pubkey_hex: str, body: dict) -> dict:
-        ws = self._endpoints.get(user_pubkey_hex)
-        if ws is None:
-            raise web.HTTPBadGateway(reason=f"user {user_pubkey_hex[:16]} not online")
+        bucket = self._endpoints.get(user_pubkey_hex)
+        source_pref = body.get("source_pref")
+        endpoint = _pick(bucket or [], source_pref)
+        if endpoint is None:
+            raise web.HTTPBadGateway(
+                reason=f"user {user_pubkey_hex[:16]}… has no matching endpoint"
+            )
 
         rpc_id = secrets.token_hex(8)
         fut: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
@@ -218,16 +268,25 @@ class Router:
 
         msg = {"type": "rpc.request", "rpc_id": rpc_id, "body": body}
         try:
-            await ws.send_json(msg)
+            await endpoint.ws.send_json(msg)
+            endpoint.last_seen = time.time()
         except Exception as e:
             self._pending.pop(rpc_id, None)
             raise web.HTTPBadGateway(reason=f"send failed: {e}") from e
 
         try:
-            return await asyncio.wait_for(fut, timeout=_RPC_TIMEOUT)
+            result = await asyncio.wait_for(fut, timeout=_RPC_TIMEOUT)
         except asyncio.TimeoutError:
             self._pending.pop(rpc_id, None)
-            raise web.HTTPGatewayTimeout(reason="daemon did not respond")
+            raise web.HTTPGatewayTimeout(reason="endpoint did not respond")
+
+        # Add metadata about which endpoint served the request
+        if isinstance(result, dict):
+            result.setdefault("served_by", {
+                "kind": endpoint.kind,
+                "endpoint_pubkey": endpoint.endpoint_pubkey,
+            })
+        return result
 
     def deliver_response(self, rpc_id: str, payload: dict) -> bool:
         fut = self._pending.pop(rpc_id, None)
@@ -237,9 +296,14 @@ class Router:
         return True
 
 
-def _verify_hello(user_pubkey_hex: str, ts: float, nonce_hex: str, sig_hex: str) -> bool:
+def _verify_hello(signing_pubkey_hex: str, ts: float, nonce_hex: str, sig_hex: str) -> bool:
+    """Verify the signature over (signing_pubkey || u64_be(ts) || nonce).
+
+    For primary endpoints, signing_pubkey == user_pubkey. For secondary
+    endpoints, signing_pubkey is the mirror's own ed25519 pubkey.
+    """
     try:
-        pubkey_bytes = bytes.fromhex(user_pubkey_hex)
+        pubkey_bytes = bytes.fromhex(signing_pubkey_hex)
         if len(pubkey_bytes) != 32:
             return False
         nonce = bytes.fromhex(nonce_hex)
@@ -284,18 +348,32 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
             return ws
 
         user_pubkey_hex = hello.get("user_pubkey", "").lower()
+        endpoint_pubkey_hex = (hello.get("endpoint_pubkey") or user_pubkey_hex).lower()
+        kind = (hello.get("kind") or "primary").lower()
+        if kind not in ("primary", "secondary"):
+            await ws.close(code=4006, message=b"bad kind")
+            return ws
         ts = hello.get("ts", 0)
         nonce_hex = hello.get("nonce", "")
         sig_hex = hello.get("sig", "")
         if abs(time.time() - float(ts)) > _HELLO_DRIFT:
             await ws.close(code=4004, message=b"clock drift")
             return ws
-        if not _verify_hello(user_pubkey_hex, float(ts), nonce_hex, sig_hex):
+        # For v1: primary endpoint signs with the user's ed25519 directly;
+        # secondary signs with its own ed25519 (endpoint_pubkey). The user
+        # is implicitly trusting the mirror operator at pairing time.
+        signing_pubkey_hex = (
+            user_pubkey_hex if kind == "primary" else endpoint_pubkey_hex
+        )
+        if not _verify_hello(signing_pubkey_hex, float(ts), nonce_hex, sig_hex):
             await ws.close(code=4005, message=b"bad signature")
             return ws
 
         await ws.send_json({"type": "welcome"})
-        router.register(user_pubkey_hex, ws)
+        router.register(
+            user_pubkey_hex,
+            Endpoint(ws=ws, kind=kind, endpoint_pubkey=endpoint_pubkey_hex),
+        )
 
         # Step 2: receive rpc.response messages from the daemon
         async for msg in ws:
