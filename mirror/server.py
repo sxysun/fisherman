@@ -44,6 +44,8 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
+from aiohttp import web
+
 from fisherman import keys as fkeys
 from fisherman import rpc as fisher_rpc
 from fisherman.blob_store import from_config as blob_store_from_config
@@ -231,6 +233,49 @@ class MirrorServer:
         return {"error": f"unsupported_command:{cmd}"}
 
 
+async def _build_health_app(server: "MirrorServer") -> web.Application:
+    """Tiny HTTP server: /health for the dstack-ingress liveness probe,
+    plus /.well-known/attestation for the menubar to verify the TEE.
+
+    /attestation returns the dstack TDX quote + measurements + release
+    metadata when running inside a CVM. Outside a CVM (local dev), it
+    returns a stub bundle so structural client code still works.
+    """
+    app = web.Application()
+
+    async def health(_):
+        return web.Response(text="ok")
+
+    async def attestation(_):
+        bundle = {
+            "fisherman_release": {
+                "git_commit": os.environ.get("FISHERMAN_GIT_COMMIT", "dev"),
+                "built_at":   os.environ.get("FISHERMAN_BUILT_AT", "dev"),
+                "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST", "sha256:dev"),
+            },
+            "mirror_pubkey": server.mirror_pubkey.hex(),
+            "user_pubkey":   server._user_pubkey.hex(),
+            "tdx_quote_hex": "",   # populated by dstack runtime when present
+            "event_log":     [],   # ditto
+        }
+        # dstack mounts an attestation socket / file at well-known paths
+        # when running inside a CVM. Read if present, otherwise leave
+        # empty (still useful structurally).
+        for path in ("/var/run/dstack.sock-quote", "/run/dstack/quote"):
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        bundle["tdx_quote_hex"] = f.read().hex()
+                    break
+                except OSError:
+                    pass
+        return web.json_response(bundle)
+
+    app.router.add_get("/health", health)
+    app.router.add_get("/.well-known/attestation", attestation)
+    return app
+
+
 async def amain():
     user_pubkey = bytes.fromhex(_require_env("MIRROR_USER_PUBKEY"))
     x_priv = X25519PrivateKey.from_private_bytes(
@@ -262,6 +307,14 @@ async def amain():
              mirror=server.mirror_pubkey.hex()[:16])
     await server.start()
 
+    # HTTP /health + /.well-known/attestation for dstack-ingress + audit clients
+    health_app = await _build_health_app(server)
+    runner = web.AppRunner(health_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 5001)
+    await site.start()
+    log.info("mirror_http_started", port=5001)
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -269,6 +322,7 @@ async def amain():
     try:
         await stop_event.wait()
     finally:
+        await runner.cleanup()
         await server.stop()
     log.info("mirror_stopped")
 
