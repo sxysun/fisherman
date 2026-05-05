@@ -30,6 +30,10 @@ struct SettingsView: View {
         case server = "Server"
         case identity = "Identity"
         case friends = "Friends"
+        case deputies = "Deputies"
+        case storage = "Storage"
+        case mirror = "Mirror"
+        case agent = "Agent"
     }
 
     var body: some View {
@@ -67,6 +71,14 @@ struct SettingsView: View {
                         identityTab
                     case .friends:
                         friendsTab
+                    case .deputies:
+                        DeputiesTab()
+                    case .storage:
+                        StorageTab()
+                    case .mirror:
+                        MirrorTab()
+                    case .agent:
+                        AgentTab()
                     }
                 }
                 .padding(16)

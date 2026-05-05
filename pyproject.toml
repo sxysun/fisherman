@@ -18,6 +18,9 @@ dependencies = [
     "structlog>=24.0",
 ]
 
+[project.optional-dependencies]
+tee = ["pycryptodome>=3.20"]
+
 [project.scripts]
 fisherman = "fisherman.cli:main"
 fisherman-mirror = "mirror.cli:main"

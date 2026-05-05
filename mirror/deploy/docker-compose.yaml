@@ -1,0 +1,27 @@
+# Local / non-TDX deploy of fisherman-mirror.
+# For TDX (Phala dstack), use docker-compose.phala.yaml instead.
+#
+# Run after `fisherman mirror pair-mint` on your laptop and
+# `fisherman-mirror init <token>` on this host. The mirror reads its
+# config from the volume mounted below.
+
+name: fisherman-mirror
+
+services:
+  mirror:
+    image: ghcr.io/sxysun/fisherman-mirror:latest
+    restart: unless-stopped
+    environment:
+      - FISHERMAN_DATA_DIR=/data
+    volumes:
+      - mirror-config:/home/fisherman/.fisherman-mirror
+      - mirror-data:/data
+    # In a real deploy, mount the bucket via a backend driver
+    # (rclone-mount for S3, davfs for WebDAV, etc.) at /data and let
+    # the mirror's storage.json point at it as kind=localfs path=/data.
+    # The mirror's storage.json (saved by `fisherman-mirror init`)
+    # reflects whatever backend was paired in.
+
+volumes:
+  mirror-config:
+  mirror-data:

@@ -275,6 +275,229 @@ class WebDAVBlobStore:
 
 # ---------------------------------------------------------------------------
 
+class GoogleDriveBlobStore:
+    """Google Drive (drive.appdata or drive.file scope) backend.
+
+    Authentication uses an OAuth2 refresh_token + client credentials. We
+    don't ship our own OAuth client in this version — users go through
+    Google Cloud Console once to create an OAuth client, run the OOB
+    flow to mint a refresh_token, then paste it into
+    `fisherman storage configure-drive`. See docs/drive-setup.md.
+
+    Why no embedded client: shipping client credentials in a public dmg
+    requires a verified Google Cloud project + branded OAuth consent
+    screen, which is not free of operational cost. v1 = BYO project;
+    v2 = embed once we have an LLC.
+    """
+
+    _TOKEN_URL = "https://oauth2.googleapis.com/token"
+    _UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
+    _FILES_URL = "https://www.googleapis.com/drive/v3/files"
+
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        refresh_token: str,
+        folder_name: str = "fisherman",
+    ):
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._refresh_token = refresh_token
+        self._folder_name = folder_name
+        self._access_token: str | None = None
+        self._token_expires_at = 0.0
+        self._folder_id: str | None = None
+
+    # ---- token + folder management
+
+    def _refresh(self) -> None:
+        import time
+        import urllib.parse
+        import urllib.request
+        body = urllib.parse.urlencode({
+            "client_id": self._client_id,
+            "client_secret": self._client_secret,
+            "refresh_token": self._refresh_token,
+            "grant_type": "refresh_token",
+        }).encode()
+        req = urllib.request.Request(
+            self._TOKEN_URL, data=body, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        self._access_token = data["access_token"]
+        # Renew 60s before expiry
+        self._token_expires_at = time.time() + int(data.get("expires_in", 3600)) - 60
+
+    def _ensure_token(self) -> str:
+        import time
+        if not self._access_token or time.time() >= self._token_expires_at:
+            self._refresh()
+        return self._access_token  # type: ignore[return-value]
+
+    def _auth_headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._ensure_token()}"}
+
+    def _ensure_folder(self) -> str:
+        """Find or create the top-level folder. Idempotent."""
+        if self._folder_id:
+            return self._folder_id
+        import urllib.parse
+        import urllib.request
+        q = (
+            f"mimeType = 'application/vnd.google-apps.folder' "
+            f"and name = '{self._folder_name}' and trashed = false"
+        )
+        params = urllib.parse.urlencode({"q": q, "fields": "files(id,name)"})
+        req = urllib.request.Request(
+            f"{self._FILES_URL}?{params}", method="GET",
+            headers=self._auth_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        files = data.get("files") or []
+        if files:
+            self._folder_id = files[0]["id"]
+            return self._folder_id
+
+        # Create
+        body = json.dumps({
+            "name": self._folder_name,
+            "mimeType": "application/vnd.google-apps.folder",
+        }).encode()
+        req = urllib.request.Request(
+            self._FILES_URL, data=body, method="POST",
+            headers={**self._auth_headers(), "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        self._folder_id = data["id"]
+        return self._folder_id
+
+    # ---- key resolution: store an "appProperties.fishkey" so we can find by key
+
+    def _find_id_by_key(self, key: str) -> str | None:
+        import urllib.parse
+        import urllib.request
+        q = (
+            f"appProperties has {{ key='fishkey' and value='{key}' }} and trashed = false"
+        )
+        params = urllib.parse.urlencode({
+            "q": q, "fields": "files(id,name)",
+            "spaces": "drive",
+        })
+        req = urllib.request.Request(
+            f"{self._FILES_URL}?{params}", method="GET",
+            headers=self._auth_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        files = data.get("files") or []
+        return files[0]["id"] if files else None
+
+    # ---- BlobStore interface
+
+    def put(self, key: str, data: bytes) -> None:
+        """Multipart upload with appProperties tag for later lookup.
+
+        Drive doesn't support per-file path lookups — we use a flat
+        bucket and tag each file with appProperties.fishkey=<key>.
+        """
+        import urllib.parse
+        import urllib.request
+        # Delete prior version if present (idempotent put)
+        prior_id = self._find_id_by_key(key)
+        folder_id = self._ensure_folder()
+        meta = {
+            "name": key.replace("/", "_"),
+            "parents": [folder_id],
+            "appProperties": {"fishkey": key},
+        }
+        boundary = "---fishboundary---"
+        body = (
+            f"--{boundary}\r\n"
+            "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{json.dumps(meta)}\r\n"
+            f"--{boundary}\r\n"
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+
+        if prior_id:
+            url = f"{self._UPLOAD_URL}/{prior_id}?uploadType=multipart"
+            method = "PATCH"
+        else:
+            url = f"{self._UPLOAD_URL}?uploadType=multipart"
+            method = "POST"
+        req = urllib.request.Request(
+            url, data=body, method=method,
+            headers={
+                **self._auth_headers(),
+                "Content-Type": f"multipart/related; boundary={boundary}",
+                "Content-Length": str(len(body)),
+            },
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            resp.read()
+
+    def get(self, key: str) -> bytes:
+        import urllib.request
+        fid = self._find_id_by_key(key)
+        if fid is None:
+            raise KeyError(key)
+        req = urllib.request.Request(
+            f"{self._FILES_URL}/{fid}?alt=media", method="GET",
+            headers=self._auth_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.read()
+
+    def list(self, prefix: str = "") -> list[str]:
+        """Drive list — iterate all files in our folder, return fishkey values."""
+        import urllib.parse
+        import urllib.request
+        folder_id = self._ensure_folder()
+        out: list[str] = []
+        page_token: str | None = None
+        while True:
+            params = {
+                "q": f"'{folder_id}' in parents and trashed = false",
+                "fields": "nextPageToken, files(appProperties)",
+                "pageSize": "1000",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            req = urllib.request.Request(
+                f"{self._FILES_URL}?{urllib.parse.urlencode(params)}",
+                method="GET", headers=self._auth_headers(),
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+            for f in data.get("files") or []:
+                fk = (f.get("appProperties") or {}).get("fishkey")
+                if fk and fk.startswith(prefix):
+                    out.append(fk)
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+        return sorted(out)
+
+    def delete(self, key: str) -> None:
+        import urllib.request
+        fid = self._find_id_by_key(key)
+        if fid is None:
+            return
+        req = urllib.request.Request(
+            f"{self._FILES_URL}/{fid}", method="DELETE",
+            headers=self._auth_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+
+
+# ---------------------------------------------------------------------------
+
 def from_config(cfg: dict) -> BlobStore | None:
     """Build a backend from a storage.json-style config dict.
 
@@ -305,5 +528,12 @@ def from_config(cfg: dict) -> BlobStore | None:
             username=cfg["username"],
             password=cfg["password"],
             prefix=cfg.get("prefix", ""),
+        )
+    if kind == "drive":
+        return GoogleDriveBlobStore(
+            client_id=cfg["client_id"],
+            client_secret=cfg["client_secret"],
+            refresh_token=cfg["refresh_token"],
+            folder_name=cfg.get("folder_name", "fisherman"),
         )
     raise ValueError(f"unknown storage kind: {kind!r}")

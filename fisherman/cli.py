@@ -902,6 +902,26 @@ def storage_configure_s3(bucket, endpoint, key_id, secret, region, prefix):
     click.echo("Restart the daemon for changes to take effect.")
 
 
+@storage_group.command(name="configure-drive")
+@click.option("--client-id", "client_id", required=True, help="Google Cloud OAuth client_id")
+@click.option("--client-secret", "client_secret", required=True, help="Google Cloud OAuth client_secret")
+@click.option("--refresh-token", "refresh_token", required=True,
+              help="Refresh token from the OOB OAuth flow (see docs/drive-setup.md)")
+@click.option("--folder-name", "folder_name", default="fisherman", show_default=True)
+def storage_configure_drive(client_id, client_secret, refresh_token, folder_name):
+    """Configure a Google Drive mirror (BYO OAuth client; see docs/drive-setup.md)."""
+    from fisherman import storage_config
+    storage_config.save({
+        "kind": "drive",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "folder_name": folder_name,
+    })
+    click.echo(f"configured: drive folder={folder_name}")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
 @storage_group.command(name="configure-webdav")
 @click.option("--url", required=True, help="Base URL (e.g. https://u123456.your-storagebox.de/fisherman/)")
 @click.option("--username", required=True)
