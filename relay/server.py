@@ -23,12 +23,13 @@ import asyncio
 import base64
 import json
 import os
+import secrets
 import struct
 import time
 from collections import deque
 from typing import Any
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 import structlog
@@ -174,6 +175,173 @@ async def health(_: web.Request) -> web.Response:
     return web.Response(text="ok")
 
 
+# ----------------------------------------------------------------------------
+# RPC routing: persistent WS from each user's daemon, POST /rpc from deputies.
+# Per user_pubkey we keep at most one active WS (multi-endpoint comes later).
+# ----------------------------------------------------------------------------
+
+_RPC_TIMEOUT = 30.0
+_HELLO_DRIFT = 60         # seconds tolerated between client clock and server
+
+
+class Router:
+    def __init__(self):
+        # user_pubkey_hex -> ws
+        self._endpoints: dict[str, web.WebSocketResponse] = {}
+        # rpc_id -> Future awaiting the response
+        self._pending: dict[str, asyncio.Future[dict]] = {}
+
+    def register(self, user_pubkey_hex: str, ws: web.WebSocketResponse) -> None:
+        # Replace any prior connection for this pubkey (newest wins)
+        old = self._endpoints.get(user_pubkey_hex)
+        if old is not None and old is not ws:
+            asyncio.create_task(old.close(code=1000, message=b"replaced"))
+        self._endpoints[user_pubkey_hex] = ws
+        log.info("endpoint_registered", user=user_pubkey_hex[:16])
+
+    def unregister(self, user_pubkey_hex: str, ws: web.WebSocketResponse) -> None:
+        if self._endpoints.get(user_pubkey_hex) is ws:
+            del self._endpoints[user_pubkey_hex]
+            log.info("endpoint_unregistered", user=user_pubkey_hex[:16])
+
+    def is_online(self, user_pubkey_hex: str) -> bool:
+        return user_pubkey_hex in self._endpoints
+
+    async def call(self, user_pubkey_hex: str, body: dict) -> dict:
+        ws = self._endpoints.get(user_pubkey_hex)
+        if ws is None:
+            raise web.HTTPBadGateway(reason=f"user {user_pubkey_hex[:16]} not online")
+
+        rpc_id = secrets.token_hex(8)
+        fut: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
+        self._pending[rpc_id] = fut
+
+        msg = {"type": "rpc.request", "rpc_id": rpc_id, "body": body}
+        try:
+            await ws.send_json(msg)
+        except Exception as e:
+            self._pending.pop(rpc_id, None)
+            raise web.HTTPBadGateway(reason=f"send failed: {e}") from e
+
+        try:
+            return await asyncio.wait_for(fut, timeout=_RPC_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._pending.pop(rpc_id, None)
+            raise web.HTTPGatewayTimeout(reason="daemon did not respond")
+
+    def deliver_response(self, rpc_id: str, payload: dict) -> bool:
+        fut = self._pending.pop(rpc_id, None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(payload)
+        return True
+
+
+def _verify_hello(user_pubkey_hex: str, ts: float, nonce_hex: str, sig_hex: str) -> bool:
+    try:
+        pubkey_bytes = bytes.fromhex(user_pubkey_hex)
+        if len(pubkey_bytes) != 32:
+            return False
+        nonce = bytes.fromhex(nonce_hex)
+        sig = bytes.fromhex(sig_hex)
+    except ValueError:
+        return False
+    msg = pubkey_bytes + struct.pack(">Q", int(ts)) + nonce
+    try:
+        Ed25519PublicKey.from_public_bytes(pubkey_bytes).verify(sig, msg)
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
+async def ws_handler(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=2 * _MAX_CIPHERTEXT_BYTES)
+    await ws.prepare(request)
+    router: Router = request.app["router"]
+
+    user_pubkey_hex: str | None = None
+
+    try:
+        # Step 1: HELLO
+        try:
+            first = await asyncio.wait_for(ws.receive(), timeout=10.0)
+        except asyncio.TimeoutError:
+            await ws.close(code=4000, message=b"hello timeout")
+            return ws
+
+        if first.type != WSMsgType.TEXT:
+            await ws.close(code=4001, message=b"text required")
+            return ws
+
+        try:
+            hello = json.loads(first.data)
+        except json.JSONDecodeError:
+            await ws.close(code=4002, message=b"bad json")
+            return ws
+
+        if hello.get("type") != "hello":
+            await ws.close(code=4003, message=b"first msg must be hello")
+            return ws
+
+        user_pubkey_hex = hello.get("user_pubkey", "").lower()
+        ts = hello.get("ts", 0)
+        nonce_hex = hello.get("nonce", "")
+        sig_hex = hello.get("sig", "")
+        if abs(time.time() - float(ts)) > _HELLO_DRIFT:
+            await ws.close(code=4004, message=b"clock drift")
+            return ws
+        if not _verify_hello(user_pubkey_hex, float(ts), nonce_hex, sig_hex):
+            await ws.close(code=4005, message=b"bad signature")
+            return ws
+
+        await ws.send_json({"type": "welcome"})
+        router.register(user_pubkey_hex, ws)
+
+        # Step 2: receive rpc.response messages from the daemon
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT:
+                continue
+            try:
+                payload = json.loads(msg.data)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") == "rpc.response":
+                rpc_id = payload.get("rpc_id", "")
+                router.deliver_response(rpc_id, payload.get("body") or {})
+
+    finally:
+        if user_pubkey_hex is not None:
+            router.unregister(user_pubkey_hex, ws)
+
+    return ws
+
+
+async def post_rpc(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    user_pubkey_hex = (body.get("user_pubkey") or "").lower()
+    deputy_pubkey_hex = (body.get("deputy_pubkey") or "").lower()
+    if len(user_pubkey_hex) != 64 or len(deputy_pubkey_hex) != 64:
+        return web.json_response({"error": "invalid pubkey lengths"}, status=400)
+
+    router: Router = request.app["router"]
+    if not router.is_online(user_pubkey_hex):
+        return web.json_response(
+            {"error": f"user {user_pubkey_hex[:16]}… not online"},
+            status=503,
+        )
+
+    try:
+        result = await router.call(user_pubkey_hex, body)
+    except web.HTTPException as e:
+        return web.json_response({"error": e.reason}, status=e.status)
+
+    return web.json_response(result)
+
+
 async def _eviction_task(app: web.Application) -> None:
     while True:
         await asyncio.sleep(300)
@@ -188,9 +356,12 @@ async def _eviction_task(app: web.Application) -> None:
 def build_app(buffer_size: int = _DEFAULT_BUFFER_SIZE, ttl: int = _DEFAULT_TTL_SECONDS) -> web.Application:
     app = web.Application(client_max_size=2 * _MAX_CIPHERTEXT_BYTES)
     app["store"] = EventStore(buffer_size=buffer_size, ttl=ttl)
+    app["router"] = Router()
     app.router.add_post("/events", post_events)
     app.router.add_get("/events", get_events)
     app.router.add_get("/health", health)
+    app.router.add_get("/ws", ws_handler)
+    app.router.add_post("/rpc", post_rpc)
 
     async def _start_evictor(app):
         app["evictor_task"] = asyncio.create_task(_eviction_task(app))

@@ -19,12 +19,17 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
 _INFO_FRIENDS_GROUP = b"fisherman/friends-group/v1"
 _INFO_BLOB_AT_REST = b"fisherman/blob-at-rest/v1"
 _INFO_INDEX_COLUMNS = b"fisherman/index-columns/v1"
+_INFO_X25519 = b"fisherman/x25519/v1"
 
 
 class KeyError(RuntimeError):
@@ -71,6 +76,21 @@ def blob_at_rest_key(seed: bytes) -> bytes:
 
 def index_columns_key(seed: bytes) -> bytes:
     return _derive(seed, _INFO_INDEX_COLUMNS, 32)
+
+
+def encryption_keypair(seed: bytes) -> tuple[X25519PrivateKey, bytes]:
+    """X25519 keypair derived from the same ed25519 seed (HKDF-isolated)."""
+    x_seed = _derive(seed, _INFO_X25519, 32)
+    priv = X25519PrivateKey.from_private_bytes(x_seed)
+    pub = priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return priv, pub
+
+
+def x25519_pub_from_seed(seed: bytes) -> bytes:
+    """Convenience: just the public bytes."""
+    return encryption_keypair(seed)[1]
 
 
 def verify_signature(pubkey_bytes: bytes, message: bytes, signature: bytes) -> bool:

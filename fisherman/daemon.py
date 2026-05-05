@@ -5,6 +5,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import structlog
 
+from fisherman import deputy as deputy_acl
+from fisherman import keys as fkeys
+from fisherman import rpc as fisher_rpc
 from fisherman.audio_store import AudioStore
 from fisherman.capture import capture_screen
 from fisherman.config import FishermanConfig
@@ -15,6 +18,7 @@ from fisherman.meeting_detector import MeetingDetector
 from fisherman.ocr import maybe_extract_pdf_context, ocr_fast
 from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
+from fisherman.relay_client import RelayClient
 from fisherman.router import TierRouter
 from fisherman.screenpipe_capture import ScreenpipeCaptureClient, ScreenpipeCaptureError
 from fisherman.streamer import Streamer
@@ -48,6 +52,23 @@ class FishermanDaemon:
         self._in_call = False
         self._call_app: str | None = None
         self._audio_sent = 0
+
+        # Keys for relay/deputy RPC. Loaded eagerly so daemon refuses to
+        # start in a half-broken state if FISH_PRIVATE_KEY is malformed.
+        self._signing_priv = None
+        self._signing_pub: bytes = b""
+        self._x25519_priv = None
+        self._x25519_pub: bytes = b""
+        self._relay_client: RelayClient | None = None
+        self._rpc_handled = 0
+        self._rpc_denied = 0
+        if config.private_key:
+            try:
+                seed = bytes.fromhex(config.private_key)
+                self._signing_priv, self._signing_pub = fkeys.signing_keypair(seed)
+                self._x25519_priv, self._x25519_pub = fkeys.encryption_keypair(seed)
+            except Exception:
+                log.warning("invalid_private_key_for_relay", exc_info=True)
 
     async def _enhance_pdf_context(self, frame, ocr_text: str, urls: list[str]) -> tuple[str, list[str]]:
         loop = asyncio.get_running_loop()
@@ -110,6 +131,16 @@ class FishermanDaemon:
         if self._config.audio_enabled and self._capture_backend == "screenpipe":
             audio_task = asyncio.create_task(self._audio_loop())
 
+        # Connect to relay (RPC mailbox) if we have keys + a configured URL.
+        if self._signing_priv is not None and self._config.ledger_url:
+            self._relay_client = RelayClient(
+                relay_url=self._config.ledger_url,
+                signing_priv=self._signing_priv,
+                user_pubkey_bytes=self._signing_pub,
+                handler=self._handle_rpc,
+            )
+            await self._relay_client.start()
+
         try:
             if _SWIFT_CAPTURE:
                 await self._process_loop()
@@ -127,6 +158,8 @@ class FishermanDaemon:
                     await audio_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            if self._relay_client is not None:
+                await self._relay_client.stop()
             await self._streamer.stop()
             await control.stop()
             self._pool.shutdown(wait=False)
@@ -337,6 +370,9 @@ class FishermanDaemon:
             "in_call": self._in_call,
             "call_app": self._call_app,
             "audio_sent": self._audio_sent,
+            "relay_connected": (self._relay_client.connected if self._relay_client else False),
+            "rpc_handled": self._rpc_handled,
+            "rpc_denied": self._rpc_denied,
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
             if self._capture_backend == "screenpipe":
@@ -344,6 +380,85 @@ class FishermanDaemon:
             else:
                 status["error"] = "screen_recording_not_granted"
         return status
+
+    async def _handle_rpc(self, body: dict) -> dict:
+        """Decrypt request, authorize, dispatch, encrypt response.
+
+        Body shape (from relay): {user_pubkey, deputy_pubkey, ts, eph_pub,
+        ciphertext, sig}. We return either {"ciphertext": "<b64>"} or
+        {"error": "<reason>"}.
+        """
+        if self._x25519_priv is None:
+            return {"error": "no_private_key"}
+        try:
+            parsed = fisher_rpc.parse_request(self._x25519_priv, body)
+        except fisher_rpc.RpcAuthError as e:
+            self._rpc_denied += 1
+            return {"error": f"rpc_auth:{e}"}
+
+        deputy_hex = parsed.deputy_pubkey.hex()
+        ok, reason = deputy_acl.authorize(deputy_hex, parsed.command)
+        if not ok:
+            log.info("deputy_denied", deputy=deputy_hex[:16], cmd=parsed.command, reason=reason)
+            self._rpc_denied += 1
+            response = {"error": reason}
+        else:
+            try:
+                response = await self._dispatch_command(parsed.command, parsed.args)
+                self._rpc_handled += 1
+                log.info("deputy_call", deputy=deputy_hex[:16], cmd=parsed.command)
+            except Exception as e:
+                log.warning("rpc_dispatch_failed", cmd=parsed.command, exc_info=True)
+                response = {"error": f"dispatch:{e}"}
+
+        ciphertext_b64 = fisher_rpc.encrypt_response(parsed.k_resp, response)
+        return {"ciphertext": ciphertext_b64}
+
+    async def _dispatch_command(self, cmd: str, args: dict) -> dict:
+        loop = asyncio.get_running_loop()
+        if cmd == "status":
+            return {"ok": True, "data": self._get_status()}
+
+        if cmd == "query":
+            since = args.get("since_ts")
+            until = args.get("until_ts")
+            app = args.get("app")
+            bundle = args.get("bundle")
+            search = args.get("search")
+            limit = int(args.get("limit") or 50)
+            rows = await loop.run_in_executor(
+                self._pool,
+                lambda: self._frame_store.query(
+                    since_ts=since, until_ts=until, app=app, bundle=bundle,
+                    search=search, limit=limit,
+                ),
+            )
+            return {"ok": True, "data": rows}
+
+        if cmd == "transcripts":
+            since = args.get("since_ts")
+            until = args.get("until_ts")
+            meeting_app = args.get("meeting_app")
+            search = args.get("search")
+            limit = int(args.get("limit") or 200)
+            rows = await loop.run_in_executor(
+                self._pool,
+                lambda: self._audio_store.query(
+                    since_ts=since, until_ts=until, meeting_app=meeting_app,
+                    search=search, limit=limit,
+                ),
+            )
+            return {"ok": True, "data": rows}
+
+        if cmd == "pause":
+            self._privacy.pause()
+            return {"ok": True}
+
+        if cmd == "resume":
+            self._privacy.resume()
+            return {"ok": True}
+
+        return {"error": f"unknown_command:{cmd}"}
 
     async def _audio_loop(self) -> None:
         """Detect calls and forward screenpipe audio transcripts only while in one.

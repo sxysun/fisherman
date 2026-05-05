@@ -111,7 +111,10 @@ def _fmt_ts(ts: float) -> str:
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 def status(port: int, as_text: bool):
     """Show daemon status."""
-    data = _control_request("GET", "/status", port)
+    if _is_remote_mode():
+        data = _remote_call("status", {})
+    else:
+        data = _control_request("GET", "/status", port)
     if not as_text:
         click.echo(json.dumps(data, indent=2))
         return
@@ -156,12 +159,23 @@ def resume(port: int):
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--port", default=7892, help="Control server port")
 def query(since, until, app, bundle, search, limit, as_text, port):
-    """Read your local capture history (OCR + window + URLs)."""
-    qs = _build_query(
-        since=since, until=until, app=app, bundle=bundle,
-        search=search, limit=limit,
-    )
-    rows = _control_request("GET", f"/query{qs}", port, timeout=10.0)
+    """Read your local capture history (OCR + window + URLs).
+
+    Auto-routes via the relay when a deputy config is present
+    (~/.fisherman-deputy/<name>.json or FISHERMAN_DEPUTY_CONFIG env).
+    """
+    if _is_remote_mode():
+        rows = _remote_call("query", {
+            "since_ts": _parse_since_to_ts(since),
+            "until_ts": _parse_since_to_ts(until),
+            "app": app, "bundle": bundle, "search": search, "limit": limit,
+        }) or []
+    else:
+        qs = _build_query(
+            since=since, until=until, app=app, bundle=bundle,
+            search=search, limit=limit,
+        )
+        rows = _control_request("GET", f"/query{qs}", port, timeout=10.0)
     if not as_text:
         click.echo(json.dumps(rows, indent=2))
         return
@@ -189,11 +203,18 @@ def query(since, until, app, bundle, search, limit, as_text, port):
 @click.option("--port", default=7892, help="Control server port")
 def transcripts(since, until, meeting_app, search, limit, as_text, port):
     """Read meeting audio transcripts captured during calls."""
-    qs = _build_query(
-        since=since, until=until, meeting_app=meeting_app,
-        search=search, limit=limit,
-    )
-    rows = _control_request("GET", f"/transcripts{qs}", port, timeout=10.0)
+    if _is_remote_mode():
+        rows = _remote_call("transcripts", {
+            "since_ts": _parse_since_to_ts(since),
+            "until_ts": _parse_since_to_ts(until),
+            "meeting_app": meeting_app, "search": search, "limit": limit,
+        }) or []
+    else:
+        qs = _build_query(
+            since=since, until=until, meeting_app=meeting_app,
+            search=search, limit=limit,
+        )
+        rows = _control_request("GET", f"/transcripts{qs}", port, timeout=10.0)
     if not as_text:
         click.echo(json.dumps(rows, indent=2))
         return
@@ -404,6 +425,20 @@ def _parse_duration(s: str) -> float | None:
     return n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
 
 
+def _parse_since_to_ts(s: str | None) -> float | None:
+    """Convert '5m'/'2h' to absolute unix ts. None passes through."""
+    if not s:
+        return None
+    delta = _parse_duration(s)
+    if delta is not None:
+        import time as _t
+        return _t.time() - delta
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
 @main.command(name="publish-status")
 @click.option("--emoji", default=None)
 @click.option("--category", default=None)
@@ -453,6 +488,234 @@ def ledger_group():
 def ledger_url():
     """Print the configured ledger URL."""
     click.echo(_ledger_url())
+
+
+# ---------------------------------------------------------------------------
+# Deputy provisioning + remote-mode plumbing
+# ---------------------------------------------------------------------------
+
+def _deputy_config_path() -> str | None:
+    """Return path to active deputy config, or None if absent.
+
+    Resolution order:
+      1. FISHERMAN_DEPUTY_CONFIG env (explicit path)
+      2. FISHERMAN_DEPUTY_NAME env (resolves to ~/.fisherman-deputy/<name>.json)
+      3. ~/.fisherman-deputy/default.json
+      4. If exactly one .json file exists in ~/.fisherman-deputy/, use it
+    """
+    explicit = os.environ.get("FISHERMAN_DEPUTY_CONFIG")
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    from fisherman import deputy as _d
+    name = os.environ.get("FISHERMAN_DEPUTY_NAME")
+    if name:
+        p = _d.agent_config_path(name)
+        return p if os.path.exists(p) else None
+    # Default name
+    p = _d.agent_config_path("default")
+    if os.path.exists(p):
+        return p
+    # Only-one fallback
+    agent_dir = os.path.expanduser("~/.fisherman-deputy")
+    if os.path.isdir(agent_dir):
+        configs = [f for f in os.listdir(agent_dir) if f.endswith(".json")]
+        if len(configs) == 1:
+            return os.path.join(agent_dir, configs[0])
+    return None
+
+
+def _is_remote_mode() -> bool:
+    return _deputy_config_path() is not None
+
+
+def _remote_call(command: str, args: dict) -> dict:
+    """Run an RPC call from a deputy host through the relay. Returns the
+    decrypted response dict (which itself has {ok, data} or {error}).
+    """
+    from fisherman import deputy as _d
+    from fisherman import keys as _k
+    from fisherman import rpc as _rpc
+
+    cfg_path = _deputy_config_path()
+    if cfg_path is None:
+        click.echo("no deputy config; can't run remote", err=True)
+        sys.exit(2)
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+
+    user_pubkey_hex = cfg["user_pubkey"]
+    user_x25519_pub = bytes.fromhex(cfg["user_x25519_pub"])
+    deputy_seed = bytes.fromhex(cfg["deputy_seed"])
+    relay_url = cfg["relay_url"]
+
+    deputy_priv, deputy_pub = _k.signing_keypair(deputy_seed)
+    import time as _t
+    built = _rpc.build_request(
+        user_pubkey_hex=user_pubkey_hex,
+        user_x25519_pub=user_x25519_pub,
+        deputy_priv=deputy_priv,
+        deputy_pubkey_bytes=deputy_pub,
+        command=command,
+        args=args,
+        ts=_t.time(),
+    )
+
+    url = relay_url.rstrip("/") + "/rpc"
+    body = json.dumps(built.body).encode()
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            outer = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read()).get("error", "")
+        except Exception:
+            err = e.reason
+        click.echo(f"relay error: {err}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"relay unreachable: {e}", err=True)
+        sys.exit(1)
+
+    if "error" in outer:
+        click.echo(f"daemon error: {outer['error']}", err=True)
+        sys.exit(1)
+    if "ciphertext" not in outer:
+        click.echo(f"unexpected relay response: {outer!r}", err=True)
+        sys.exit(1)
+    inner = _rpc.decrypt_response(built.k_resp, outer["ciphertext"])
+    if "error" in inner:
+        click.echo(f"daemon error: {inner['error']}", err=True)
+        sys.exit(1)
+    return inner.get("data") if "data" in inner else inner
+
+
+@main.group(name="deputy")
+def deputy_group():
+    """Authorize remote agents to query your context."""
+
+
+@deputy_group.command(name="new")
+@click.option("--name", required=True, help="Display name for this deputy (e.g. hermes)")
+@click.option("--scopes", required=True, help="Comma-sep scopes (read:captures,read:transcripts,publish:status,...)")
+@click.option("--rate", default=60, show_default=True, help="Requests per hour limit")
+@click.option("--expires", default=None, help="Optional expiry (e.g. '30d', '24h')")
+def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
+    """Mint a new deputy keypair, authorize it locally, print a setup token."""
+    from fisherman import deputy as _d
+    from fisherman import keys as _k
+    import secrets as _s
+
+    priv, pub, _ = _load_keys()  # ensures FISH_PRIVATE_KEY is valid
+    user_seed = _k.load_seed()
+    _, user_x_pub = _k.encryption_keypair(user_seed)
+
+    scope_list = [s.strip() for s in scopes.split(",") if s.strip()]
+    if not scope_list:
+        click.echo("at least one --scope is required", err=True)
+        sys.exit(2)
+
+    expires_at: float | None = None
+    if expires:
+        delta = _parse_duration(expires)
+        if delta is None:
+            click.echo(f"invalid --expires: {expires}", err=True)
+            sys.exit(2)
+        import time as _t
+        expires_at = _t.time() + delta
+
+    deputy_seed = _s.token_bytes(32)
+    deputy_priv, deputy_pub = _k.signing_keypair(deputy_seed)
+
+    record = _d.add_deputy(
+        name=name,
+        pubkey_hex=deputy_pub.hex(),
+        scopes=scope_list,
+        rate_per_hour=int(rate),
+        expires_at=expires_at,
+    )
+
+    token = _d.encode_setup_token({
+        "u":  pub.hex(),
+        "ux": user_x_pub.hex(),
+        "n":  name,
+        "k":  deputy_seed.hex(),
+        "r":  _ledger_url(),
+        "s":  ",".join(scope_list),
+        "rate": int(rate),
+        "e":  expires_at,
+    })
+    click.echo(f"deputy authorized: {record['name']} ({record['pubkey'][:12]}…)")
+    click.echo("")
+    click.echo("Setup token (copy to agent host):")
+    click.echo("")
+    click.echo(token)
+    click.echo("")
+    click.echo("On the agent host run:")
+    click.echo(f"  fisherman deputy register '{token[:32]}…'")
+
+
+@deputy_group.command(name="register")
+@click.argument("token")
+@click.option("--name", default=None, help="Override config filename")
+def deputy_register(token: str, name: str | None):
+    """Register a deputy on this (agent) host using a setup token from your laptop."""
+    from fisherman import deputy as _d
+    try:
+        payload = _d.decode_setup_token(token)
+    except Exception as e:
+        click.echo(f"bad token: {e}", err=True)
+        sys.exit(2)
+
+    cfg = {
+        "user_pubkey":     payload["u"],
+        "user_x25519_pub": payload["ux"],
+        "deputy_name":     payload["n"],
+        "deputy_seed":     payload["k"],
+        "relay_url":       payload["r"],
+        "scopes":          payload.get("s", "").split(","),
+        "rate_per_hour":   payload.get("rate"),
+        "expires_at":      payload.get("e"),
+    }
+    saved = _d.save_agent_config(cfg, name=name or payload["n"])
+    click.echo(f"registered: {payload['n']}")
+    click.echo(f"  config:  {saved}")
+    click.echo(f"  user:    {payload['u'][:16]}…")
+    click.echo(f"  relay:   {payload['r']}")
+    click.echo(f"  scopes:  {payload.get('s', '')}")
+
+
+@deputy_group.command(name="list")
+@click.option("--text", "as_text", is_flag=True)
+def deputy_list(as_text: bool):
+    """List deputies authorized on the local daemon."""
+    from fisherman import deputy as _d
+    rows = _d.list_deputies()
+    if not as_text:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo("(no deputies authorized)")
+        return
+    for r in rows:
+        scopes = ",".join(r.get("scopes") or [])
+        exp = r.get("expires_at")
+        exp_s = _fmt_ts(exp) if exp else "never"
+        click.echo(f"{r['name']:18}  {r['pubkey'][:16]}…  rate={r.get('rate_per_hour')}/hr  exp={exp_s}")
+        click.echo(f"  scopes: {scopes}")
+
+
+@deputy_group.command(name="revoke")
+@click.argument("name_or_pubkey")
+def deputy_revoke(name_or_pubkey: str):
+    """Revoke a deputy by name or pubkey."""
+    from fisherman import deputy as _d
+    if _d.remove_deputy(name_or_pubkey):
+        click.echo(f"revoked: {name_or_pubkey}")
+    else:
+        click.echo(f"not found: {name_or_pubkey}", err=True)
+        sys.exit(1)
 
 
 @main.command(name="install-service")
