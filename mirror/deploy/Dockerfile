@@ -68,4 +68,4 @@ EXPOSE 5001 5003
 # In TDX deployments dstack-KMS provisions secrets to /etc/secrets/* and
 # the mirror reads them at startup. Locally `docker compose up` provides
 # an env-file with the same shape.
-CMD ["python", "-u", "-m", "mirror.cli", "serve"]
+CMD ["python", "-u", "-m", "mirror.server"]
