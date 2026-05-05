@@ -1,5 +1,44 @@
 # Setup — Fisherman Cloud TEE deployment
 
+## Status (2026-05-05)
+
+| What | State | Where |
+|---|---|---|
+| Container image | ✅ published | `ghcr.io/sxysun/fisherman-mirror:latest` (and per-sha) |
+| FishermanAppAuth | ✅ deployed | Eth Sepolia: `0x55b25eD5CA3c6ec9C05330F8958edcfCA3C9e922` ([etherscan](https://sepolia.etherscan.io/address/0x55b25eD5CA3c6ec9C05330F8958edcfCA3C9e922)) |
+| OWNER_PK secret | ✅ set | `0xa0eBcd…F9C0` deployer (0.335 ETH on Eth Sepolia) |
+| BASESCAN_KEY | ✅ set | shared with feedling |
+| ETH_SEPOLIA_RPC_URL | ✅ set | publicnode.com |
+| PHALA_CLOUD_API_KEY | ✅ set | `phak_q0TC…` (amiller workspace, currently active in your local CLI) |
+| PHALA_NODE_ID | ✅ var = 18 | prod9 node |
+| PHALA_GATEWAY | ✅ var | `dstack-pha-prod9.phala.network` |
+| FISHERMAN_APP_AUTH_ETH_SEPOLIA | ✅ var | `0x55b25e…e922` |
+| CF_API_TOKEN | ❌ **needs user** | mint at https://dash.cloudflare.com/profile/api-tokens (Zone.DNS:Edit on the chosen zone) |
+| CF_ZONE_ID | ❌ **needs user** | from CF dashboard → domain → overview → zone id |
+| MIRROR_DOMAIN | ❌ **needs user** | e.g. `mirror.fisherman.example` (must be on the CF zone above) |
+
+Once those three are populated:
+
+```sh
+gh secret set CF_API_TOKEN -R sxysun/fisherman --body "<your-token>"
+gh variable set CF_ZONE_ID  -R sxysun/fisherman --body "<your-zone-id>"
+gh variable set MIRROR_DOMAIN -R sxysun/fisherman --body "<your-domain>"
+
+# Then bootstrap the CVM
+gh workflow run bootstrap-cvm.yml -R sxysun/fisherman -f confirm=yes
+```
+
+CI infrastructure (verified end-to-end on push):
+- `ci.yml` — 3 jobs (python, forge test, repro build) — green
+- `docker-publish.yml` — image push + GHCR public visibility — green
+- `contract-deploy.yml` — forge deploy + variable persist — green
+- `bootstrap-cvm.yml` / `deploy-cvm.yml` / `attestation-monitor.yml` — wired,
+  blocked on CF + MIRROR_DOMAIN
+
+---
+
+
+
 Step-by-step bring-up of the hosted Fisherman Cloud (Phala TDX CVM)
 fronted by an on-chain `FishermanAppAuth` contract on Base Sepolia.
 
