@@ -276,7 +276,75 @@ async def _build_health_app(server: "MirrorServer") -> web.Application:
     return app
 
 
+async def _build_unpaired_health_app() -> web.Application:
+    """Health app for the unpaired-CVM case: /health returns 'unpaired'
+    so dstack-ingress sees a 200 and can start serving TLS, but the
+    response makes it obvious the mirror isn't ready for RPC yet."""
+    app = web.Application()
+
+    async def health(_):
+        return web.Response(text="unpaired")
+
+    async def attestation(_):
+        bundle = {
+            "fisherman_release": {
+                "git_commit": os.environ.get("FISHERMAN_GIT_COMMIT", "dev"),
+                "built_at":   os.environ.get("FISHERMAN_BUILT_AT", "dev"),
+                "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST", "sha256:dev"),
+            },
+            "paired": False,
+            "mirror_pubkey": None,
+            "user_pubkey":   None,
+            "tdx_quote_hex": "",
+            "event_log":     [],
+        }
+        for path in ("/var/run/dstack.sock-quote", "/run/dstack/quote"):
+            if os.path.exists(path):
+                try:
+                    with open(path, "rb") as f:
+                        bundle["tdx_quote_hex"] = f.read().hex()
+                    break
+                except OSError:
+                    pass
+        return web.json_response(bundle)
+
+    app.router.add_get("/health", health)
+    app.router.add_get("/.well-known/attestation", attestation)
+    return app
+
+
 async def amain():
+    # First: bring up the HTTP server unconditionally. The CVM boot path
+    # needs /health to come up so dstack-ingress can issue LE certs and
+    # the bootstrap workflow can proceed past the wait step. After that,
+    # the user pairs from the menubar — which provisions env vars and
+    # we restart into the paired mode (or the user kicks the container).
+    paired_env_vars = ["MIRROR_USER_PUBKEY", "MIRROR_USER_X25519_PRIV",
+                       "MIRROR_BLOB_KEY", "MIRROR_RELAY_URL", "MIRROR_STORAGE_PATH"]
+    paired = all(os.environ.get(v) for v in paired_env_vars)
+
+    if not paired:
+        log.warning("mirror_unpaired",
+                    msg="MIRROR_* env not provided — running in unpaired mode "
+                        "(/health returns 'unpaired'). Pair via menubar.")
+        app = await _build_unpaired_health_app()
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", 5001)
+        await site.start()
+        log.info("mirror_http_started", port=5001, mode="unpaired")
+
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, stop_event.set)
+        try:
+            await stop_event.wait()
+        finally:
+            await runner.cleanup()
+        return
+
+    # Paired path — original code.
     user_pubkey = bytes.fromhex(_require_env("MIRROR_USER_PUBKEY"))
     x_priv = X25519PrivateKey.from_private_bytes(
         bytes.fromhex(_require_env("MIRROR_USER_X25519_PRIV"))
@@ -307,13 +375,12 @@ async def amain():
              mirror=server.mirror_pubkey.hex()[:16])
     await server.start()
 
-    # HTTP /health + /.well-known/attestation for dstack-ingress + audit clients
     health_app = await _build_health_app(server)
     runner = web.AppRunner(health_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 5001)
     await site.start()
-    log.info("mirror_http_started", port=5001)
+    log.info("mirror_http_started", port=5001, mode="paired")
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

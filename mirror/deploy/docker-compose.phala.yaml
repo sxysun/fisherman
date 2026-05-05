@@ -14,17 +14,17 @@
 name: fisherman-mirror
 
 services:
-  # --- TLS termination + LE for mirror.fisherman.app ---
+  # --- TLS termination + LE for ${DOMAIN} ---
   ingress:
     image: dstacktee/dstack-ingress:2.2@sha256:d05a7b343c37c1cca1bba8dbf7e8f3c6d2118158af2d41c455103796db4f67f0
     restart: unless-stopped
     ports:
       - "443:443"
     environment:
-      - DOMAIN=mirror.fisherman.app
-      - CF_API_TOKEN=${CF_API_TOKEN}
-      - CF_ZONE_ID=${CF_ZONE_ID}
-      - LE_EMAIL=admin@fisherman.app
+      - DOMAIN=${DOMAIN:?Set DOMAIN — passed by phala deploy -e DOMAIN=...}
+      - CF_API_TOKEN=${CF_API_TOKEN:?Set CF_API_TOKEN}
+      - CF_ZONE_ID=${CF_ZONE_ID:?Set CF_ZONE_ID}
+      - LE_EMAIL=admin@${DOMAIN}
       - UPSTREAM_HOST=mirror
       - UPSTREAM_PORT=5001
     volumes:
@@ -33,17 +33,12 @@ services:
 
   # --- fisherman-mirror endpoint ---
   mirror:
-    image: ghcr.io/sxysun/fisherman-mirror:${FISHERMAN_IMAGE_TAG}@${FISHERMAN_IMAGE_DIGEST}
+    image: ghcr.io/sxysun/fisherman-mirror:latest
     restart: unless-stopped
     environment:
       - FISHERMAN_DATA_DIR=/data
-      # dstack-KMS mounts these at boot via /etc/secrets/<name>; we
-      # symlink them into the mirror's expected env-var contract in
-      # the entrypoint via a small wrapper (mirror/deploy/entrypoint.sh).
-      - DSTACK_KMS_PATH=/etc/secrets
     volumes:
       - mirror-data:/data
-      - dstack-secrets:/etc/secrets:ro
     expose:
       - "5001"
       - "5003"
@@ -52,6 +47,3 @@ volumes:
   mirror-data:
   letsencrypt:
   ingress-state:
-  dstack-secrets:
-    external: true
-    name: dstack_secrets
