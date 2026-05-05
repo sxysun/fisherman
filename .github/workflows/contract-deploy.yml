@@ -14,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       chain:
-        description: 'base_sepolia | base_mainnet'
+        description: 'eth_sepolia | base_sepolia | base_mainnet'
         required: true
-        default: 'base_sepolia'
+        default: 'eth_sepolia'
       verify:
         description: 'Run forge verify-contract after deploy'
         required: false
@@ -34,6 +34,7 @@ jobs:
       contents: write   # for the variable / DEPLOYMENTS.md update
     env:
       OWNER_PK:             ${{ secrets.OWNER_PK }}
+      ETH_SEPOLIA_RPC_URL:  ${{ secrets.ETH_SEPOLIA_RPC_URL }}
       BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
       BASE_MAINNET_RPC_URL: ${{ secrets.BASE_MAINNET_RPC_URL }}
       BASESCAN_KEY:         ${{ secrets.BASESCAN_KEY }}
