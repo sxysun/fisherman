@@ -1,0 +1,76 @@
+name: Attestation monitor
+
+# Hourly cron that fetches /.well-known/attestation from the live CVM
+# and verifies it. Opens a tracking issue if anything fails.
+#
+# Required:
+#   secrets.BASE_SEPOLIA_RPC_URL
+#   variables.MIRROR_DOMAIN
+#   variables.FISHERMAN_APP_AUTH_BASE_SEPOLIA
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # hourly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    if: ${{ vars.MIRROR_DOMAIN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet pycryptodome
+
+      - name: verify_attestation
+        id: verify
+        env:
+          MIRROR_URL: https://${{ vars.MIRROR_DOMAIN }}
+          RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
+          CONTRACT: ${{ vars.FISHERMAN_APP_AUTH_BASE_SEPOLIA }}
+        run: |
+          python <<'PY' | tee /tmp/result.txt
+          import os, sys, json
+          sys.path.insert(0, ".")
+          from fisherman.attestation import verify_attestation
+          res = verify_attestation(
+              mirror_url=os.environ["MIRROR_URL"],
+              rpc_url=os.environ.get("RPC_URL") or None,
+              contract_address=os.environ.get("CONTRACT") or None,
+          )
+          print(json.dumps({
+              "ok": res.ok,
+              "errors": res.errors,
+              "git_commit": res.git_commit,
+              "image_digest": res.image_digest,
+              "compose_hash_hex": (res.compose_hash.hex() if res.compose_hash else None),
+              "rtmr3_replays_ok": res.rtmr3_replays_ok,
+              "on_chain_allowed": res.on_chain_allowed,
+          }, indent=2))
+          if not res.ok:
+              raise SystemExit(1)
+          PY
+
+      - name: Open issue if attestation failed
+        if: ${{ failure() }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const out = fs.existsSync('/tmp/result.txt') ? fs.readFileSync('/tmp/result.txt', 'utf8') : 'no output';
+            const title = `Attestation failed at ${new Date().toISOString()}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title,
+              body: '```\n' + out + '\n```\n\nWorkflow: ' + context.runId,
+              labels: ['attestation', 'incident'],
+            });

@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python — import + smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync dependencies (skip pyobjc — Linux runner)
+        run: |
+          # The full project pulls pyobjc which won't install on Linux.
+          # We install only the deps the relay/mirror/agent loop need.
+          uv venv
+          uv pip install \
+              cryptography \
+              websockets \
+              aiohttp \
+              click \
+              structlog \
+              pydantic-settings \
+              imagehash \
+              Pillow \
+              pycryptodome
+
+      - name: Import-time sanity (Linux-portable subset)
+        run: |
+          source .venv/bin/activate
+          python -c "
+          from fisherman.attestation import keccak256, function_selector, parse_tdx_quote, replay_event_log
+          from fisherman.blob_store import MemoryBlobStore, LocalFSBlobStore, S3CompatibleBlobStore, WebDAVBlobStore, GoogleDriveBlobStore, from_config
+          from fisherman.sync import MirrorSync, decrypt_uploaded
+          from fisherman.keys import friends_group_key, signing_keypair, encryption_keypair
+          from fisherman.rpc import build_request, parse_request, encrypt_response, decrypt_response
+          from fisherman.friends import encode_code, decode_code
+          from fisherman.deputy import encode_setup_token, decode_setup_token
+          from relay.server import build_app, Router, Endpoint, _pick
+          from mirror.server import MirrorServer, _authorize_from_list
+          from mirror.cli import _decode_token
+          from mirror.query import query_frames, query_transcripts
+          print('all imports ok')
+          "
+
+      - name: keccak256 against known vectors
+        run: |
+          source .venv/bin/activate
+          python -c "
+          from fisherman.attestation import keccak256, function_selector
+          assert keccak256(b'').hex() == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
+          assert keccak256(b'hello').hex() == '1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8'
+          assert function_selector('isAppAllowed(bytes32)').hex() == '90144031'
+          assert function_selector('addComposeHash(bytes32)').hex() == 'dfc77223'
+          print('selectors ok')
+          "
+
+      - name: RPC + relay roundtrip
+        run: |
+          source .venv/bin/activate
+          python -c "
+          import os, secrets, time, asyncio
+          os.environ['FISH_PRIVATE_KEY'] = secrets.token_hex(32)
+          from fisherman import keys, rpc
+          seed = keys.load_seed()
+          sign_priv, sign_pub = keys.signing_keypair(seed)
+          x_priv, x_pub = keys.encryption_keypair(seed)
+          dep_priv, dep_pub = keys.signing_keypair(secrets.token_bytes(32))
+          br = rpc.build_request(sign_pub.hex(), x_pub, dep_priv, dep_pub, 'query', {'limit': 5}, time.time())
+          parsed = rpc.parse_request(x_priv, br.body)
+          assert parsed.command == 'query'
+          ct = rpc.encrypt_response(parsed.k_resp, {'ok': True, 'data': []})
+          resp = rpc.decrypt_response(br.k_resp, ct)
+          assert resp == {'ok': True, 'data': []}
+          print('rpc roundtrip ok')
+          "
+
+  contracts:
+    name: Solidity — forge test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Install forge-std
+        run: |
+          cd contracts
+          forge install foundry-rs/forge-std --no-commit --no-git || true
+
+      - name: Run tests
+        run: |
+          cd contracts
+          forge test -vvv
+
+  build-repro:
+    name: Reproducible build (single-pass)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (no second pass — saves CI time)
+        run: |
+          # Single pass + capture digest; full reproducibility check
+          # only runs on tag releases (separate workflow).
+          docker buildx build \
+            --build-arg SOURCE_DATE_EPOCH=0 \
+            --build-arg FISHERMAN_GIT_COMMIT=dev \
+            --build-arg FISHERMAN_BUILT_AT=dev \
+            --build-arg FISHERMAN_IMAGE_DIGEST=sha256:dev \
+            --no-cache \
+            -f mirror/deploy/Dockerfile \
+            --output type=oci,dest=/tmp/build1.tar,rewrite-timestamp=true \
+            .
+          sha256sum /tmp/build1.tar

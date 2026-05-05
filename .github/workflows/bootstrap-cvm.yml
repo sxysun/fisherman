@@ -1,0 +1,198 @@
+name: Bootstrap fisherman-mirror CVM (one-time)
+
+# One-time deploy of the fisherman-mirror Phala TDX CVM. Captures the
+# resulting app_id + vm_uuid and stores them as repo variables so the
+# recurring deploy-cvm workflow can upgrade in-place.
+#
+# NOT idempotent — re-running creates a SECOND CVM with the same name.
+# Pre-flight guards against this by checking for an existing CVM with
+# the configured name; delete the old one manually (`phala cvms delete
+# <uuid>`) before re-triggering.
+#
+# Required secrets:
+#   PHALA_CLOUD_API_KEY    Phala Cloud API token (from cloud.phala.com)
+#   CF_API_TOKEN           Cloudflare token with Zone.DNS:Edit on your domain
+#   CF_ZONE_ID             Cloudflare zone id for fisherman.app (or your domain)
+#   OWNER_PK               private key authorized to call addComposeHash()
+#   BASE_SEPOLIA_RPC_URL   testnet RPC for the on-chain step
+#
+# Required variables:
+#   FISHERMAN_APP_AUTH_BASE_SEPOLIA   set by contract-deploy workflow
+#
+# Set BEFORE running:
+#   secrets.MIRROR_DOMAIN                e.g. mirror.fisherman.app
+#   variables.PHALA_NODE_ID              numeric node id (currently prod9 = "18")
+#   variables.PHALA_GATEWAY              dstack-pha-prod9.phala.network
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "yes" to confirm you want to spin up a NEW CVM'
+        required: true
+        default: 'no'
+
+concurrency:
+  group: bootstrap-cvm
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: deploy fisherman-mirror to ${{ vars.PHALA_GATEWAY }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      CVM_NAME:     fisherman-mirror
+      NODE_ID:      ${{ vars.PHALA_NODE_ID }}
+      GATEWAY:      ${{ vars.PHALA_GATEWAY }}
+      COMPOSE_FILE: mirror/deploy/docker-compose.phala.yaml
+      MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
+
+    steps:
+      - name: Gate on explicit confirmation
+        if: ${{ github.event.inputs.confirm != 'yes' }}
+        run: |
+          echo "::error::confirm must be 'yes'; got '${{ github.event.inputs.confirm }}'"
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install phala CLI + jq + foundry
+        run: |
+          npm install -g phala
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq curl
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      # ---------------------------------------------------------------
+      # Pre-flight: bail out if a CVM with our name already exists.
+      # ---------------------------------------------------------------
+      - name: Pre-flight — assert no existing CVM
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          set -euo pipefail
+          EXISTING=$(phala cvms list --api-token "$PHALA_CLOUD_API_KEY" -j 2>/dev/null \
+              | jq -r --arg n "$CVM_NAME" '.[] | select(.name == $n) | .vm_uuid' || true)
+          if [[ -n "$EXISTING" ]]; then
+            echo "::error::CVM '$CVM_NAME' already exists at vm_uuid=$EXISTING"
+            echo "::error::Delete with: phala cvms delete $EXISTING"
+            exit 1
+          fi
+
+      - name: phala deploy
+        id: deploy
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+          CF_API_TOKEN:        ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID:          ${{ secrets.CF_ZONE_ID }}
+        run: |
+          set -euo pipefail
+          echo ">>> phala deploy -n $CVM_NAME --node-id $NODE_ID -c $COMPOSE_FILE"
+          phala deploy \
+            --api-token "$PHALA_CLOUD_API_KEY" \
+            -n "$CVM_NAME" \
+            -c "$COMPOSE_FILE" \
+            --node-id "$NODE_ID" \
+            -e CF_API_TOKEN="$CF_API_TOKEN" \
+            -e CF_ZONE_ID="$CF_ZONE_ID" \
+            -e DOMAIN="$MIRROR_DOMAIN" \
+            --wait -j 2>&1 | tee /tmp/deploy.log
+
+          # Tail of the log is a JSON document — extract app_id + vm_uuid
+          JSON=$(tac /tmp/deploy.log | awk '/^}/{p=1} p; /^{/{exit}' | tac)
+          APP_ID=$(echo "$JSON" | jq -r '.app_id // .data.app_id // empty')
+          VM_UUID=$(echo "$JSON" | jq -r '.vm_uuid // .data.vm_uuid // .uuid // empty')
+          if [[ -z "$APP_ID" || -z "$VM_UUID" ]]; then
+            echo "::error::failed to extract app_id/vm_uuid from phala deploy output"
+            exit 1
+          fi
+          echo "app_id=$APP_ID"   >> "$GITHUB_OUTPUT"
+          echo "vm_uuid=$VM_UUID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for ingress + LE certs
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( $(date +%s) + 600 ))   # 10 min
+          while [[ $(date +%s) -lt $DEADLINE ]]; do
+            HTTP=$(curl -sk -o /dev/null -w "%{http_code}" "https://$MIRROR_DOMAIN/health" || true)
+            echo "  https://$MIRROR_DOMAIN/health → $HTTP"
+            if [[ "$HTTP" == "200" ]]; then exit 0; fi
+            sleep 15
+          done
+          echo "::error::ingress never came up at https://$MIRROR_DOMAIN/health"
+          exit 1
+
+      - name: Compute compose_hash + publish on-chain
+        env:
+          OWNER_PK:             ${{ secrets.OWNER_PK }}
+          BASE_SEPOLIA_RPC_URL: ${{ secrets.BASE_SEPOLIA_RPC_URL }}
+          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_BASE_SEPOLIA }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CONTRACT" ]]; then
+            echo "::warning::FISHERMAN_APP_AUTH_BASE_SEPOLIA variable not set; skipping on-chain step"
+            exit 0
+          fi
+          HASH=$(sha256sum "$COMPOSE_FILE" | awk '{print $1}')
+          echo "compose_hash: 0x$HASH"
+          # Idempotent: skip if already allowed
+          ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x$HASH" \
+              --rpc-url "$BASE_SEPOLIA_RPC_URL" || echo "false")
+          if [[ "$ALLOWED" == "true" ]]; then
+            echo "compose_hash already on-chain — skipping addComposeHash()"
+            exit 0
+          fi
+          cast send "$CONTRACT" 'addComposeHash(bytes32)' "0x$HASH" \
+              --rpc-url "$BASE_SEPOLIA_RPC_URL" \
+              --private-key "$OWNER_PK"
+
+      - name: Persist CVM ids as variables
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh variable set CVM_APP_ID  --body "${{ steps.deploy.outputs.app_id }}"
+          gh variable set CVM_VM_UUID --body "${{ steps.deploy.outputs.vm_uuid }}"
+
+      - name: Append to DEPLOYMENTS.md
+        run: |
+          {
+            echo ""
+            echo "### $(date -u +%Y-%m-%d) — fisherman-mirror CVM ($GATEWAY)"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Provider | Phala Cloud |"
+            echo "| Node | $GATEWAY (id: $NODE_ID) |"
+            echo "| Name | $CVM_NAME |"
+            echo "| App ID | \`${{ steps.deploy.outputs.app_id }}\` |"
+            echo "| VM UUID | \`${{ steps.deploy.outputs.vm_uuid }}\` |"
+            echo "| Compose | \`$COMPOSE_FILE\` @ \`$(git rev-parse --short HEAD)\` |"
+            echo "| Domain | $MIRROR_DOMAIN |"
+            echo "| Workflow run | https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} |"
+          } >> mirror/deploy/DEPLOYMENTS.md
+          git config user.name  "fisherman-ci"
+          git config user.email "ci@fisherman.app"
+          git add mirror/deploy/DEPLOYMENTS.md
+          git commit -m "deploy: bootstrap fisherman-mirror CVM (app_id ${{ steps.deploy.outputs.app_id }}) [skip ci]" || true
+          git push || true
+
+      - name: Summary
+        run: |
+          {
+            echo "## CVM bootstrapped"
+            echo "- App ID: \`${{ steps.deploy.outputs.app_id }}\`"
+            echo "- VM UUID: \`${{ steps.deploy.outputs.vm_uuid }}\`"
+            echo "- Domain: https://$MIRROR_DOMAIN"
+            echo "- Dashboard: https://cloud.phala.com/dashboard/cvms/${{ steps.deploy.outputs.vm_uuid }}"
+          } >> "$GITHUB_STEP_SUMMARY"
