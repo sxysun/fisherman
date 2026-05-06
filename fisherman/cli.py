@@ -3,7 +3,9 @@ import datetime
 import json
 import os
 import signal
+import subprocess
 import sys
+import time
 import urllib.parse
 import urllib.request
 
@@ -232,6 +234,575 @@ def transcripts(since, until, meeting_app, search, limit, as_text, port, source_
         app_n = r.get("meeting_app") or "?"
         side = "→" if r.get("is_input_device") else "←"
         click.echo(f"[{ts}] {app_n} {side} {r.get('transcript', '')}")
+
+
+@main.command()
+@click.argument("mirror_url")
+@click.option("--rpc-url", "rpc_url", envvar="FISHERMAN_ETH_RPC_URL", default=None,
+              help="Ethereum RPC URL for the on-chain isAppAllowed check "
+                   "(e.g. an Infura/Alchemy Sepolia endpoint).")
+@click.option("--contract", "contract_address", envvar="FISHERMAN_APP_AUTH_CONTRACT",
+              default=None,
+              help="Address of the FishermanAppAuth contract on the chain "
+                   "the mirror is registered against.")
+@click.option("--expected-mrtd", "expected_mrtd_hex", default=None,
+              help="If provided, also pin-check that the live MRTD matches "
+                   "this hex string (paste the value baked into your menubar dmg).")
+@click.option("--json", "as_json", is_flag=True,
+              help="Machine-readable output instead of the green/red table.")
+@click.option("--timeout", default=15.0, show_default=True,
+              help="HTTP timeout for fetching /.well-known/attestation.")
+def audit(mirror_url, rpc_url, contract_address, expected_mrtd_hex, as_json, timeout):
+    """Verify a fisherman-mirror's TEE attestation end-to-end.
+
+    Mirrors the rigour of feedling-mcp-v1's tools/audit_live_cvm.py:
+    structural quote parse, body ECDSA, PCK chain to bundled Intel SGX
+    Root CA, QE report binding, mr_config_id ↔ compose_hash, RTMR3
+    event-log replay, and (optional) on-chain isAppAllowed lookup.
+
+    Exit code is 0 only when every required row passes.
+    """
+    import hashlib as _hash
+    import socket as _sock
+    import ssl as _ssl
+    import urllib.parse as _up
+
+    from fisherman import attestation as _att
+
+    # Best-effort: capture sha256(cert.DER) of the live TLS handshake so
+    # we can evaluate the TLS-binding row (when the bundle carries an
+    # attested fingerprint). Skip cleanly for http:// or unreachable hosts.
+    live_tls_fp: str | None = None
+    parsed = _up.urlparse(mirror_url)
+    if parsed.scheme == "https":
+        host, port = parsed.hostname, parsed.port or 443
+        try:
+            ctx = _ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _ssl.CERT_NONE  # we pin separately, don't CA-verify here
+            with _sock.create_connection((host, port), timeout=timeout) as raw:
+                with ctx.wrap_socket(raw, server_hostname=host) as s:
+                    der = s.getpeercert(binary_form=True)
+            live_tls_fp = _hash.sha256(der).hexdigest()
+        except Exception as e:
+            live_tls_fp = None
+            if not as_json:
+                click.echo(f"  (skipping live TLS fingerprint capture: {e})", err=True)
+
+    res = _att.verify_attestation(
+        mirror_url,
+        expected_mrtd_hex=expected_mrtd_hex,
+        rpc_url=rpc_url,
+        contract_address=contract_address,
+        live_tls_cert_sha256_hex=live_tls_fp,
+        timeout=timeout,
+    )
+
+    if as_json:
+        out = _audit_to_json(res, mirror_url=mirror_url, live_tls_fp=live_tls_fp)
+        click.echo(json.dumps(out, indent=2))
+        sys.exit(0 if res.all_required_ok else 1)
+
+    _audit_print_table(res, mirror_url=mirror_url, live_tls_fp=live_tls_fp,
+                       has_onchain_inputs=bool(rpc_url and contract_address))
+    sys.exit(0 if res.all_required_ok else 1)
+
+
+def _audit_print_table(res, *, mirror_url: str, live_tls_fp: str | None,
+                       has_onchain_inputs: bool) -> None:
+    """Render an `AttestationResult` as a green/red row table — same
+    shape as feedling-mcp-v1/tools/audit_live_cvm.py's output."""
+    rows: list[tuple[str, bool | None, str]] = []
+    meas = res.measurements
+
+    if res.quote_parsed_ok and meas:
+        row1_detail = (
+            f"mrtd={meas.mrtd.hex()[:16]}…  rtmr3={meas.rtmr3.hex()[:16]}…"
+        )
+    else:
+        row1_detail = res.errors[0] if res.errors else "no quote in bundle"
+    rows.append((
+        "/.well-known/attestation reachable + TDX v4 quote parses",
+        res.quote_parsed_ok, row1_detail,
+    ))
+
+    if res.sig_data_parsed_ok and res.signature_data:
+        chain_n = len(res.pck_chain.chain) if res.pck_chain else 0
+        row2_detail = (
+            f"pck chain {chain_n} certs, qe_report 384B, "
+            f"qe_auth {len(res.signature_data.qe_auth_data)}B"
+        )
+    elif res.quote_parsed_ok:
+        row2_detail = next(
+            (e for e in res.errors if e.startswith("signature_data_")),
+            "signature_data parse failed",
+        )
+    else:
+        row2_detail = "(blocked by parse error above)"
+    rows.append((
+        "Quote signature_data parses (qe_cert_data_type=6)",
+        res.sig_data_parsed_ok, row2_detail,
+    ))
+
+    if not res.sig_data_parsed_ok:
+        body_detail = "(blocked by signature_data parse error above)"
+    elif res.body_sig_ok:
+        body_detail = "verified under embedded attestation pubkey"
+    else:
+        body_detail = ("signature did not verify "
+                       "(expected on dstack simulator quotes; "
+                       "real TDX hardware always passes)")
+    rows.append((
+        "Body ECDSA-P256 signature valid", res.body_sig_ok, body_detail,
+    ))
+
+    if not res.sig_data_parsed_ok:
+        chain_detail = "(blocked by signature_data parse error above)"
+    elif res.pck_chain and res.pck_chain.error:
+        chain_detail = res.pck_chain.error
+    else:
+        chain_detail = "leaf → platform CA → SGX Root, all signatures verified"
+    rows.append((
+        "PCK cert chain → bundled Intel SGX Root CA",
+        res.pck_chain_ok, chain_detail,
+    ))
+
+    if not res.sig_data_parsed_ok:
+        qe_detail = "(blocked by signature_data parse error above)"
+    elif res.qe_verdict:
+        qe_detail = (
+            f"sig_by_pck_leaf={res.qe_verdict.signature_valid}  "
+            f"report_data_binding={res.qe_verdict.report_data_valid}"
+        )
+    else:
+        qe_detail = "(no QE verdict)"
+    rows.append((
+        "Intel QE report ties attestation key to PCK",
+        res.qe_report_ok, qe_detail,
+    ))
+
+    # mr_config_id binding row.
+    mrcfg = meas.mr_config_id.hex() if meas else ""
+    if res.mr_config_id_binding_ok:
+        rows.append((
+            "compose_hash bound via mr_config_id (dstack-KMS)",
+            True,
+            f"mr_config_id[1:33] == compose_hash ({mrcfg[:16]}…)",
+        ))
+    else:
+        flag_byte = mrcfg[:2] if mrcfg else "??"
+        detail = (
+            f"mr_config_id[0]=0x{flag_byte} (need 0x01) — "
+            "dstack-KMS binding absent or compose_hash unknown"
+        )
+        rows.append((
+            "compose_hash bound via mr_config_id (dstack-KMS)",
+            False, detail,
+        ))
+
+    # Event-log row complements mr_config_id.
+    rows.append((
+        "RTMR3 event log replays + carries compose_hash event",
+        res.event_log_replay_ok and res.compose_hash_event_present,
+        ("replayed RTMR3 matches attested; compose-hash event present"
+         if res.event_log_replay_ok else
+         "event log absent, malformed, or replay disagrees with attested RTMR3"),
+    ))
+
+    # On-chain row only when caller supplied inputs.
+    if has_onchain_inputs:
+        rows.append((
+            "isAppAllowed(compose_hash) on FishermanAppAuth",
+            bool(res.on_chain_allowed),
+            f"contract returned {res.on_chain_allowed}"
+            if res.on_chain_allowed is not None else "rpc call failed",
+        ))
+
+    # TLS-binding row when we got a live fp + the bundle carried one.
+    if live_tls_fp and res.attested_tls_fingerprint_hex:
+        if res.tls_fingerprint_ok is None:
+            rows.append((
+                "TLS cert sha256 bound to attestation",
+                None,
+                "bundle carries no fingerprint — TLS terminated outside the enclave",
+            ))
+        else:
+            rows.append((
+                "TLS cert sha256 bound to attestation",
+                bool(res.tls_fingerprint_ok),
+                (f"attested {res.attested_tls_fingerprint_hex[:16]}… == "
+                 f"live {live_tls_fp[:16]}…")
+                if res.tls_fingerprint_ok else
+                (f"MITM: attested {res.attested_tls_fingerprint_hex[:16]}… "
+                 f"vs live {live_tls_fp[:16]}…"),
+            ))
+
+    if res.expected_mrtd_ok is not None:
+        rows.append((
+            "MRTD pin matches caller-supplied --expected-mrtd",
+            bool(res.expected_mrtd_ok),
+            "pin matches" if res.expected_mrtd_ok else
+            f"pin diverged: live mrtd={meas.mrtd.hex()[:16]}…",
+        ))
+
+    click.echo(f"\nFisherman mirror audit  →  {mirror_url}")
+    if res.git_commit or res.image_digest:
+        click.echo(
+            f"  release: git={res.git_commit or '?'}  image={res.image_digest or '?'}"
+        )
+    click.echo("")
+    for i, (title, ok, detail) in enumerate(rows, start=1):
+        if ok is None:
+            mark, color = "•", "yellow"
+        elif ok:
+            mark, color = "✓", "green"
+        else:
+            mark, color = "✗", "red"
+        click.echo(click.style(f"  Row {i} [{mark}] {title}", fg=color))
+        if detail:
+            for ln in detail.split("\n"):
+                click.echo(f"          {ln}")
+    click.echo("")
+
+    # Count using the verdict semantics: rows 6+7 are alternatives (the
+    # compose-binding requirement is satisfied if either passes), so we
+    # collapse them into a single "compose-binding" tally.
+    if res.all_required_ok:
+        click.echo(click.style("  ALL REQUIRED CHECKS PASS", fg="green"))
+    else:
+        click.echo(click.style("  AUDIT FAILED — see errors below", fg="red"))
+    click.echo("  (compose-binding requires EITHER mr_config_id OR event-log replay; "
+               "body-sig fails on dstack simulator quotes by design)")
+    if res.errors:
+        click.echo("")
+        click.echo("  errors:")
+        for e in res.errors:
+            click.echo(f"    - {e}")
+
+
+def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
+    meas = res.measurements
+    return {
+        "mirror_url": mirror_url,
+        "all_required_ok": res.all_required_ok,
+        "release": {
+            "git_commit": res.git_commit,
+            "image_digest": res.image_digest,
+        },
+        "checks": {
+            "quote_parsed":         res.quote_parsed_ok,
+            "signature_data_parsed":res.sig_data_parsed_ok,
+            "body_signature":       res.body_sig_ok,
+            "pck_chain":            res.pck_chain_ok,
+            "qe_report":            res.qe_report_ok,
+            "mr_config_id_binding": res.mr_config_id_binding_ok,
+            "event_log_replay":     res.event_log_replay_ok,
+            "compose_hash_event":   res.compose_hash_event_present,
+            "on_chain_allowed":     res.on_chain_allowed,
+            "tls_fingerprint":      res.tls_fingerprint_ok,
+            "expected_mrtd":        res.expected_mrtd_ok,
+        },
+        "measurements":  meas.to_hex() if meas else None,
+        "compose_hash":  res.compose_hash.hex() if res.compose_hash else None,
+        "live_tls_fingerprint_hex":     live_tls_fp,
+        "attested_tls_fingerprint_hex": res.attested_tls_fingerprint_hex,
+        "errors":        res.errors,
+    }
+
+
+@main.command()
+def version():
+    """Show what's installed and what's currently running.
+
+    Reads the version stamp written by `fisherman upgrade` (so the
+    reported commit reflects what was actually synced, not just what
+    .git/HEAD points at). Falls back to git for installs that predate
+    the stamp.
+    """
+    from fisherman import upgrade as _up
+    inst = _up.detect_installed()
+    click.echo(f"install dir:  {inst.install_dir}")
+    if inst.git_commit:
+        src_label = (
+            f" [{inst.source_kind}]" if inst.source_kind else ""
+        )
+        click.echo(
+            f"version:      {inst.git_commit}  ({inst.git_branch or '?'}){src_label}"
+        )
+        if inst.git_subject:
+            click.echo(f"  ↳ {inst.git_subject}")
+        if inst.installed_at:
+            click.echo(f"  installed:  {inst.installed_at}")
+    else:
+        click.echo("version:      unknown (no version stamp + no .git in install dir)")
+    click.echo(f"venv:         {'yes' if inst.has_venv else 'NO — run install.sh'}")
+    click.echo(f"menubar app:  {'yes' if inst.has_app else 'NO — open Fisherman.app once to install'}")
+    s = _up.daemon_status()
+    if s is None:
+        click.echo("daemon:       NOT RUNNING")
+    else:
+        click.echo(f"daemon:       running, paused={s.get('paused')}, "
+                   f"frames_sent={s.get('frames_sent')}")
+
+
+@main.command()
+@click.option("--from-local", "from_local", default=None,
+              help="Install from a local working tree instead of git "
+                   "(developer flow, e.g. --from-local .)")
+@click.option("--from-branch", "from_branch", default=None,
+              help="Switch to a different branch on origin (default: keep "
+                   "the install's current branch).")
+@click.option("--yes", "-y", "assume_yes", is_flag=True,
+              help="Don't prompt for confirmation (CI / scripted use).")
+@click.option("--rollback", is_flag=True,
+              help="Restore the most recent backup and relaunch.")
+@click.option("--no-app", "skip_app", is_flag=True,
+              help="Skip the Swift menubar rebuild + /Applications swap "
+                   "(Python-only upgrades).")
+@click.option("--force-menubar", "force_menubar", is_flag=True,
+              help="Rebuild the menubar app even if its sources look "
+                   "unchanged (use after a previously aborted upgrade).")
+@click.option("--install-dir", default=None,
+              help="Override install location (default: ~/.fisherman).")
+def upgrade(from_local, from_branch, assume_yes, rollback, skip_app,
+            force_menubar, install_dir):
+    """Upgrade fisherman in place. Safe by default — backs up the prior
+    code, never touches user data, rolls back automatically if the
+    daemon doesn't come back healthy.
+
+    Examples:
+
+      \b
+      # Upgrade to the latest commit on the install's current branch
+      fisherman upgrade
+
+      \b
+      # Switch branches
+      fisherman upgrade --from-branch some-feature
+
+      \b
+      # Install from a local checkout (developer flow)
+      fisherman upgrade --from-local ~/code/fisherman
+
+      \b
+      # Roll back if something broke
+      fisherman upgrade --rollback
+    """
+    from pathlib import Path as _Path
+    from fisherman import upgrade as _up
+
+    target_dir = _Path(install_dir).expanduser() if install_dir else _up.DEFAULT_INSTALL_DIR
+    inst = _up.detect_installed(target_dir)
+
+    if rollback:
+        _do_rollback(_up, inst, skip_app)
+        return
+
+    if not inst.install_dir.exists():
+        click.echo(click.style(
+            f"error: {inst.install_dir} does not exist. "
+            f"Run install.sh first.", fg="red"))
+        sys.exit(2)
+
+    # ----- 1. Resolve source -----
+    try:
+        if from_local:
+            src = _up.detect_source_local(_Path(from_local).expanduser())
+        elif inst.has_git:
+            click.echo("Fetching updates from origin...")
+            src = _up.fetch_source_from_git(inst.install_dir, branch=from_branch)
+        else:
+            click.echo(click.style(
+                f"error: {inst.install_dir} has no .git/ — pass --from-local "
+                f"<path> or re-run install.sh to set up a fresh checkout.",
+                fg="red"))
+            sys.exit(2)
+    except Exception as e:
+        click.echo(click.style(f"error: couldn't resolve source: {e}", fg="red"))
+        sys.exit(2)
+
+    # ----- 2. Show what's about to change -----
+    click.echo("")
+    click.echo(f"  installed: {inst.git_commit or '?'}  ({inst.git_branch or '?'})")
+    if inst.git_subject:
+        click.echo(f"             ↳ {inst.git_subject}")
+    click.echo(f"  source:    {src.git_commit or 'local (no commit)'}  "
+               f"({src.git_branch or '?'})  "
+               f"{'[from-local]' if src.is_local_dev else '[from-git]'}")
+    if src.git_subject:
+        click.echo(f"             ↳ {src.git_subject}")
+
+    if (inst.git_commit and src.git_commit
+            and inst.git_commit.split("-", 1)[0] == src.git_commit.split("-", 1)[0]):
+        click.echo(click.style(
+            "  already at this commit — nothing to do "
+            "(pass --yes to force a rebuild anyway)", fg="green"))
+        if not assume_yes:
+            return
+
+    commits = _up.commits_between(target_dir, src, inst)
+    if commits:
+        click.echo(f"\n  changes ({len(commits)} commits):")
+        for line in commits:
+            click.echo(f"    + {line}")
+
+    # ----- 3. Confirm -----
+    if not assume_yes:
+        click.echo("")
+        if not click.confirm("Proceed?", default=True):
+            click.echo("aborted.")
+            return
+
+    # ----- 4. Backup + stop daemon -----
+    click.echo("")
+    click.echo("  → backing up current install")
+    backup = _up.make_backup(inst.install_dir)
+    click.echo(f"     {backup}")
+
+    click.echo("  → stopping daemon")
+    _up.stop_daemon()
+
+    # ----- 5. Sync code -----
+    click.echo("  → syncing code")
+    try:
+        report = _up.sync_python_code(src.source_dir, inst.install_dir)
+    except subprocess.CalledProcessError as e:
+        click.echo(click.style(f"     rsync failed: {e}", fg="red"))
+        _emergency_rollback(_up, inst.install_dir, backup)
+        sys.exit(1)
+    click.echo(f"     {report['files_changed']} files changed")
+    if report["menubar_changed"]:
+        click.echo("     menubar sources changed — Swift rebuild needed")
+
+    # ----- 6. uv sync -----
+    click.echo("  → installing Python dependencies")
+    try:
+        _up.uv_sync(inst.install_dir)
+    except subprocess.CalledProcessError as e:
+        click.echo(click.style(f"     uv sync failed: {e}", fg="red"))
+        _emergency_rollback(_up, inst.install_dir, backup)
+        sys.exit(1)
+
+    # ----- 7. Build/install menubar app -----
+    needs_app_rebuild = (report["menubar_changed"] or force_menubar) and not skip_app
+    if needs_app_rebuild:
+        click.echo("  → building menubar app")
+        try:
+            app = _up.build_menubar_app(inst.install_dir)
+        except (subprocess.CalledProcessError, RuntimeError) as e:
+            click.echo(click.style(f"     menubar build failed: {e}", fg="red"))
+            click.echo("     code is upgraded, but menubar app is unchanged. "
+                       "Re-run `fisherman upgrade` after fixing the build.")
+            # Don't rollback — the Python code is fine even without app rebuild.
+        else:
+            click.echo("  → installing /Applications/Fisherman.app")
+            _up.install_app(app)
+            click.echo("  → launching Fisherman.app")
+            _up.launch_app()
+    elif skip_app:
+        click.echo("  → menubar rebuild skipped (--no-app)")
+    else:
+        click.echo("  → menubar unchanged — keeping existing /Applications/Fisherman.app")
+        # Still relaunch so the daemon picks up new Python code.
+        if inst.has_app:
+            subprocess.run(["pkill", "-f", "FishermanMenu"], check=False)
+            time.sleep(1)
+            subprocess.run(["open", "/Applications/Fisherman.app"], check=False)
+
+    # ----- 8. Health-check -----
+    click.echo("  → waiting for daemon...")
+    status = _up.wait_for_daemon(timeout=20.0)
+    if status is None:
+        click.echo(click.style(
+            "     daemon did NOT come back within 20s. Rolling back.",
+            fg="red"))
+        _emergency_rollback(_up, inst.install_dir, backup)
+        # Try to relaunch
+        if inst.has_app:
+            subprocess.run(["pkill", "-f", "FishermanMenu"], check=False)
+            time.sleep(1)
+            subprocess.run(["open", "/Applications/Fisherman.app"], check=False)
+        sys.exit(1)
+
+    click.echo(click.style(
+        f"     daemon up: paused={status.get('paused')}, "
+        f"frames_sent={status.get('frames_sent')}", fg="green"))
+
+    # ----- 8b. Stamp the install with what we just synced (so `version`
+    #          reflects the synced code, not whatever .git's HEAD is). -----
+    _up.write_version_stamp(inst.install_dir, src)
+
+    # ----- 9. PATH symlink (so future `fisherman ...` works without long path) -----
+    sym_status, sym_path = _up.ensure_path_symlink(inst.install_dir)
+    if sym_status == "created":
+        click.echo(f"  → linked {sym_path} → {inst.install_dir}/.venv/bin/fisherman")
+    elif sym_status == "ok":
+        pass  # silent — already correct
+    elif sym_status == "skipped":
+        click.echo(click.style(
+            f"  → ~/.local/bin not on PATH; skipping the convenience symlink.\n"
+            f"    Add it to PATH and re-run, or invoke directly:\n"
+            f"      {inst.install_dir}/.venv/bin/fisherman <command>",
+            fg="yellow"))
+    elif sym_status == "conflict":
+        click.echo(click.style(
+            f"  → {sym_path} exists and isn't our symlink — leaving it alone.",
+            fg="yellow"))
+
+    # ----- 10. Tidy + summary -----
+    pruned = _up.prune_backups(inst.install_dir)
+    if pruned:
+        click.echo(f"  → pruned {pruned} old backup(s)")
+
+    click.echo("")
+    click.echo(click.style("  ✓ upgrade complete", fg="green", bold=True))
+    if src.git_commit:
+        click.echo(f"     now at: {src.git_commit}")
+    click.echo("")
+    click.echo("  Useful next:")
+    click.echo("    fisherman version                    # confirm what's installed")
+    click.echo("    fisherman audit https://fisherman.teleport.computer")
+    click.echo("    fisherman upgrade --rollback         # if something's wrong")
+
+
+def _do_rollback(_up, inst, skip_app):
+    base = inst.install_dir / _up.BACKUP_DIRNAME
+    if not base.is_dir() or not any(base.iterdir()):
+        click.echo(click.style("error: no backups to roll back to.", fg="red"))
+        sys.exit(2)
+    snaps = sorted(p for p in base.iterdir() if p.is_dir())
+    latest = snaps[-1]
+    click.echo(f"Rolling back to {latest.name}")
+    _up.stop_daemon()
+    _up.restore_backup(inst.install_dir, latest)
+    try:
+        _up.uv_sync(inst.install_dir)
+    except subprocess.CalledProcessError as e:
+        click.echo(click.style(f"warning: uv sync failed during rollback: {e}",
+                               fg="yellow"))
+    if inst.has_app:
+        subprocess.run(["pkill", "-f", "FishermanMenu"], check=False)
+        time.sleep(1)
+        subprocess.run(["open", "/Applications/Fisherman.app"], check=False)
+    status = _up.wait_for_daemon(timeout=15)
+    if status is not None:
+        click.echo(click.style("✓ rolled back; daemon back up", fg="green"))
+    else:
+        click.echo(click.style(
+            "rolled back, but daemon didn't come back within 15s — "
+            "check ~/.fisherman/logs/", fg="yellow"))
+
+
+def _emergency_rollback(_up, install_dir, backup_dir):
+    click.echo(click.style(
+        f"  → ROLLING BACK to {backup_dir.name}", fg="yellow"))
+    try:
+        _up.restore_backup(install_dir, backup_dir)
+    except Exception as e:
+        click.echo(click.style(
+            f"  → rollback ALSO failed: {e}\n"
+            f"     manual restore: cp -R {backup_dir}/* {install_dir}/",
+            fg="red"))
 
 
 @main.command()

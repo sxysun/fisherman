@@ -128,27 +128,43 @@ jobs:
           echo "::error::ingress never came back up"
           exit 1
 
-      - name: Attestation verifier
+      - name: Attestation verifier (full DCAP, on-chain check)
         env:
-          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          ETH_SEPOLIA_RPC_URL:  ${{ secrets.ETH_SEPOLIA_RPC_URL }}
           CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
+          MIRROR_DOMAIN:        ${{ vars.MIRROR_DOMAIN }}
         run: |
-          python -m pip install --quiet pycryptodome
+          python -m pip install --quiet "cryptography>=43.0"
           python <<'PY'
-          import os
+          import os, sys
+          sys.path.insert(0, ".")
           from fisherman.attestation import verify_attestation
-          import sys; sys.path.insert(0, ".")
+
           res = verify_attestation(
               mirror_url=f"https://{os.environ['MIRROR_DOMAIN']}",
-              rpc_url=os.environ.get("ETH_SEPOLIA_RPC_URL"),
-              contract_address=os.environ.get("CONTRACT"),
+              rpc_url=os.environ.get("ETH_SEPOLIA_RPC_URL") or None,
+              contract_address=os.environ.get("CONTRACT") or None,
           )
-          print("ok=", res.ok, "errors=", res.errors)
-          if not res.ok:
-              raise SystemExit(f"attestation failed: {res.errors}")
+          print("---- per-row results ----")
+          for name, val in [
+              ("quote_parsed",          res.quote_parsed_ok),
+              ("signature_data_parsed", res.sig_data_parsed_ok),
+              ("body_signature",        res.body_sig_ok),
+              ("pck_chain",             res.pck_chain_ok),
+              ("qe_report",             res.qe_report_ok),
+              ("mr_config_id_binding",  res.mr_config_id_binding_ok),
+              ("event_log_replay",      res.event_log_replay_ok),
+              ("on_chain_allowed",      res.on_chain_allowed),
+          ]:
+              print(f"  {name:<24} = {val}")
+          print(f"errors = {res.errors}")
+          print(f"all_required_ok = {res.all_required_ok}")
+          if not res.all_required_ok:
+              raise SystemExit(
+                  f"attestation FAILED — required rows not green. "
+                  f"errors={res.errors}"
+              )
           PY
-        env:
-          MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
 
       - name: Append to DEPLOYMENTS.md
         run: |

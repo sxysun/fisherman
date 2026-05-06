@@ -52,12 +52,35 @@ if ! command -v screenpipe &>/dev/null; then
 fi
 echo "Using screenpipe: $(command -v screenpipe)"
 
-# 5. Clone or update repo
+# 5. Clone repo if missing. For upgrades, hand off to `fisherman upgrade`
+#    (which backs up the previous install, preserves user data, and
+#    rolls back automatically if the daemon doesn't come back).
 FISH_DIR="$HOME/.fisherman"
 REPO_URL="https://github.com/sxysun/fisherman.git"
 
 if [ -d "$FISH_DIR/.git" ]; then
-    echo "Updating existing installation..."
+    # Only recommend `fisherman upgrade` if the installed binary actually
+    # supports it (older installs predate the command — fall through to
+    # git reset for those, which then bootstraps the new code).
+    if [ -x "$FISH_DIR/.venv/bin/fisherman" ] \
+        && "$FISH_DIR/.venv/bin/fisherman" upgrade --help >/dev/null 2>&1; then
+        echo
+        echo "Existing installation detected at $FISH_DIR."
+        echo "For upgrades, prefer the in-place flow:"
+        echo
+        echo "    fisherman upgrade"
+        echo
+        echo "(Backs up your current install, never touches your captures"
+        echo "or keys, rolls back automatically if anything breaks.)"
+        echo
+        read -p "Run \`fisherman upgrade\` now? [Y/n] " RUN_UPGRADE
+        RUN_UPGRADE="${RUN_UPGRADE:-Y}"
+        if [[ "$RUN_UPGRADE" =~ ^[Yy] ]]; then
+            exec "$FISH_DIR/.venv/bin/fisherman" upgrade
+        fi
+        echo
+        echo "Falling back to legacy git reset (may discard pending local changes)..."
+    fi
     cd "$FISH_DIR"
     git fetch origin
     git reset --hard origin/main
@@ -150,5 +173,9 @@ echo
 echo "The app manages screenpipe and the fisherman daemon automatically."
 echo "Configure at: ~/.fisherman/.env"
 echo
-echo "To update later, just re-run this script."
+echo "To upgrade later:"
+echo "  fisherman upgrade"
+echo
+echo "(That's the canonical upgrade flow — backs up your install, never"
+echo "touches your captures/keys, rolls back automatically on failure.)"
 echo
