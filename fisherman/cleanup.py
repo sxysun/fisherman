@@ -234,60 +234,90 @@ def set_last_uploaded_ts(
     os.replace(tmp, path)
 
 
-def _pause_screenpipe(timeout: float = 5.0) -> Optional[int]:
-    """SIGTERM screenpipe so its kernel-held SQLite write lock releases.
+def _pause_screenpipe(timeout: float = 5.0) -> tuple[Optional[int], Optional[int]]:
+    """Stop screenpipe long enough to do a SQLite write.
 
-    Returns the PID we killed (purely informational — we don't restart
-    it ourselves; the menubar's termination handler does that with a
-    3 s delay). Returns None if screenpipe wasn't found.
+    Returns (menubar_pid_we_paused, screenpipe_pid_we_killed). Both
+    optional — None if not found. Caller MUST pass this back to
+    `_resume_screenpipe` even on exception so the menubar resumes.
 
-    SIGSTOP doesn't work here: kernel-side fcntl write locks survive
-    a stopped process, so SQLite's `database is locked` persists
-    until SIGCONT. SIGTERM gets screenpipe to actually exit, which
-    closes its file descriptors and releases the locks definitively.
+    Why two signals:
+
+      1. SIGSTOP the menubar (a Swift status-bar app) so its
+         terminationHandler can't fire mid-cleanup and respawn
+         screenpipe out from under us.
+
+      2. SIGTERM screenpipe — kernel-held fcntl write locks survive
+         a stopped process, so SIGSTOP alone doesn't release the
+         SQLite write lock. SIGTERM forces an actual exit, closing
+         the fds and releasing the locks definitively.
+
+    On resume, SIGCONT the menubar; its terminationHandler fires
+    immediately and respawns screenpipe with the standard 3s delay.
     """
     import os
     import signal
     import subprocess
     import time as _time
 
+    # 1. Pause the menubar BEFORE we kill screenpipe, otherwise its
+    #    terminationHandler will respawn screenpipe inside the 60s
+    #    busy_timeout window.
+    menubar_pid: Optional[int] = None
+    r = subprocess.run(
+        ["pgrep", "-x", "FishermanMenu"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        try:
+            menubar_pid = int(r.stdout.strip().splitlines()[0])
+            os.kill(menubar_pid, signal.SIGSTOP)
+        except (ValueError, IndexError, ProcessLookupError, PermissionError):
+            menubar_pid = None
+
+    # 2. SIGTERM screenpipe.
+    sp_pid: Optional[int] = None
     r = subprocess.run(
         ["pgrep", "-x", "screenpipe"],
         capture_output=True, text=True,
     )
-    if r.returncode != 0 or not r.stdout.strip():
-        return None
-    try:
-        pid = int(r.stdout.strip().splitlines()[0])
-    except (ValueError, IndexError):
-        return None
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return None
-    # Wait for it to actually exit so the lock is gone.
-    deadline = _time.time() + timeout
-    while _time.time() < deadline:
+    if r.returncode == 0 and r.stdout.strip():
         try:
-            os.kill(pid, 0)  # poll: still alive?
-        except ProcessLookupError:
-            return pid  # exited cleanly
-        _time.sleep(0.1)
-    # Didn't exit in time — escalate.
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    _time.sleep(0.5)
-    return pid
+            sp_pid = int(r.stdout.strip().splitlines()[0])
+            os.kill(sp_pid, signal.SIGTERM)
+        except (ValueError, IndexError, ProcessLookupError, PermissionError):
+            sp_pid = None
+
+    if sp_pid is not None:
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            try:
+                os.kill(sp_pid, 0)
+            except ProcessLookupError:
+                break
+            _time.sleep(0.1)
+        else:
+            # Escalate if SIGTERM was ignored.
+            try:
+                os.kill(sp_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _time.sleep(0.5)
+
+    return (menubar_pid, sp_pid)
 
 
-def _resume_screenpipe(pid: int) -> None:
-    """No-op. The menubar's terminationHandler restarts screenpipe
-    ~3 s after it exits — we don't need to manage that ourselves.
-    Kept as a hook in case future lock-busting strategies want it.
-    """
-    return None
+def _resume_screenpipe(state: tuple[Optional[int], Optional[int]]) -> None:
+    """SIGCONT the menubar — its terminationHandler then respawns
+    screenpipe automatically (3s delay)."""
+    import os
+    import signal
+    menubar_pid, _sp_pid = state
+    if menubar_pid is not None:
+        try:
+            os.kill(menubar_pid, signal.SIGCONT)
+        except (ProcessLookupError, PermissionError):
+            pass
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
