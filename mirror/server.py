@@ -233,42 +233,130 @@ class MirrorServer:
         return {"error": f"unsupported_command:{cmd}"}
 
 
+def _release_metadata() -> dict:
+    return {
+        "git_commit":   os.environ.get("FISHERMAN_GIT_COMMIT", "dev"),
+        "built_at":     os.environ.get("FISHERMAN_BUILT_AT", "dev"),
+        "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST", "sha256:dev"),
+    }
+
+
+def _read_ingress_tls_fingerprint() -> str:
+    """Best-effort: read the ingress TLS cert fingerprint dstack-ingress
+    writes to a shared evidences volume. Returns empty string when
+    absent — the audit row degrades to "info" rather than failing."""
+    candidates = [
+        "/evidences/tls-cert-sha256.txt",
+        "/evidences/tls_cert_sha256.txt",
+        "/var/run/fisherman/tls-cert-sha256.txt",
+    ]
+    for p in candidates:
+        try:
+            if os.path.exists(p):
+                with open(p) as f:
+                    return f.read().strip().lower().removeprefix("0x")
+        except OSError:
+            continue
+    return ""
+
+
+async def _build_attestation_bundle(
+    *,
+    paired: bool,
+    mirror_pubkey: bytes | None,
+    user_pubkey: bytes | None,
+) -> dict:
+    """Assemble the bundle served at /.well-known/attestation.
+
+    Reads tappd.sock when present (always inside a CVM); falls back to
+    a structural bundle when the socket is absent (local dev). Mirrors
+    the field shape of feedling-mcp-v1's /attestation so the same
+    auditor logic works against both."""
+    from mirror import tappd as _tappd  # local import to keep deploy footprint small
+
+    # Default socket location is /var/run/tappd.sock inside the CVM;
+    # override via DSTACK_TAPPD_SOCK for local dev (mock harness, etc).
+    sock_path = os.environ.get("DSTACK_TAPPD_SOCK", _tappd.DEFAULT_TAPPD_SOCK)
+
+    bundle: dict = {
+        "fisherman_release": _release_metadata(),
+        "paired":          paired,
+        "mirror_pubkey":   mirror_pubkey.hex() if mirror_pubkey else None,
+        "user_pubkey":     user_pubkey.hex() if user_pubkey else None,
+        "tdx_quote_hex":   "",
+        "event_log":       [],
+        "event_log_json":  "",
+        "compose_hash":    "",
+        "measurements":    {},
+        "enclave_tls_cert_fingerprint_hex": "",
+    }
+
+    # 1. App info (compose_hash, measurements). Cheap; always try.
+    info = await _tappd.get_info(sock_path=sock_path)
+    if info is not None:
+        bundle["compose_hash"] = info.compose_hash
+        bundle["measurements"] = {
+            "mrtd":         info.mrtd,
+            "mr_config_id": info.mr_config_id,
+            "rtmr0":        info.rtmr0,
+            "rtmr1":        info.rtmr1,
+            "rtmr2":        info.rtmr2,
+            "rtmr3":        info.rtmr3,
+        }
+        if info.event_log_json:
+            bundle["event_log_json"] = info.event_log_json
+            try:
+                bundle["event_log"] = json.loads(info.event_log_json)
+            except json.JSONDecodeError:
+                pass
+        bundle["app_id"] = info.app_id
+        bundle["instance_id"] = info.instance_id
+
+    # 2. TDX quote bound to the mirror's identity (and TLS fp when paired).
+    tls_fp = _read_ingress_tls_fingerprint()
+    if tls_fp:
+        bundle["enclave_tls_cert_fingerprint_hex"] = tls_fp
+
+    rd_parts: list[bytes] = [b"fisherman-mirror-attest-v1"]
+    if mirror_pubkey:
+        rd_parts.append(mirror_pubkey)
+    if tls_fp:
+        try:
+            rd_parts.append(bytes.fromhex(tls_fp))
+        except ValueError:
+            pass
+    # Pack into <=64 bytes; dstack pads on its end.
+    report_data = b"".join(rd_parts)[:64]
+
+    quote = await _tappd.get_quote(report_data, sock_path=sock_path)
+    if quote is not None:
+        bundle["tdx_quote_hex"] = quote.quote_hex
+        # Prefer the event log returned with the quote when Tappd.Info
+        # didn't populate it.
+        if quote.event_log_json and not bundle["event_log_json"]:
+            bundle["event_log_json"] = quote.event_log_json
+            try:
+                bundle["event_log"] = json.loads(quote.event_log_json)
+            except json.JSONDecodeError:
+                pass
+
+    return bundle
+
+
 async def _build_health_app(server: "MirrorServer") -> web.Application:
     """Tiny HTTP server: /health for the dstack-ingress liveness probe,
-    plus /.well-known/attestation for the menubar to verify the TEE.
-
-    /attestation returns the dstack TDX quote + measurements + release
-    metadata when running inside a CVM. Outside a CVM (local dev), it
-    returns a stub bundle so structural client code still works.
-    """
+    plus /.well-known/attestation for the menubar to verify the TEE."""
     app = web.Application()
 
     async def health(_):
         return web.Response(text="ok")
 
     async def attestation(_):
-        bundle = {
-            "fisherman_release": {
-                "git_commit": os.environ.get("FISHERMAN_GIT_COMMIT", "dev"),
-                "built_at":   os.environ.get("FISHERMAN_BUILT_AT", "dev"),
-                "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST", "sha256:dev"),
-            },
-            "mirror_pubkey": server.mirror_pubkey.hex(),
-            "user_pubkey":   server._user_pubkey.hex(),
-            "tdx_quote_hex": "",   # populated by dstack runtime when present
-            "event_log":     [],   # ditto
-        }
-        # dstack mounts an attestation socket / file at well-known paths
-        # when running inside a CVM. Read if present, otherwise leave
-        # empty (still useful structurally).
-        for path in ("/var/run/dstack.sock-quote", "/run/dstack/quote"):
-            if os.path.exists(path):
-                try:
-                    with open(path, "rb") as f:
-                        bundle["tdx_quote_hex"] = f.read().hex()
-                    break
-                except OSError:
-                    pass
+        bundle = await _build_attestation_bundle(
+            paired=True,
+            mirror_pubkey=server.mirror_pubkey,
+            user_pubkey=server._user_pubkey,
+        )
         return web.json_response(bundle)
 
     app.router.add_get("/health", health)
@@ -286,26 +374,9 @@ async def _build_unpaired_health_app() -> web.Application:
         return web.Response(text="unpaired")
 
     async def attestation(_):
-        bundle = {
-            "fisherman_release": {
-                "git_commit": os.environ.get("FISHERMAN_GIT_COMMIT", "dev"),
-                "built_at":   os.environ.get("FISHERMAN_BUILT_AT", "dev"),
-                "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST", "sha256:dev"),
-            },
-            "paired": False,
-            "mirror_pubkey": None,
-            "user_pubkey":   None,
-            "tdx_quote_hex": "",
-            "event_log":     [],
-        }
-        for path in ("/var/run/dstack.sock-quote", "/run/dstack/quote"):
-            if os.path.exists(path):
-                try:
-                    with open(path, "rb") as f:
-                        bundle["tdx_quote_hex"] = f.read().hex()
-                    break
-                except OSError:
-                    pass
+        bundle = await _build_attestation_bundle(
+            paired=False, mirror_pubkey=None, user_pubkey=None,
+        )
         return web.json_response(bundle)
 
     app.router.add_get("/health", health)
