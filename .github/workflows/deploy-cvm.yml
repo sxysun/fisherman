@@ -63,44 +63,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Read Phala-reported compose_hash for current CVM
-        id: hash
-        env:
-          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
-        run: |
-          set -euo pipefail
-          HASH=$(curl -s "https://cloud-api.phala.com/api/v1/cvms" \
-              -H "X-API-Key: $PHALA_CLOUD_API_KEY" \
-              | jq -r --arg id "${{ vars.CVM_VM_UUID }}" '.[] | select(.vm_uuid == $id) | .compose_hash' \
-              | head -1)
-          if [[ -z "$HASH" || "$HASH" == "null" ]]; then
-              echo "::error::could not read compose_hash for CVM ${{ vars.CVM_VM_UUID }}"
-              exit 1
-          fi
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-          echo "compose_hash: 0x$HASH"
-
-      - name: Publish compose_hash on-chain (idempotent)
-        env:
-          OWNER_PK:             ${{ secrets.OWNER_PK }}
-          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
-          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$CONTRACT" ]]; then
-            echo "::warning::FISHERMAN_APP_AUTH_ETH_SEPOLIA not set; skipping on-chain step"
-            exit 0
-          fi
-          ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x${{ steps.hash.outputs.hash }}" \
-              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false")
-          if [[ "$ALLOWED" == "true" ]]; then
-            echo "compose_hash already on-chain"
-          else
-            cast send "$CONTRACT" 'addComposeHash(bytes32)' "0x${{ steps.hash.outputs.hash }}" \
-                --rpc-url "$ETH_SEPOLIA_RPC_URL" \
-                --private-key "$OWNER_PK"
-          fi
-
       - name: phala deploy --cvm-id (in-place upgrade)
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
@@ -127,6 +89,49 @@ jobs:
             -e DOMAIN="$MIRROR_DOMAIN" \
             -e MIRROR_IMAGE_TAG="$IMAGE_TAG" \
             --wait
+
+      - name: Read Phala-reported compose_hash AFTER upgrade
+        # Crucial that this runs AFTER `phala deploy`, not before — the
+        # API returns the currently-running compose, and we need to
+        # publish the NEW one on-chain. Reading it pre-upgrade would
+        # publish (and re-attest) the previous compose, leaving the new
+        # one unauthorized → audit fails.
+        id: hash
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          set -euo pipefail
+          HASH=$(curl -s "https://cloud-api.phala.com/api/v1/cvms" \
+              -H "X-API-Key: $PHALA_CLOUD_API_KEY" \
+              | jq -r --arg id "${{ vars.CVM_VM_UUID }}" '.[] | select(.vm_uuid == $id) | .compose_hash' \
+              | head -1)
+          if [[ -z "$HASH" || "$HASH" == "null" ]]; then
+              echo "::error::could not read compose_hash for CVM ${{ vars.CVM_VM_UUID }}"
+              exit 1
+          fi
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "compose_hash (post-upgrade): 0x$HASH"
+
+      - name: Publish compose_hash on-chain (idempotent)
+        env:
+          OWNER_PK:             ${{ secrets.OWNER_PK }}
+          ETH_SEPOLIA_RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
+          CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CONTRACT" ]]; then
+            echo "::warning::FISHERMAN_APP_AUTH_ETH_SEPOLIA not set; skipping on-chain step"
+            exit 0
+          fi
+          ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x${{ steps.hash.outputs.hash }}" \
+              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false")
+          if [[ "$ALLOWED" == "true" ]]; then
+            echo "compose_hash already on-chain"
+          else
+            cast send "$CONTRACT" 'addComposeHash(bytes32)' "0x${{ steps.hash.outputs.hash }}" \
+                --rpc-url "$ETH_SEPOLIA_RPC_URL" \
+                --private-key "$OWNER_PK"
+          fi
 
       - name: Wait for /health
         run: |
