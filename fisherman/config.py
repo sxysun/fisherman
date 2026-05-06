@@ -20,6 +20,11 @@ class FishermanConfig(BaseSettings):
     screenpipe_url: str = "http://127.0.0.1:3030"
     screenpipe_poll_interval: float = 3.0
     screenpipe_search_limit: int = 10
+    # Screenpipe's /search SQL scans the full frames table; latency
+    # grows with DB size (≈12s on a 3.5GB DB observed in the wild).
+    # 30s default comfortably covers DBs up to a few GB. Override
+    # via FISH_SCREENPIPE_SEARCH_TIMEOUT.
+    screenpipe_search_timeout: float = 30.0
 
     # Ambient audio (meeting transcripts). Only forwarded while the meeting
     # detector says the user is in a call. Requires screenpipe to have audio

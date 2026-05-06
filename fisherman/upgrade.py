@@ -625,6 +625,24 @@ def diagnose() -> dict:
                   if Path("/Applications/Fisherman.app").exists()
                   else "/Applications/Fisherman.app MISSING",
     }
+    # Screenpipe DB size — when it grows past a few hundred MB, /search
+    # SQL latency exceeds the daemon's poll timeout and frames stop
+    # flowing. We warn loudly so the user knows to bump
+    # FISH_SCREENPIPE_SEARCH_TIMEOUT or trim the DB.
+    sp_db = Path.home() / ".fisherman" / "screenpipe-data" / "db.sqlite"
+    if sp_db.exists():
+        size_mb = sp_db.stat().st_size / (1024 * 1024)
+        if size_mb > 1000:
+            out["screenpipe_db_size"] = {
+                "ok": False,
+                "detail": (f"{size_mb:.0f} MB — /search likely slow; "
+                           f"raise FISH_SCREENPIPE_SEARCH_TIMEOUT or trim the DB"),
+            }
+        else:
+            out["screenpipe_db_size"] = {
+                "ok": True,
+                "detail": f"{size_mb:.0f} MB",
+            }
     return out
 
 

@@ -46,7 +46,7 @@ class FishermanDaemon:
         self._screenpipe = ScreenpipeCaptureClient(
             config.screenpipe_url,
             search_limit=config.screenpipe_search_limit,
-            timeout=max(config.screenpipe_poll_interval, 10.0),
+            timeout=config.screenpipe_search_timeout,
         )
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
