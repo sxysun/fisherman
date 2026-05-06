@@ -486,9 +486,27 @@ def _kill_and_wait(pattern: str, timeout: float = 5.0) -> None:
 
 
 def menubar_running() -> bool:
-    return subprocess.run(
-        ["pgrep", "-x", "FishermanMenu"], capture_output=True,
-    ).returncode == 0
+    """True iff /Applications/Fisherman.app's binary is in the process list.
+
+    `pgrep -x FishermanMenu` is flaky when called from a process the
+    OS has just forked (the in-kernel comm cache can be stale for a few
+    hundred ms — the Diagnostics tab shells out from FishermanMenu and
+    can hit this every time). `pgrep -af` against the full command line,
+    filtered to the .app binary path, is reliable in both cases.
+    """
+    r = subprocess.run(
+        ["pgrep", "-af", "FishermanMenu"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return False
+    for line in r.stdout.splitlines():
+        if "/Fisherman.app/Contents/MacOS/FishermanMenu" in line:
+            return True
+        # Dev installs run from .build/ before the .app swap.
+        if line.rstrip().endswith("/.build/release/FishermanMenu"):
+            return True
+    return False
 
 
 def launch_app(retries: int = 3) -> bool:

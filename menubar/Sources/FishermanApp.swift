@@ -121,8 +121,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     // MARK: - Settings window
 
     @MainActor private func openSettings() {
-        if let existing = settingsWindow, existing.isVisible {
+        // Reuse the existing window if we have one — even if it's
+        // hidden/closed. NSPanel with isReleasedWhenClosed=false stays
+        // alive after a close, so re-showing it is just orderFront.
+        // (Using `existing.isVisible` to guard creation was the bug
+        // behind "needs many clicks": after Close, isVisible==false,
+        // we'd allocate a NEW window but the OS treated the old one
+        // as still in the focus chain — second click finally won.)
+        if let existing = settingsWindow {
             existing.makeKeyAndOrderFront(nil)
+            existing.orderFrontRegardless()
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -143,11 +151,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         )
 
         let hostingView = NSHostingView(rootView: settingsView)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 400, height: 420)
+        // 600×500 fits the now-8 tabs without word-wrapping. The
+        // earlier 400×420 was tight even with 7 tabs.
+        hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 500)
 
         let window = NSPanel(
             contentRect: hostingView.frame,
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -157,7 +167,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         window.level = .floating
         window.center()
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 480, height: 360)
         window.makeKeyAndOrderFront(nil)
+        // orderFrontRegardless is needed for `.accessory` apps —
+        // `activate(ignoringOtherApps:)` alone doesn't reliably bring
+        // a hidden NSPanel to the front from a status-bar-only app.
+        window.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
 
         settingsWindow = window

@@ -39,25 +39,30 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Tab bar
-            HStack(spacing: 0) {
-                ForEach(SettingsTab.allCases, id: \.self) { tab in
-                    Button {
-                        selectedTab = tab
-                    } label: {
-                        Text(tab.rawValue)
-                            .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
-                            .foregroundStyle(selectedTab == tab ? .primary : .secondary)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(selectedTab == tab ? Color.accentColor.opacity(0.1) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+            // Tab bar — horizontally scrollable so adding a new tab
+            // doesn't force the whole row to word-wrap when the window
+            // is at its default width.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(SettingsTab.allCases, id: \.self) { tab in
+                        Button {
+                            selectedTab = tab
+                        } label: {
+                            Text(tab.rawValue)
+                                .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
+                                .foregroundStyle(selectedTab == tab ? .primary : .secondary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(selectedTab == tab ? Color.accentColor.opacity(0.12) : Color.clear)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
-                Spacer()
+                .padding(.horizontal, 16)
             }
-            .padding(.horizontal, 16)
             .padding(.top, 12)
 
             Divider().padding(.top, 8)
