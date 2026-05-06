@@ -459,17 +459,161 @@ def build_menubar_app(install_dir: Path) -> Path:
 
 def install_app(app: Path) -> None:
     target = Path("/Applications/Fisherman.app")
-    # Stop running menubar so the binary isn't busy.
-    subprocess.run(["pkill", "-f", "FishermanMenu"], check=False)
-    time.sleep(1)
+    # Stop running menubar so the binary isn't busy. Wait for actual
+    # exit — `pkill` is async and the bundle replace below races it.
+    _kill_and_wait("FishermanMenu", timeout=5.0)
     if target.exists():
         shutil.rmtree(target)
     shutil.copytree(app, target)
     subprocess.run(["xattr", "-cr", str(target)], check=False)
 
 
-def launch_app() -> None:
-    subprocess.run(["open", "/Applications/Fisherman.app"], check=False)
+def _kill_and_wait(pattern: str, timeout: float = 5.0) -> None:
+    """SIGTERM matching processes and wait until they're gone."""
+    subprocess.run(["pkill", "-f", pattern], check=False)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return
+        time.sleep(0.2)
+    # Last resort
+    subprocess.run(["pkill", "-9", "-f", pattern], check=False)
+    time.sleep(0.5)
+
+
+def menubar_running() -> bool:
+    return subprocess.run(
+        ["pgrep", "-x", "FishermanMenu"], capture_output=True,
+    ).returncode == 0
+
+
+def launch_app(retries: int = 3) -> bool:
+    """Bring /Applications/Fisherman.app to a running state.
+
+    Robust against:
+      - `open` returning -600 (LaunchServices procNotFound — happens
+        when the app was just pkill'd and the system hasn't fully
+        released it). Sleep + retry, then fall back to direct binary.
+      - The app already running (just no-op).
+    """
+    if menubar_running():
+        return True
+
+    target = "/Applications/Fisherman.app"
+    if not Path(target).exists():
+        return False
+
+    for attempt in range(retries):
+        r = subprocess.run(
+            ["open", "-a", "Fisherman"],
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            for _ in range(20):  # up to 10s for the menubar to register
+                if menubar_running():
+                    return True
+                time.sleep(0.5)
+        # -600 = LaunchServices procNotFound; usually a stale-process race
+        time.sleep(2.0)
+
+    # Fallback: launch the binary directly. Skips LaunchServices entirely.
+    binary = Path(target) / "Contents" / "MacOS" / "FishermanMenu"
+    if binary.exists():
+        subprocess.Popen(
+            [str(binary)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(20):
+            if menubar_running():
+                return True
+            time.sleep(0.5)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics
+# ---------------------------------------------------------------------------
+
+def diagnose() -> dict:
+    """Snapshot of every subsystem fisherman depends on.
+
+    Returns a flat dict {check: {ok, detail}}. Used by `fisherman repair`
+    and `fisherman doctor`."""
+    out: dict = {}
+    out["menubar"] = {
+        "ok": menubar_running(),
+        "detail": "FishermanMenu process found"
+                  if menubar_running() else "FishermanMenu NOT running",
+    }
+    daemon = daemon_status()
+    out["daemon"] = {
+        "ok": daemon is not None,
+        "detail": (f"control port up; frames_sent={daemon.get('frames_sent')}"
+                   if daemon else "no response on 127.0.0.1:7892"),
+    }
+    sp_path = shutil.which("screenpipe")
+    out["screenpipe_binary"] = {
+        "ok": sp_path is not None,
+        "detail": sp_path or "not on PATH (install: `brew install screenpipe`)",
+    }
+    sp_running = subprocess.run(
+        ["pgrep", "-f", "screenpipe"], capture_output=True,
+    ).returncode == 0
+    out["screenpipe_process"] = {
+        "ok": sp_running,
+        "detail": "screenpipe process found"
+                  if sp_running else "screenpipe NOT running (menubar should spawn it)",
+    }
+    sp_http = False
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:3030/health", timeout=2) as r:
+            sp_http = r.status == 200
+    except (urllib.error.URLError, OSError):
+        sp_http = False
+    out["screenpipe_http"] = {
+        "ok": sp_http,
+        "detail": "127.0.0.1:3030 reachable" if sp_http else "127.0.0.1:3030 not reachable",
+    }
+    out["app_bundle"] = {
+        "ok": Path("/Applications/Fisherman.app").exists(),
+        "detail": "/Applications/Fisherman.app exists"
+                  if Path("/Applications/Fisherman.app").exists()
+                  else "/Applications/Fisherman.app MISSING",
+    }
+    return out
+
+
+def repair() -> dict:
+    """Try to bring everything back to a healthy state.
+
+    Order matters: screenpipe binary must exist, then menubar must
+    launch, then the menubar (re)spawns screenpipe + daemon.
+    Returns the post-repair diagnose() snapshot.
+    """
+    # 1. Refresh LaunchServices registration for the .app — this clears
+    #    "stale process" issues that cause `open` to return -600.
+    lsregister = (
+        "/System/Library/Frameworks/CoreServices.framework/Versions/A/"
+        "Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+    )
+    if Path(lsregister).exists():
+        subprocess.run(
+            [lsregister, "-f", "/Applications/Fisherman.app"],
+            capture_output=True,
+        )
+    # 2. Flush zombies of menubar + screenpipe (menubar will respawn screenpipe).
+    _kill_and_wait("FishermanMenu", timeout=5.0)
+    _kill_and_wait("screenpipe.*fisherman", timeout=3.0)
+    # 3. Bring the menubar back up (which spawns daemon + screenpipe).
+    launch_app(retries=3)
+    # 4. Give it a moment for screenpipe + daemon to come up.
+    time.sleep(3.0)
+    return diagnose()
 
 
 # ---------------------------------------------------------------------------

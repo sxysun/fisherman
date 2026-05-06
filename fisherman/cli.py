@@ -511,6 +511,50 @@ def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
 
 
 @main.command()
+def doctor():
+    """Diagnose every fisherman subsystem and report what's wrong."""
+    from fisherman import upgrade as _up
+    rows = _up.diagnose()
+    click.echo("")
+    any_red = False
+    for name, r in rows.items():
+        mark = "✓" if r["ok"] else "✗"
+        color = "green" if r["ok"] else "red"
+        click.echo(click.style(f"  [{mark}] {name:<20} {r['detail']}", fg=color))
+        any_red = any_red or not r["ok"]
+    click.echo("")
+    if any_red:
+        click.echo("  Try: fisherman repair")
+        sys.exit(1)
+    click.echo(click.style("  all green", fg="green"))
+
+
+@main.command()
+def repair():
+    """Bring fisherman back from a stuck state.
+
+    Re-registers the app with LaunchServices (fixes `open` -600 errors
+    after a quick pkill+open cycle), flushes zombie processes, and
+    relaunches the menubar (which respawns screenpipe + daemon).
+    """
+    from fisherman import upgrade as _up
+    click.echo("→ resetting LaunchServices, killing zombies, relaunching app...")
+    rows = _up.repair()
+    click.echo("")
+    any_red = False
+    for name, r in rows.items():
+        mark = "✓" if r["ok"] else "✗"
+        color = "green" if r["ok"] else "red"
+        click.echo(click.style(f"  [{mark}] {name:<20} {r['detail']}", fg=color))
+        any_red = any_red or not r["ok"]
+    click.echo("")
+    if any_red:
+        click.echo(click.style("  Some subsystems are still down — see above.", fg="yellow"))
+        sys.exit(1)
+    click.echo(click.style("  fisherman is healthy", fg="green"))
+
+
+@main.command()
 def version():
     """Show what's installed and what's currently running.
 
