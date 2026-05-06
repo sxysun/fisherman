@@ -167,8 +167,11 @@ def detect_source_local(path: Path) -> SourceVersion:
 def fetch_source_from_git(
     install_dir: Path, branch: Optional[str] = None
 ) -> SourceVersion:
-    """Fetch + reset the install's own .git to origin/<branch>. Uses
-    the install dir directly as the source — no second checkout."""
+    """Fetch from origin and report what `origin/<branch>` would point
+    at, WITHOUT mutating the working tree. The actual `git reset --hard`
+    happens later via `apply_git_source` — splitting these lets the
+    caller back up the OLD code first.
+    """
     if not (install_dir / ".git").is_dir():
         raise RuntimeError(
             f"{install_dir} has no .git/ — can't fetch updates. "
@@ -176,9 +179,30 @@ def fetch_source_from_git(
             f"--from-local <path>."
         )
     _git("fetch --quiet origin", cwd=install_dir, check=True)
-    target_branch = branch or _git("rev-parse --abbrev-ref HEAD", cwd=install_dir) or "main"
-    _git(f"reset --quiet --hard origin/{target_branch}", cwd=install_dir, check=True)
-    return detect_source_in_install(install_dir)
+    target_branch = (
+        branch or _git("rev-parse --abbrev-ref HEAD", cwd=install_dir) or "main"
+    )
+    new_full = _git(f"rev-parse origin/{target_branch}", cwd=install_dir)
+    new_short = _git(f"rev-parse --short origin/{target_branch}", cwd=install_dir)
+    new_subject = _git(f"log -1 --pretty=%s {new_full}", cwd=install_dir)
+    return SourceVersion(
+        source_dir=install_dir,
+        git_commit=new_short,
+        git_branch=target_branch,
+        git_subject=new_subject,
+        is_local_dev=False,
+    )
+
+
+def apply_git_source(install_dir: Path, src: "SourceVersion") -> str:
+    """`git reset --hard` to the source's commit. Returns the previous
+    HEAD's full SHA (for git-based rollback)."""
+    prev = _git("rev-parse HEAD", cwd=install_dir)
+    _git(
+        f"reset --quiet --hard {src.git_commit}",
+        cwd=install_dir, check=True,
+    )
+    return prev or ""
 
 
 def detect_source_in_install(install_dir: Path) -> SourceVersion:
@@ -263,45 +287,55 @@ def sync_python_code(src: Path, install_dir: Path) -> dict:
     """Rsync the Python source tree + lockfiles into the install dir.
 
     Returns a small report {"files_changed": int, "menubar_changed": bool}.
-    """
-    # Source code dir (always sync).
-    cmd = [
-        "rsync", "-a", "--delete",
-        "--exclude=__pycache__",
-        "--exclude=.pytest_cache",
-        "--out-format=%n",
-        f"{src}/fisherman/", f"{install_dir}/fisherman/",
-    ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    files_changed = len([ln for ln in out.stdout.splitlines() if ln.strip()])
 
-    # pyproject.toml + uv.lock — required for `uv sync` to pick up new deps.
-    for f in ("pyproject.toml", "uv.lock"):
-        s = src / f
-        if s.exists():
-            shutil.copy2(s, install_dir / f)
+    When `src == install_dir` (the git path: `fisherman upgrade` did
+    `git fetch + reset --hard` in place, so the working tree IS already
+    the new code), the file-copy steps are no-ops — rsync of a dir to
+    itself works but `shutil.copy2(same, same)` raises SameFileError.
+    """
+    same = (src.resolve() == install_dir.resolve())
+
+    if same:
+        files_changed = 0
+    else:
+        cmd = [
+            "rsync", "-a", "--delete",
+            "--exclude=__pycache__",
+            "--exclude=.pytest_cache",
+            "--out-format=%n",
+            f"{src}/fisherman/", f"{install_dir}/fisherman/",
+        ]
+        out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        files_changed = len([ln for ln in out.stdout.splitlines() if ln.strip()])
+
+        # pyproject.toml + uv.lock — required for `uv sync` to pick up new deps.
+        for f in ("pyproject.toml", "uv.lock"):
+            s = src / f
+            d = install_dir / f
+            if s.exists() and s.resolve() != d.resolve():
+                shutil.copy2(s, d)
 
     # Detect whether menubar source changed since last install. We hash
     # Sources/, Package.swift, AND Packages/ (manual SwiftPM deps like
     # DynamicNotchKit) — missing Packages would make `swift build` fail
-    # mid-upgrade if we didn't catch it here.
+    # mid-upgrade if we didn't catch it here. When src == install_dir
+    # (git path), the working tree IS the new source so there's nothing
+    # to compare; `--force-menubar` is the escape hatch when a stale
+    # /Applications app needs a forced rebuild.
     src_mb = src / "menubar"
     inst_mb = install_dir / "menubar"
     menubar_changed = False
     if src_mb.is_dir():
         if not inst_mb.is_dir():
             menubar_changed = True
-        else:
+        elif not same:
             menubar_changed = (
                 _hash_tree(src_mb / "Sources") != _hash_tree(inst_mb / "Sources")
                 or _hash_tree(src_mb / "Package.swift") != _hash_tree(inst_mb / "Package.swift")
                 or _hash_tree(src_mb / "Packages") != _hash_tree(inst_mb / "Packages")
                 or _hash_tree(src_mb / "Info.plist") != _hash_tree(inst_mb / "Info.plist")
             )
-        if menubar_changed:
-            # Sync menubar/ too. We exclude .build (Swift build cache —
-            # gets rebuilt) but KEEP Packages/ (vendored SwiftPM deps
-            # like DynamicNotchKit that the project resolves locally).
+        if menubar_changed and not same:
             subprocess.run([
                 "rsync", "-a", "--delete",
                 "--exclude=.build",

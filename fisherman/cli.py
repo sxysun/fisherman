@@ -654,6 +654,9 @@ def upgrade(from_local, from_branch, assume_yes, rollback, skip_app,
             return
 
     # ----- 4. Backup + stop daemon -----
+    # Backup BEFORE we mutate anything (the git path's `git reset --hard`
+    # would otherwise replace the working tree before backup runs, so the
+    # backup would capture the new code instead of the old).
     click.echo("")
     click.echo("  → backing up current install")
     backup = _up.make_backup(inst.install_dir)
@@ -662,7 +665,12 @@ def upgrade(from_local, from_branch, assume_yes, rollback, skip_app,
     click.echo("  → stopping daemon")
     _up.stop_daemon()
 
-    # ----- 5. Sync code -----
+    # ----- 5. Apply git source (mutates working tree) -----
+    if not from_local:
+        prev_sha = _up.apply_git_source(inst.install_dir, src)
+        click.echo(f"  → git reset --hard {src.git_commit}  (rollback target: {prev_sha[:7] if prev_sha else 'unknown'})")
+
+    # ----- 6. Sync code -----
     click.echo("  → syncing code")
     try:
         report = _up.sync_python_code(src.source_dir, inst.install_dir)
