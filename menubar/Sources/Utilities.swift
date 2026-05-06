@@ -200,6 +200,23 @@ func isScreenpipeAlive(port: Int = 3030) -> Bool {
     return isServiceAlive(port, path: "/health")
 }
 
+private final class ServiceProbeResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func markAlive() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    func isAlive() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 private func isServiceAlive(_ port: Int, path: String, requiredKey: String? = nil) -> Bool {
     guard let url = URL(string: "http://127.0.0.1:\(port)\(path)") else { return false }
     var request = URLRequest(url: url)
@@ -207,7 +224,7 @@ private func isServiceAlive(_ port: Int, path: String, requiredKey: String? = ni
     request.httpMethod = "GET"
 
     let semaphore = DispatchSemaphore(value: 0)
-    var alive = false
+    let result = ServiceProbeResult()
 
     let config = URLSessionConfiguration.ephemeral
     config.timeoutIntervalForRequest = 1.0
@@ -223,16 +240,16 @@ private func isServiceAlive(_ port: Int, path: String, requiredKey: String? = ni
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                json[key] != nil
             {
-                alive = true
+                result.markAlive()
             }
         } else {
-            alive = true
+            result.markAlive()
         }
         semaphore.signal()
     }.resume()
 
     _ = semaphore.wait(timeout: .now() + 1.5)
-    return alive
+    return result.isAlive()
 }
 
 // MARK: - Log file
