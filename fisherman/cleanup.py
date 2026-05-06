@@ -92,12 +92,20 @@ def cleanup_db(
     last_safe_ts: Optional[float] = None,
     vacuum: bool = False,
     dry_run: bool = False,
+    pause_screenpipe: bool = True,
 ) -> CleanupResult:
     """Delete frames older than `min(now - retention_hours, last_safe_ts)`.
 
     Safety: if `last_safe_ts` is None, returns immediately with
     `frames_deleted=0` and `skipped_reason="no_upload_high_water_mark"`.
     Never deletes data that hasn't been confirmed copied.
+
+    Concurrency: screenpipe holds the SQLite write lock continuously
+    enough that even our batched DELETEs hit `database is locked`
+    after busy_timeout. When `pause_screenpipe=True` (default), we
+    SIGSTOP the screenpipe process for the duration of the delete
+    and SIGCONT it in a `finally` block, guaranteeing it resumes
+    even on exception. Dry runs and pure SELECTs don't need this.
     """
     now = time.time()
     cutoff_by_window = now - retention_hours * 3600
@@ -134,42 +142,45 @@ def cleanup_db(
         )
 
     size_before = db_path.stat().st_size
-    # Batched delete + commit-per-batch so screenpipe (a concurrent
-    # writer) can interleave its INSERTs between our batches. Doing
-    # one big DELETE held the write lock long enough to hit
-    # `database is locked` on real screenpipe DBs.
     BATCH = 5000
     deleted = 0
-    while True:
-        with _connect(db_path) as conn:
-            # Pick up to BATCH frame ids inside the cutoff
-            ids = [r[0] for r in conn.execute(
-                "SELECT id FROM frames WHERE timestamp < ? LIMIT ?",
-                (cutoff_iso, BATCH),
-            ).fetchall()]
-            if not ids:
-                break
-            placeholders = ",".join(["?"] * len(ids))
-            conn.execute(
-                f"DELETE FROM ocr_text WHERE frame_id IN ({placeholders})",
-                ids,
-            )
-            try:
+    paused_pid = _pause_screenpipe() if pause_screenpipe else None
+    try:
+        while True:
+            with _connect(db_path) as conn:
+                # Pick up to BATCH frame ids inside the cutoff
+                ids = [r[0] for r in conn.execute(
+                    "SELECT id FROM frames WHERE timestamp < ? LIMIT ?",
+                    (cutoff_iso, BATCH),
+                ).fetchall()]
+                if not ids:
+                    break
+                placeholders = ",".join(["?"] * len(ids))
                 conn.execute(
-                    f"DELETE FROM chunked_text_entries "
-                    f"WHERE frame_id IN ({placeholders})",
+                    f"DELETE FROM ocr_text WHERE frame_id IN ({placeholders})",
                     ids,
                 )
-            except sqlite3.OperationalError:
-                # Older screenpipe DBs may not have this table.
-                pass
-            # vision_tags has ON DELETE CASCADE; the next stmt cascades.
-            cur = conn.execute(
-                f"DELETE FROM frames WHERE id IN ({placeholders})",
-                ids,
-            )
-            deleted += cur.rowcount or 0
-            conn.commit()
+                try:
+                    conn.execute(
+                        f"DELETE FROM chunked_text_entries "
+                        f"WHERE frame_id IN ({placeholders})",
+                        ids,
+                    )
+                except sqlite3.OperationalError:
+                    # Older screenpipe DBs may not have this table.
+                    pass
+                # vision_tags has ON DELETE CASCADE; the next stmt cascades.
+                cur = conn.execute(
+                    f"DELETE FROM frames WHERE id IN ({placeholders})",
+                    ids,
+                )
+                deleted += cur.rowcount or 0
+                conn.commit()
+    finally:
+        # Always resume screenpipe — even if the cleanup raised mid-loop
+        # — so we never leave it permanently halted.
+        if paused_pid:
+            _resume_screenpipe(paused_pid)
 
     vacuum_ran = False
     if vacuum and deleted > 0:
@@ -221,6 +232,44 @@ def set_last_uploaded_ts(
         "updated_at": time.time(),
     }))
     os.replace(tmp, path)
+
+
+def _pause_screenpipe(timeout: float = 3.0) -> Optional[int]:
+    """SIGSTOP the screenpipe process so it releases the SQLite write
+    lock. Returns the PID (for later SIGCONT) or None if not found.
+    Waits briefly for the in-flight write transaction to commit.
+    """
+    import os
+    import signal
+    import subprocess
+
+    r = subprocess.run(
+        ["pgrep", "-x", "screenpipe"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    try:
+        pid = int(r.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+    try:
+        os.kill(pid, signal.SIGSTOP)
+    except (ProcessLookupError, PermissionError):
+        return None
+    # Brief settle for any in-flight write to commit + WAL to flush.
+    import time as _time
+    _time.sleep(min(timeout, 1.0))
+    return pid
+
+
+def _resume_screenpipe(pid: int) -> None:
+    import os
+    import signal
+    try:
+        os.kill(pid, signal.SIGCONT)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:

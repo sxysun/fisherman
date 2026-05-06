@@ -518,10 +518,13 @@ def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
               help="Report what would be deleted without changing anything.")
 @click.option("--vacuum/--no-vacuum", default=True,
               help="Run VACUUM after delete (slow on large DBs; default on).")
+@click.option("--pause-screenpipe/--no-pause-screenpipe", default=True,
+              help="SIGSTOP screenpipe during delete so it releases the SQLite "
+                   "write lock; SIGCONT it on completion. Default on.")
 @click.option("--force", is_flag=True,
               help="Bypass the upstream-confirmation safety check. "
                    "DANGEROUS — may delete frames that haven't been backed up.")
-def cleanup(retention_hours, dry_run, vacuum, force):
+def cleanup(retention_hours, dry_run, vacuum, pause_screenpipe, force):
     """Trim the local screenpipe SQLite DB to the retention window.
 
     By default safe: only rows whose timestamp is older than the
@@ -561,6 +564,7 @@ def cleanup(retention_hours, dry_run, vacuum, force):
     res = _cl.cleanup_db(
         retention_hours=hours, last_safe_ts=effective_safe,
         vacuum=vacuum, dry_run=dry_run,
+        pause_screenpipe=pause_screenpipe,
     )
 
     if res.skipped_reason and not res.frames_deleted:
