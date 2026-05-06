@@ -22,6 +22,9 @@ concurrency:
   group: deploy-cvm
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   upgrade:
     name: phala cvms upgrade ${{ vars.CVM_VM_UUID }}
@@ -35,7 +38,7 @@ jobs:
       MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -46,20 +49,20 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
 
       - run: |
           npm install -g phala
           sudo apt-get update -qq
           sudo apt-get install -y -qq jq curl
 
-      - uses: foundry-rs/foundry-toolchain@v1
+      - uses: foundry-rs/foundry-toolchain@v1.8.0
         with:
           version: stable
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
