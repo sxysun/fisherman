@@ -532,10 +532,10 @@ class FishermanDaemon:
                         self._pool, _cl.get_last_uploaded_ts,
                     )
 
-                # cleanup_db handles vacuum itself based on the flag.
-                # We pass vacuum=True only when a "big" delete is
-                # expected (peeked via dry_run to avoid an unnecessary
-                # multi-second VACUUM blocking screenpipe writes).
+                # Decide row-by-row vs nuclear-rotation. screenpipe's
+                # frames_fts AFTER DELETE trigger makes per-row deletes
+                # 10ms+ each, so beyond ~50K rows the row-by-row path
+                # takes minutes/hours — better to rotate the whole DB.
                 threshold = cfg.screenpipe_cleanup_vacuum_threshold
                 peek = await loop.run_in_executor(
                     self._pool,
@@ -545,17 +545,23 @@ class FishermanDaemon:
                         dry_run=True,
                     ),
                 )
-                want_vacuum = (
-                    threshold > 0 and peek.frames_deleted >= threshold
-                )
-                result = await loop.run_in_executor(
-                    self._pool,
-                    lambda: _cl.cleanup_db(
-                        retention_hours=cfg.screenpipe_local_retention_hours,
-                        last_safe_ts=last_safe,
-                        vacuum=want_vacuum,
-                    ),
-                )
+                if threshold > 0 and peek.frames_deleted >= threshold:
+                    log.info("screenpipe_cleanup_using_reset",
+                             frames=peek.frames_deleted,
+                             threshold=threshold)
+                    result = await loop.run_in_executor(
+                        self._pool,
+                        lambda: _cl.reset_db(last_safe_ts=last_safe),
+                    )
+                else:
+                    result = await loop.run_in_executor(
+                        self._pool,
+                        lambda: _cl.cleanup_db(
+                            retention_hours=cfg.screenpipe_local_retention_hours,
+                            last_safe_ts=last_safe,
+                            vacuum=False,
+                        ),
+                    )
 
                 if result.skipped_reason:
                     log.info("screenpipe_cleanup_skipped",

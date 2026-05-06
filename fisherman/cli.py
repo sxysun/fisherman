@@ -519,12 +519,17 @@ def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
 @click.option("--vacuum/--no-vacuum", default=True,
               help="Run VACUUM after delete (slow on large DBs; default on).")
 @click.option("--pause-screenpipe/--no-pause-screenpipe", default=True,
-              help="SIGSTOP screenpipe during delete so it releases the SQLite "
-                   "write lock; SIGCONT it on completion. Default on.")
+              help="Pause screenpipe + menubar during delete so the write lock "
+                   "is releasable. Default on.")
+@click.option("--reset", is_flag=True,
+              help="Nuclear option: rotate the entire DB out of the way "
+                   "instead of row-by-row delete. Instant. Use when the DB is "
+                   "huge (300K+ rows) — row-by-row would take >30 min because "
+                   "screenpipe's frames_fts trigger fires on every row.")
 @click.option("--force", is_flag=True,
               help="Bypass the upstream-confirmation safety check. "
                    "DANGEROUS — may delete frames that haven't been backed up.")
-def cleanup(retention_hours, dry_run, vacuum, pause_screenpipe, force):
+def cleanup(retention_hours, dry_run, vacuum, pause_screenpipe, reset, force):
     """Trim the local screenpipe SQLite DB to the retention window.
 
     By default safe: only rows whose timestamp is older than the
@@ -537,6 +542,17 @@ def cleanup(retention_hours, dry_run, vacuum, pause_screenpipe, force):
     from fisherman import cleanup as _cl
     cfg = FishermanConfig()
     hours = retention_hours if retention_hours is not None else cfg.screenpipe_local_retention_hours
+
+    # Defensive: a previous cleanup that crashed mid-pause may have left
+    # the menubar SIGSTOP'd. Always SIGCONT it before starting.
+    if _cl.unstick_menubar():
+        click.echo(click.style(
+            "  unstuck a SIGSTOP'd menubar from a previous failed cleanup",
+            fg="yellow"))
+
+    # Convert SIGTERM to KeyboardInterrupt so cleanup_db's try/finally runs.
+    import signal as _sig
+    _sig.signal(_sig.SIGTERM, lambda *_: (_cl.unstick_menubar(), sys.exit(130))[1])
 
     last_safe = _cl.get_last_uploaded_ts()
     if last_safe is None and not force:
@@ -561,11 +577,23 @@ def cleanup(retention_hours, dry_run, vacuum, pause_screenpipe, force):
         oldest_age_h = (_time.time() - stats_before.oldest_ts) / 3600
         click.echo(f"          oldest frame: {oldest_age_h:.1f} hours ago")
 
-    res = _cl.cleanup_db(
-        retention_hours=hours, last_safe_ts=effective_safe,
-        vacuum=vacuum, dry_run=dry_run,
-        pause_screenpipe=pause_screenpipe,
-    )
+    if reset:
+        if dry_run:
+            click.echo(click.style(
+                f"  --reset would rotate the entire DB ({stats_before.frames_count:,} frames, "
+                f"{stats_before.size_bytes/1e6:.0f} MB)",
+                fg="cyan"))
+            return
+        res = _cl.reset_db(
+            last_safe_ts=effective_safe,
+            pause_screenpipe=pause_screenpipe,
+        )
+    else:
+        res = _cl.cleanup_db(
+            retention_hours=hours, last_safe_ts=effective_safe,
+            vacuum=vacuum, dry_run=dry_run,
+            pause_screenpipe=pause_screenpipe,
+        )
 
     if res.skipped_reason and not res.frames_deleted:
         click.echo(click.style(

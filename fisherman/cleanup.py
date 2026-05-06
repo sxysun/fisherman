@@ -85,6 +85,88 @@ def get_db_stats(db_path: Path = DEFAULT_DB_PATH) -> Optional[DBStats]:
         return None
 
 
+def reset_db(
+    db_path: Path = DEFAULT_DB_PATH,
+    *,
+    last_safe_ts: Optional[float] = None,
+    pause_screenpipe: bool = True,
+) -> CleanupResult:
+    """Nuclear option: rotate the entire SQLite DB out of the way.
+
+    Rationale: screenpipe's `frames` table has an `AFTER DELETE`
+    trigger that maintains a frames_fts FTS5 index. Each row delete
+    fires one FTS5 segment rewrite — for 277 K rows that's 30+ minutes
+    at 100 % CPU. Rotating the DB skips all of that: stop everything,
+    move db.sqlite aside, restart, screenpipe creates a fresh empty
+    DB. Total runtime: a few seconds.
+
+    Trade-off: loses the local copy of EVERY frame, including the
+    24h-recent ones. Same safety guard applies — refuses without an
+    upload high-water mark unless force is set externally — because
+    the recent frames may not all have been forwarded yet.
+
+    Use this for large back-fill cleanups where the row-by-row delete
+    would take too long. After this runs, the daemon's hourly delete
+    loop will keep the small DB trimmed normally.
+    """
+    import os
+    import time as _time
+
+    if last_safe_ts is None:
+        return CleanupResult(
+            cutoff_ts=_time.time(), last_safe_ts=None,
+            frames_deleted=0, bytes_freed=0, vacuum_ran=False,
+            skipped_reason="no_upload_high_water_mark",
+        )
+
+    if not db_path.exists():
+        return CleanupResult(
+            cutoff_ts=_time.time(), last_safe_ts=last_safe_ts,
+            frames_deleted=0, bytes_freed=0, vacuum_ran=False,
+            skipped_reason="db_not_found",
+        )
+
+    # Count what we're about to lose, for the report.
+    deleted = 0
+    try:
+        with _connect(db_path) as conn:
+            r = conn.execute("SELECT count(*) FROM frames").fetchone()
+            deleted = r[0] if r else 0
+    except sqlite3.Error:
+        pass
+    size_before = db_path.stat().st_size
+
+    paused = _pause_screenpipe() if pause_screenpipe else (None, None)
+    try:
+        # Move (don't delete) so a future fisherman release could add
+        # a `--restore` recovery if rotation turns out to have been a
+        # mistake. Old files get cleaned up next time reset_db runs.
+        for suffix in ("", "-wal", "-shm"):
+            f = db_path.with_name(db_path.name + suffix)
+            if f.exists():
+                stale = f.with_suffix(f.suffix + ".tobedeleted")
+                if stale.exists():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+                try:
+                    os.replace(f, stale)
+                except OSError:
+                    pass
+    finally:
+        _resume_screenpipe(paused)
+
+    return CleanupResult(
+        cutoff_ts=_time.time(),
+        last_safe_ts=last_safe_ts,
+        frames_deleted=deleted,
+        bytes_freed=size_before,
+        vacuum_ran=False,
+        skipped_reason=None,
+    )
+
+
 def cleanup_db(
     db_path: Path = DEFAULT_DB_PATH,
     *,
@@ -232,6 +314,42 @@ def set_last_uploaded_ts(
         "updated_at": time.time(),
     }))
     os.replace(tmp, path)
+
+
+def unstick_menubar() -> bool:
+    """Defensive: SIGCONT any FishermanMenu in stopped state.
+
+    A previous cleanup that crashed / was killed before its finally
+    block ran can leave the menubar permanently SIGSTOP'd. Every
+    cleanup-related entry point should call this first so users
+    don't have to know the recovery incantation.
+    """
+    import os
+    import signal
+    import subprocess
+    r = subprocess.run(
+        ["pgrep", "-x", "FishermanMenu"], capture_output=True, text=True,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        return False
+    fixed = False
+    for line in r.stdout.strip().splitlines():
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        # Check process state — `T` means stopped (SIGSTOP).
+        s = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "state="],
+            capture_output=True, text=True,
+        )
+        if "T" in s.stdout:
+            try:
+                os.kill(pid, signal.SIGCONT)
+                fixed = True
+            except (ProcessLookupError, PermissionError):
+                pass
+    return fixed
 
 
 def _pause_screenpipe(timeout: float = 5.0) -> tuple[Optional[int], Optional[int]]:
