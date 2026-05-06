@@ -557,9 +557,22 @@ def diagnose() -> dict:
                    if daemon else "no response on 127.0.0.1:7892"),
     }
     sp_path = shutil.which("screenpipe")
+    sp_detail = sp_path or "not on PATH (install from https://docs.screenpi.pe/)"
+    if sp_path:
+        # Surface the deprecated-brew-bottle situation so users plan
+        # the migration before 2026-08-25 (when the formula is removed).
+        try:
+            r = subprocess.run(
+                ["brew", "info", "--json", "screenpipe"],
+                capture_output=True, text=True, timeout=4,
+            )
+            if r.returncode == 0 and '"deprecated":true' in r.stdout:
+                sp_detail += "  ⚠ brew formula deprecated; disabled 2026-08-25"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     out["screenpipe_binary"] = {
         "ok": sp_path is not None,
-        "detail": sp_path or "not on PATH (install: `brew install screenpipe`)",
+        "detail": sp_detail,
     }
     sp_running = subprocess.run(
         ["pgrep", "-f", "screenpipe"], capture_output=True,

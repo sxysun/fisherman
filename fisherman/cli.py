@@ -511,10 +511,15 @@ def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
 
 
 @main.command()
-def doctor():
+@click.option("--json", "as_json", is_flag=True,
+              help="Machine-readable output (used by the menubar Diagnostics view).")
+def doctor(as_json):
     """Diagnose every fisherman subsystem and report what's wrong."""
     from fisherman import upgrade as _up
     rows = _up.diagnose()
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        sys.exit(0 if all(r["ok"] for r in rows.values()) else 1)
     click.echo("")
     any_red = False
     for name, r in rows.items():
@@ -530,7 +535,9 @@ def doctor():
 
 
 @main.command()
-def repair():
+@click.option("--json", "as_json", is_flag=True,
+              help="Machine-readable output (used by the menubar Diagnostics view).")
+def repair(as_json):
     """Bring fisherman back from a stuck state.
 
     Re-registers the app with LaunchServices (fixes `open` -600 errors
@@ -538,8 +545,12 @@ def repair():
     relaunches the menubar (which respawns screenpipe + daemon).
     """
     from fisherman import upgrade as _up
-    click.echo("→ resetting LaunchServices, killing zombies, relaunching app...")
+    if not as_json:
+        click.echo("→ resetting LaunchServices, killing zombies, relaunching app...")
     rows = _up.repair()
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        sys.exit(0 if all(r["ok"] for r in rows.values()) else 1)
     click.echo("")
     any_red = False
     for name, r in rows.items():

@@ -34,6 +34,7 @@ struct SettingsView: View {
         case storage = "Storage"
         case mirror = "Mirror"
         case agent = "Agent"
+        case diagnostics = "Diagnostics"
     }
 
     var body: some View {
@@ -79,6 +80,8 @@ struct SettingsView: View {
                         MirrorTab()
                     case .agent:
                         AgentTab()
+                    case .diagnostics:
+                        DiagnosticsTab()
                     }
                 }
                 .padding(16)

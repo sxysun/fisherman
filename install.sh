@@ -38,19 +38,54 @@ if [ -z "$UV" ]; then
 fi
 echo "Using uv: $UV"
 
-# 4. Check/install screenpipe
+# 4. Check/install screenpipe.
+# IMPORTANT: brew's `screenpipe` formula was deprecated and is being
+# disabled on 2026-08-25 (the brew formula no longer builds — they
+# pulled the bottle 0.2.13 as the last). After that date, this `brew
+# install` step will fail; upstream now ships only the .app and MCP
+# server, not a standalone CLI. We try in priority order:
+#   1. Already-installed on PATH (most users have it)
+#   2. brew install (works until 2026-08-25)
+#   3. Bail with explicit upstream-doc link
 if ! command -v screenpipe &>/dev/null; then
     echo "Installing screenpipe..."
+    INSTALLED=0
     if command -v brew &>/dev/null; then
-        brew install screenpipe
-    else
-        echo "Error: screenpipe is required but brew is not installed."
-        echo "Install Homebrew first: https://brew.sh"
-        echo "Then run: brew install screenpipe"
+        # Brew may already print the deprecation warning; let it through.
+        if brew install screenpipe 2>&1; then
+            INSTALLED=1
+        else
+            echo
+            echo "Warning: brew install screenpipe failed."
+        fi
+    fi
+    if [ "$INSTALLED" -ne 1 ]; then
+        echo
+        echo "ERROR: could not install screenpipe automatically."
+        echo
+        echo "  brew's screenpipe formula was deprecated (and may now be removed)."
+        echo "  Install screenpipe manually from upstream, then re-run this script:"
+        echo
+        echo "      https://docs.screenpi.pe/getting-started"
+        echo "      https://github.com/mediar-ai/screenpipe"
+        echo
+        echo "  Make sure 'screenpipe --version' works in your shell, then re-run."
         exit 1
     fi
 fi
-echo "Using screenpipe: $(command -v screenpipe)"
+SCREENPIPE_VERSION=$(screenpipe --version 2>&1 | head -1 | tr -d '\n' || echo "?")
+echo "Using screenpipe: $(command -v screenpipe)  (${SCREENPIPE_VERSION})"
+
+# Heads-up if the user is running the deprecated brew bottle.
+if command -v brew &>/dev/null && brew list --formula 2>/dev/null | grep -qx screenpipe; then
+    if brew info --json screenpipe 2>/dev/null | grep -q '"deprecated":true'; then
+        echo
+        echo "  ⚠  screenpipe is installed via brew but the formula is deprecated."
+        echo "  ⚠  brew will disable it on 2026-08-25; plan a manual install before then."
+        echo "  ⚠  Track upstream: https://github.com/mediar-ai/screenpipe/issues"
+        echo
+    fi
+fi
 
 # 5. Clone repo if missing. For upgrades, hand off to `fisherman upgrade`
 #    (which backs up the previous install, preserves user data, and
