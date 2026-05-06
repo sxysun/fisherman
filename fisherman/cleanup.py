@@ -234,14 +234,22 @@ def set_last_uploaded_ts(
     os.replace(tmp, path)
 
 
-def _pause_screenpipe(timeout: float = 3.0) -> Optional[int]:
-    """SIGSTOP the screenpipe process so it releases the SQLite write
-    lock. Returns the PID (for later SIGCONT) or None if not found.
-    Waits briefly for the in-flight write transaction to commit.
+def _pause_screenpipe(timeout: float = 5.0) -> Optional[int]:
+    """SIGTERM screenpipe so its kernel-held SQLite write lock releases.
+
+    Returns the PID we killed (purely informational — we don't restart
+    it ourselves; the menubar's termination handler does that with a
+    3 s delay). Returns None if screenpipe wasn't found.
+
+    SIGSTOP doesn't work here: kernel-side fcntl write locks survive
+    a stopped process, so SQLite's `database is locked` persists
+    until SIGCONT. SIGTERM gets screenpipe to actually exit, which
+    closes its file descriptors and releases the locks definitively.
     """
     import os
     import signal
     import subprocess
+    import time as _time
 
     r = subprocess.run(
         ["pgrep", "-x", "screenpipe"],
@@ -254,22 +262,32 @@ def _pause_screenpipe(timeout: float = 3.0) -> Optional[int]:
     except (ValueError, IndexError):
         return None
     try:
-        os.kill(pid, signal.SIGSTOP)
+        os.kill(pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
         return None
-    # Brief settle for any in-flight write to commit + WAL to flush.
-    import time as _time
-    _time.sleep(min(timeout, 1.0))
+    # Wait for it to actually exit so the lock is gone.
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        try:
+            os.kill(pid, 0)  # poll: still alive?
+        except ProcessLookupError:
+            return pid  # exited cleanly
+        _time.sleep(0.1)
+    # Didn't exit in time — escalate.
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _time.sleep(0.5)
     return pid
 
 
 def _resume_screenpipe(pid: int) -> None:
-    import os
-    import signal
-    try:
-        os.kill(pid, signal.SIGCONT)
-    except (ProcessLookupError, PermissionError):
-        pass
+    """No-op. The menubar's terminationHandler restarts screenpipe
+    ~3 s after it exits — we don't need to manage that ourselves.
+    Kept as a hook in case future lock-busting strategies want it.
+    """
+    return None
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
