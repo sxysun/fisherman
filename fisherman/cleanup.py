@@ -134,32 +134,42 @@ def cleanup_db(
         )
 
     size_before = db_path.stat().st_size
+    # Batched delete + commit-per-batch so screenpipe (a concurrent
+    # writer) can interleave its INSERTs between our batches. Doing
+    # one big DELETE held the write lock long enough to hit
+    # `database is locked` on real screenpipe DBs.
+    BATCH = 5000
     deleted = 0
-    with _connect(db_path) as conn:
-        # Manual delete order matters: child rows first so the parent
-        # delete doesn't leave orphans (ocr_text doesn't have an FK in
-        # the screenpipe schema; chunked_text_entries has an FK without
-        # cascade). vision_tags is ON DELETE CASCADE so it auto-handles.
-        conn.execute(
-            "DELETE FROM ocr_text WHERE frame_id IN "
-            "(SELECT id FROM frames WHERE timestamp < ?)",
-            (cutoff_iso,),
-        )
-        try:
+    while True:
+        with _connect(db_path) as conn:
+            # Pick up to BATCH frame ids inside the cutoff
+            ids = [r[0] for r in conn.execute(
+                "SELECT id FROM frames WHERE timestamp < ? LIMIT ?",
+                (cutoff_iso, BATCH),
+            ).fetchall()]
+            if not ids:
+                break
+            placeholders = ",".join(["?"] * len(ids))
             conn.execute(
-                "DELETE FROM chunked_text_entries WHERE frame_id IN "
-                "(SELECT id FROM frames WHERE timestamp < ?)",
-                (cutoff_iso,),
+                f"DELETE FROM ocr_text WHERE frame_id IN ({placeholders})",
+                ids,
             )
-        except sqlite3.OperationalError:
-            # Table may not exist on older screenpipe DBs — skip.
-            pass
-        cur = conn.execute(
-            "DELETE FROM frames WHERE timestamp < ?",
-            (cutoff_iso,),
-        )
-        deleted = cur.rowcount or 0
-        conn.commit()
+            try:
+                conn.execute(
+                    f"DELETE FROM chunked_text_entries "
+                    f"WHERE frame_id IN ({placeholders})",
+                    ids,
+                )
+            except sqlite3.OperationalError:
+                # Older screenpipe DBs may not have this table.
+                pass
+            # vision_tags has ON DELETE CASCADE; the next stmt cascades.
+            cur = conn.execute(
+                f"DELETE FROM frames WHERE id IN ({placeholders})",
+                ids,
+            )
+            deleted += cur.rowcount or 0
+            conn.commit()
 
     vacuum_ran = False
     if vacuum and deleted > 0:
@@ -214,8 +224,13 @@ def set_last_uploaded_ts(
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    # `timeout=` controls how long Python's sqlite3 driver waits for a
+    # busy lock before raising; `busy_timeout` does the same at the
+    # SQLite level (used by the engine itself, not just the driver).
+    # Need both — we're contending with screenpipe's INSERT writer.
+    conn = sqlite3.connect(str(db_path), timeout=60.0)
     conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 60000")  # 60s
     return conn
 
 
