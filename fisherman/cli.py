@@ -1589,7 +1589,8 @@ def mirror_status():
         return
     online = data.get("relay_connected", False)
     click.echo(f"laptop relay-connected: {online}")
-    click.echo(f"mirror.fisherman.cloud (default): not yet implemented")
+    click.echo("self-hosted mirror pairing: use `fisherman mirror pair-mint`")
+    click.echo("managed Fisherman Cloud pairing: not wired into this CLI build yet")
 
 
 @main.group(name="storage")
@@ -1609,7 +1610,13 @@ def storage_status(as_text: bool):
         "config": {**cfg, **{
             # Redact secrets in the printed view
             k: ("***" if cfg.get(k) else None)
-            for k in ("access_key_id", "secret_access_key")
+            for k in (
+                "access_key_id",
+                "secret_access_key",
+                "password",
+                "client_secret",
+                "refresh_token",
+            )
             if k in cfg
         }},
         "summary": storage_config.summary(cfg),

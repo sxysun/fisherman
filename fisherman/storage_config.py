@@ -53,4 +53,9 @@ def summary(cfg: dict[str, Any]) -> str:
         bucket = cfg.get("bucket")
         prefix = cfg.get("prefix") or ""
         return f"s3 bucket={bucket} endpoint={endpoint} prefix={prefix or '(none)'}"
+    if kind == "webdav":
+        prefix = cfg.get("prefix") or ""
+        return f"webdav url={cfg.get('url')} prefix={prefix or '(none)'}"
+    if kind == "drive":
+        return f"drive folder={cfg.get('folder_name') or 'fisherman'}"
     return f"{kind} (unknown)"

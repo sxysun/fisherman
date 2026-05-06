@@ -93,10 +93,10 @@ older client builds keep working until users update.
 
 ### 4. Pairing flow (replaces today's `fisherman mirror pair-mint` env-var trick)
 
-For the hosted Cloud variant the user does NOT see env vars or config
-files. The flow:
+For the hosted Cloud variant the user should not see env vars or config
+files. The intended self-serve flow:
 
-1. Menubar → Settings → Mirror → "Use Fisherman Cloud (TEE)"
+1. Menubar → Settings → Mirror → managed Fisherman Cloud pairing
 2. Menubar fetches `https://mirror.fisherman.app/.well-known/attestation`
    - Returns the TDX quote, RTMR3 event log, compose_hash, app_id,
      ingress cert fingerprint

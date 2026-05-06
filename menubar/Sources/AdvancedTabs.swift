@@ -248,7 +248,7 @@ struct StorageTab: View {
                 Button("Apply") { apply() }
                     .buttonStyle(.borderedProminent)
                 if selectedKind == "none" {
-                    Button("Disable mirror") { disable() }
+                    Button("Disable storage") { disable() }
                 }
                 Spacer()
                 Button("Refresh status") { reloadStatus() }
@@ -367,10 +367,9 @@ struct MirrorTab: View {
 
             Divider()
 
-            Text("Fisherman Cloud (TEE)").font(.system(size: 12, weight: .medium))
-            Text("Hosted by us, attested via Phala TDX + on-chain compose_hash governance. Coming soon — see docs/tee-deployment.md.")
+            Text("Managed Fisherman Cloud").font(.system(size: 12, weight: .medium))
+            Text("The hosted TEE mirror backend is deployed and attested, but self-serve pairing is not wired into this app build. Use Self-hosted pairing above for now.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-            Button("Coming soon") {}.disabled(true)
         }
     }
 

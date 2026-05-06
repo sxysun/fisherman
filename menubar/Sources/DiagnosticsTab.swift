@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import AppKit
 
 /// Settings → Diagnostics. Native equivalent of `fisherman doctor` for
 /// users who don't open a terminal: runs the same checks (menubar
@@ -107,14 +108,24 @@ struct DiagnosticsTab: View {
             }
         }
         .onAppear {
-            if rows.isEmpty { refresh() }
+            refresh()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refresh()
         }
     }
 
     // MARK: - Actions
 
-    private func refresh() { invoke(args: ["doctor", "--json"]) }
-    private func repair()  { invoke(args: ["repair", "--json"], timeout: 60) }
+    private func refresh() {
+        guard !running else { return }
+        invoke(args: ["doctor", "--json"])
+    }
+
+    private func repair() {
+        guard !running else { return }
+        invoke(args: ["repair", "--json"], timeout: 60)
+    }
 
     private func invoke(args: [String], timeout: TimeInterval = 15) {
         running = true
@@ -123,7 +134,7 @@ struct DiagnosticsTab: View {
             let r = CliBridge.run(args, timeout: timeout)
             // doctor/repair return non-zero exit code when any row is
             // red — but stdout is still valid JSON. Don't gate on exit.
-            let parsed = parseRows(r.stdout)
+            let parsed = Self.parseRows(r.stdout)
             DispatchQueue.main.async {
                 running = false
                 lastRunAt = Date()
@@ -138,7 +149,7 @@ struct DiagnosticsTab: View {
         }
     }
 
-    private func parseRows(_ stdout: String) -> [(name: String, ok: Bool, detail: String)]? {
+    nonisolated private static func parseRows(_ stdout: String) -> [(name: String, ok: Bool, detail: String)]? {
         guard let data = stdout.data(using: .utf8),
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
@@ -165,7 +176,7 @@ struct DiagnosticsTab: View {
         return out
     }
 
-    private func label(for key: String) -> String {
+    nonisolated private static func label(for key: String) -> String {
         switch key {
         case "menubar":            return "Menu bar app"
         case "daemon":             return "Daemon (control port)"
