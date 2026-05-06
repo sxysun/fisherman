@@ -32,9 +32,12 @@ def main():
 
 
 @main.command()
-@click.option("--server-url", envvar="FISH_SERVER_URL", default=None, help="WebSocket server URL")
+@click.option("--server-url", envvar="FISH_SERVER_URL", default=None, hidden=True)
+@click.option("--backend-mode", type=click.Choice(["local", "cloud", "self_hosted", "self-hosted"]),
+              default=None, help="Backend mode: local, cloud, or self_hosted")
+@click.option("--backend-url", default=None, help="Backend base URL")
 @click.option("--daemon", "daemonize", is_flag=True, help="Run as background process")
-def start(server_url: str | None, daemonize: bool):
+def start(server_url: str | None, backend_mode: str | None, backend_url: str | None, daemonize: bool):
     """Start the fisherman daemon."""
     _configure_logging()
 
@@ -48,13 +51,20 @@ def start(server_url: str | None, daemonize: bool):
     overrides = {}
     if server_url:
         overrides["server_url"] = server_url
+    if backend_mode:
+        overrides["backend_mode"] = backend_mode
+    if backend_url:
+        overrides["backend_url"] = backend_url
 
     config = FishermanConfig(**overrides)
 
     click.echo("Fisherman daemon starting")
-    click.echo(f"  Server:   {config.server_url}")
-    if "localhost" in config.server_url or "127.0.0.1" in config.server_url:
-        click.echo("  (local server — set FISH_SERVER_URL for remote)")
+    click.echo(f"  Backend:  {config.backend_summary}")
+    if config.streaming_enabled:
+        click.echo(f"  Ingest:   {config.server_url}")
+    else:
+        click.echo("  Ingest:   disabled (local-only capture)")
+    click.echo(f"  Relay:    {config.status_relay_url}")
     click.echo(f"  Control:  http://127.0.0.1:{config.control_port}")
     click.echo(f"  Capture:  {config.capture_backend}")
     if (config.capture_backend or "").strip().lower() == "screenpipe":
@@ -124,6 +134,9 @@ def status(port: int, as_text: bool, source_pref: str | None):
         return
     click.echo(f"running:        {data.get('running')}")
     click.echo(f"paused:         {data.get('paused')}")
+    if data.get("backend_mode"):
+        click.echo(f"backend:        {data.get('backend')}")
+        click.echo(f"streaming:      {data.get('streaming_enabled')}")
     backend = data.get("capture_backend") or "?"
     interval = data.get("capture_interval")
     interval_str = f"{interval:.1f}s" if isinstance(interval, (int, float)) else "—"
@@ -236,6 +249,30 @@ def transcripts(since, until, meeting_app, search, limit, as_text, port, source_
         click.echo(f"[{ts}] {app_n} {side} {r.get('transcript', '')}")
 
 
+def _live_tls_fingerprint(url: str, timeout: float, *, quiet: bool = False) -> str | None:
+    import hashlib as _hash
+    import socket as _sock
+    import ssl as _ssl
+    import urllib.parse as _up
+
+    parsed = _up.urlparse(url)
+    if parsed.scheme != "https":
+        return None
+    host, port = parsed.hostname, parsed.port or 443
+    try:
+        ctx = _ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _ssl.CERT_NONE  # pinned separately by attestation
+        with _sock.create_connection((host, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as s:
+                der = s.getpeercert(binary_form=True)
+        return _hash.sha256(der).hexdigest()
+    except Exception as e:
+        if not quiet:
+            click.echo(f"  (skipping live TLS fingerprint capture: {e})", err=True)
+        return None
+
+
 @main.command()
 @click.argument("mirror_url")
 @click.option("--rpc-url", "rpc_url", envvar="FISHERMAN_ETH_RPC_URL", default=None,
@@ -262,32 +299,12 @@ def audit(mirror_url, rpc_url, contract_address, expected_mrtd_hex, as_json, tim
 
     Exit code is 0 only when every required row passes.
     """
-    import hashlib as _hash
-    import socket as _sock
-    import ssl as _ssl
-    import urllib.parse as _up
-
     from fisherman import attestation as _att
 
     # Best-effort: capture sha256(cert.DER) of the live TLS handshake so
     # we can evaluate the TLS-binding row (when the bundle carries an
-    # attested fingerprint). Skip cleanly for http:// or unreachable hosts.
-    live_tls_fp: str | None = None
-    parsed = _up.urlparse(mirror_url)
-    if parsed.scheme == "https":
-        host, port = parsed.hostname, parsed.port or 443
-        try:
-            ctx = _ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = _ssl.CERT_NONE  # we pin separately, don't CA-verify here
-            with _sock.create_connection((host, port), timeout=timeout) as raw:
-                with ctx.wrap_socket(raw, server_hostname=host) as s:
-                    der = s.getpeercert(binary_form=True)
-            live_tls_fp = _hash.sha256(der).hexdigest()
-        except Exception as e:
-            live_tls_fp = None
-            if not as_json:
-                click.echo(f"  (skipping live TLS fingerprint capture: {e})", err=True)
+    # attested fingerprint).
+    live_tls_fp = _live_tls_fingerprint(mirror_url, timeout, quiet=as_json)
 
     res = _att.verify_attestation(
         mirror_url,
@@ -445,7 +462,7 @@ def _audit_print_table(res, *, mirror_url: str, live_tls_fp: str | None,
             f"pin diverged: live mrtd={meas.mrtd.hex()[:16]}…",
         ))
 
-    click.echo(f"\nFisherman mirror audit  →  {mirror_url}")
+    click.echo(f"\nFisherman TEE audit  →  {mirror_url}")
     if res.git_commit or res.image_digest:
         click.echo(
             f"  release: git={res.git_commit or '?'}  image={res.image_digest or '?'}"
@@ -508,6 +525,17 @@ def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
         "attested_tls_fingerprint_hex": res.attested_tls_fingerprint_hex,
         "errors":        res.errors,
     }
+
+
+def _cloud_required_failures(res) -> list[str]:
+    failures: list[str] = []
+    if not res.all_required_ok:
+        failures.extend(res.errors or ["base attestation checks failed"])
+    if res.on_chain_allowed is not True:
+        failures.append("cloud requires on-chain compose_hash authorization")
+    if res.tls_fingerprint_ok is not True:
+        failures.append("cloud requires TLS certificate fingerprint bound in attestation")
+    return failures
 
 
 @main.command()
@@ -686,7 +714,9 @@ def version():
     cfg = FishermanConfig()
     click.echo(f"install dir:  {inst.install_dir}")
     click.echo(f"config:       {_cfg.user_env_path()}")
-    click.echo(f"server:       {cfg.server_url}")
+    click.echo(f"backend:      {cfg.backend_summary}")
+    click.echo(f"ingest:       {cfg.server_url if cfg.streaming_enabled else 'disabled'}")
+    click.echo(f"relay:        {cfg.status_relay_url}")
     click.echo(f"identity:     {'yes' if cfg.private_key else 'NO'}")
     if inst.git_commit:
         src_label = (
@@ -709,6 +739,201 @@ def version():
     else:
         click.echo(f"daemon:       running, paused={s.get('paused')}, "
                    f"frames_sent={s.get('frames_sent')}")
+
+
+@main.group(name="backend")
+def backend_group():
+    """Configure where Fisherman stores and processes context."""
+
+
+def _persist_backend_config(
+    *,
+    mode: str,
+    backend_url: str | None = None,
+    relay_url: str | None = None,
+) -> FishermanConfig:
+    from fisherman import config as _cfg
+
+    _cfg.persist_user_env_var("FISH_BACKEND_MODE", mode)
+    if backend_url is not None:
+        _cfg.persist_user_env_var("FISH_BACKEND_URL", backend_url)
+    _cfg.remove_user_env_var("FISH_SERVER_URL")
+    if relay_url is not None:
+        _cfg.persist_user_env_var("FISH_STATUS_RELAY_URL", relay_url)
+    return FishermanConfig()
+
+
+@backend_group.command(name="status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def backend_status(as_json: bool):
+    """Show the effective backend mode and daemon view."""
+    from fisherman import storage_config
+    from fisherman import upgrade as _up
+
+    cfg = FishermanConfig()
+    daemon = _up.daemon_status(timeout=1.0)
+    storage = storage_config.load()
+    out = {
+        "mode": cfg.backend_mode,
+        "backend_url": cfg.backend_url,
+        "ingest_url": cfg.server_url if cfg.streaming_enabled else None,
+        "streaming_enabled": cfg.streaming_enabled,
+        "status_relay_url": cfg.status_relay_url,
+        "identity": bool(cfg.private_key),
+        "backup": storage_config.summary(storage),
+        "daemon": daemon,
+    }
+    if as_json:
+        click.echo(json.dumps(out, indent=2))
+        return
+
+    click.echo(f"mode:       {cfg.backend_mode}")
+    click.echo(f"backend:    {cfg.backend_summary}")
+    click.echo(f"ingest:     {out['ingest_url'] or 'disabled'}")
+    click.echo(f"relay:      {cfg.status_relay_url}")
+    click.echo(f"identity:   {'yes' if cfg.private_key else 'NO'}")
+    click.echo(f"backup:     {out['backup']}")
+    if daemon is None:
+        click.echo("daemon:     not running")
+    else:
+        daemon_streaming = daemon.get("streaming_enabled")
+        if daemon_streaming is None:
+            daemon_streaming = cfg.streaming_enabled
+        click.echo(
+            f"daemon:     running; streaming={daemon_streaming} "
+            f"connected={daemon.get('connected')} frames={daemon.get('frames_sent')}"
+        )
+
+
+@backend_group.group(name="configure")
+def backend_configure_group():
+    """Choose Local Only, Fisherman Cloud, or Self-Hosted."""
+
+
+@backend_configure_group.command(name="local")
+@click.option("--relay-url", default=None, help="Optional E2EE status relay URL.")
+def backend_configure_local(relay_url: str | None):
+    """Keep raw context on this laptop."""
+    cfg = _persist_backend_config(mode="local", relay_url=relay_url)
+    click.echo("configured backend: Local Only")
+    click.echo(f"  ingest: disabled")
+    click.echo(f"  relay:  {cfg.status_relay_url}")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
+@backend_configure_group.command(name="self-hosted")
+@click.option("--url", "backend_url", required=True,
+              help="Backend base or ingest URL, e.g. wss://host:9999/ingest")
+@click.option("--relay-url", default=None, help="Optional E2EE status relay URL.")
+def backend_configure_self_hosted(backend_url: str, relay_url: str | None):
+    """Use a backend you operate."""
+    cfg = _persist_backend_config(
+        mode="self_hosted",
+        backend_url=backend_url,
+        relay_url=relay_url,
+    )
+    click.echo("configured backend: Self-Hosted")
+    click.echo(f"  backend: {cfg.backend_url}")
+    click.echo(f"  ingest:  {cfg.server_url}")
+    click.echo(f"  relay:   {cfg.status_relay_url}")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
+@backend_configure_group.command(name="cloud")
+@click.option("--url", "backend_url", default=None,
+              help="Fisherman Cloud URL (default: hosted TEE endpoint).")
+@click.option("--relay-url", default=None, help="Optional E2EE status relay URL.")
+@click.option("--skip-audit", is_flag=True,
+              help="Persist config without checking TEE attestation.")
+@click.option("--timeout", default=15.0, show_default=True)
+def backend_configure_cloud(
+    backend_url: str | None,
+    relay_url: str | None,
+    skip_audit: bool,
+    timeout: float,
+):
+    """Use Fisherman Cloud."""
+    from fisherman import attestation as _att
+    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL
+
+    url = backend_url or DEFAULT_CLOUD_BACKEND_URL
+    if not skip_audit:
+        live_tls_fp = _live_tls_fingerprint(url, timeout)
+        res = _att.verify_attestation(
+            url,
+            rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or None,
+            contract_address=os.environ.get("FISHERMAN_APP_AUTH_CONTRACT") or None,
+            live_tls_cert_sha256_hex=live_tls_fp,
+            timeout=timeout,
+        )
+        _audit_print_table(
+            res,
+            mirror_url=url,
+            live_tls_fp=live_tls_fp,
+            has_onchain_inputs=bool(
+                os.environ.get("FISHERMAN_ETH_RPC_URL")
+                and os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
+            ),
+        )
+        cloud_failures = _cloud_required_failures(res)
+        if cloud_failures:
+            for failure in cloud_failures:
+                click.echo(f"cloud guarantee missing: {failure}", err=True)
+            click.echo("refusing to configure Fisherman Cloud until attestation passes", err=True)
+            sys.exit(1)
+
+    cfg = _persist_backend_config(mode="cloud", backend_url=url, relay_url=relay_url)
+    click.echo("configured backend: Fisherman Cloud")
+    click.echo(f"  backend: {cfg.backend_url}")
+    click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until cloud ingest pairing is available'}")
+    click.echo(f"  relay:   {cfg.status_relay_url}")
+    click.echo("Restart the daemon for changes to take effect.")
+
+
+@main.group(name="cloud")
+def cloud_group():
+    """Fisherman Cloud operations."""
+
+
+@cloud_group.command(name="audit")
+@click.argument("cloud_url", required=False)
+@click.option("--rpc-url", "rpc_url", envvar="FISHERMAN_ETH_RPC_URL", default=None)
+@click.option("--contract", "contract_address", envvar="FISHERMAN_APP_AUTH_CONTRACT", default=None)
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--timeout", default=15.0, show_default=True)
+def cloud_audit(cloud_url, rpc_url, contract_address, as_json, timeout):
+    """Audit the managed TEE endpoint."""
+    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL
+
+    url = cloud_url or DEFAULT_CLOUD_BACKEND_URL
+    from fisherman import attestation as _att
+    live_tls_fp = _live_tls_fingerprint(url, timeout, quiet=as_json)
+    res = _att.verify_attestation(
+        url,
+        rpc_url=rpc_url,
+        contract_address=contract_address,
+        live_tls_cert_sha256_hex=live_tls_fp,
+        timeout=timeout,
+    )
+    cloud_failures = _cloud_required_failures(res)
+    if as_json:
+        out = _audit_to_json(res, mirror_url=url, live_tls_fp=live_tls_fp)
+        out["cloud_required_ok"] = not cloud_failures
+        out["cloud_required_failures"] = cloud_failures
+        click.echo(json.dumps(out, indent=2))
+        sys.exit(0 if not cloud_failures else 1)
+    _audit_print_table(
+        res,
+        mirror_url=url,
+        live_tls_fp=live_tls_fp,
+        has_onchain_inputs=bool(rpc_url and contract_address),
+    )
+    if cloud_failures:
+        click.echo("")
+        click.echo(click.style("  CLOUD GUARANTEES NOT SATISFIED", fg="red"))
+        for failure in cloud_failures:
+            click.echo(f"    - {failure}")
+    sys.exit(0 if not cloud_failures else 1)
 
 
 @main.command()
@@ -1045,7 +1270,7 @@ def _load_keys():
 
 def _ledger_url() -> str:
     cfg = FishermanConfig()
-    return cfg.ledger_url
+    return cfg.status_relay_url
 
 
 @main.group(name="friend")
@@ -1147,7 +1372,10 @@ def friend_status(name_or_pubkey: str | None, since: str | None, limit: int, as_
     else:
         targets = list_friends()
         if not targets:
-            click.echo("(no friends added yet — try `fisherman friend add <code>`)")
+            if not as_text:
+                click.echo(json.dumps([]))
+            else:
+                click.echo("(no friends added yet — try `fisherman friend add <code>`)")
             return
 
     since_ts = None
@@ -1273,6 +1501,151 @@ def agent_run(interval, since, model, once):
     if once:
         args.append("--once")
     _agent_main.main(args=args, standalone_mode=False)
+
+
+@main.group(name="processor")
+def processor_group():
+    """Install and run custom context processors."""
+
+
+@processor_group.command(name="list")
+@click.option("--text", "as_text", is_flag=True)
+def processor_list(as_text: bool):
+    from fisherman import processor as _p
+
+    rows = _p.list_processors()
+    if not as_text:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    for row in rows:
+        marker = "built-in" if row.get("built_in") else "custom"
+        if row.get("error"):
+            click.echo(f"{row['name']:20}  invalid  {row['error']}")
+            continue
+        click.echo(
+            f"{row['name']:20}  {marker:8}  "
+            f"{','.join(row.get('outputs') or [])}"
+        )
+
+
+@processor_group.command(name="install")
+@click.argument("manifest")
+def processor_install(manifest: str):
+    from fisherman import processor as _p
+
+    try:
+        path = _p.install_manifest(manifest)
+    except _p.ProcessorError as e:
+        click.echo(f"error: {e}", err=True)
+        sys.exit(2)
+    click.echo(f"installed processor: {path}")
+
+
+@processor_group.command(name="run")
+@click.argument("name")
+@click.option("--since", default="5m", show_default=True)
+@click.option("--limit", default=50, show_default=True)
+@click.option("--json", "as_json", is_flag=True)
+def processor_run(name: str, since: str, limit: int, as_json: bool):
+    from fisherman import processor as _p
+
+    try:
+        result = _p.run_processor(name, since=since, limit=limit)
+    except _p.ProcessorError as e:
+        click.echo(f"error: {e}", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(f"processor {name} completed")
+        output = result.get("output")
+        if output not in (None, {"ok": True}):
+            click.echo(json.dumps(output, indent=2))
+
+
+@processor_group.group(name="schedule")
+def processor_schedule_group():
+    """Manage recurring processor schedules."""
+
+
+@processor_schedule_group.command(name="list")
+@click.option("--text", "as_text", is_flag=True)
+def processor_schedule_list(as_text: bool):
+    from fisherman import processor as _p
+
+    rows = _p.list_schedules()
+    if not as_text:
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.echo("(no processor schedules)")
+        return
+    for row in rows:
+        status = "on" if row.get("enabled", True) else "off"
+        last = row.get("last_run_at")
+        last_s = _fmt_ts(last) if last else "never"
+        click.echo(
+            f"{row.get('id'):28} {status:3} "
+            f"{row.get('processor'):18} every={row.get('every')} "
+            f"since={row.get('since')} last={last_s}"
+        )
+
+
+@processor_schedule_group.command(name="add")
+@click.argument("schedule_id")
+@click.argument("processor_name")
+@click.option("--every", required=True, help="Cadence, e.g. 60m, 6h, 1d.")
+@click.option("--since", default="5m", show_default=True)
+@click.option("--limit", default=50, show_default=True)
+@click.option("--disabled", is_flag=True, help="Create schedule but leave it disabled.")
+def processor_schedule_add(schedule_id, processor_name, every, since, limit, disabled):
+    from fisherman import processor as _p
+
+    try:
+        row = _p.add_schedule(
+            schedule_id,
+            processor_name,
+            every=every,
+            since=since,
+            limit=limit,
+            enabled=not disabled,
+        )
+    except _p.ProcessorError as e:
+        click.echo(f"error: {e}", err=True)
+        sys.exit(2)
+    click.echo(f"scheduled: {row['id']} -> {row['processor']} every {row['every']}")
+    click.echo("Run periodically with: fisherman processor schedule run-due")
+
+
+@processor_schedule_group.command(name="remove")
+@click.argument("schedule_id")
+def processor_schedule_remove(schedule_id):
+    from fisherman import processor as _p
+
+    if _p.remove_schedule(schedule_id):
+        click.echo(f"removed schedule: {schedule_id}")
+    else:
+        click.echo(f"not found: {schedule_id}", err=True)
+        sys.exit(1)
+
+
+@processor_schedule_group.command(name="run-due")
+@click.option("--json", "as_json", is_flag=True)
+def processor_schedule_run_due(as_json: bool):
+    from fisherman import processor as _p
+
+    results = _p.run_due()
+    if as_json:
+        click.echo(json.dumps(results, indent=2))
+        return
+    if not results:
+        click.echo("(no schedules due)")
+        return
+    for row in results:
+        if row.get("ok"):
+            click.echo(f"{row.get('id')}: ok")
+        else:
+            click.echo(f"{row.get('id')}: error: {row.get('error')}", err=True)
 
 
 @main.group(name="ledger")
@@ -1590,12 +1963,12 @@ def mirror_status():
     online = data.get("relay_connected", False)
     click.echo(f"laptop relay-connected: {online}")
     click.echo("self-hosted mirror pairing: use `fisherman mirror pair-mint`")
-    click.echo("managed Fisherman Cloud pairing: not wired into this CLI build yet")
+    click.echo("managed Fisherman Cloud pairing: use `fisherman backend configure cloud` once `fisherman cloud audit` passes")
 
 
 @main.group(name="storage")
 def storage_group():
-    """Configure encrypted-mirror backup of your local context."""
+    """Configure optional encrypted backup of your local context."""
 
 
 @storage_group.command(name="status")
@@ -1631,7 +2004,7 @@ def storage_status(as_text: bool):
     if not as_text:
         click.echo(json.dumps(out, indent=2))
         return
-    click.echo(f"backend:        {out['summary']}")
+    click.echo(f"backup:         {out['summary']}")
     click.echo(f"uploaded files: {out['sync']['uploaded_files']}")
     click.echo(f"bytes uploaded: {out['sync']['bytes_uploaded']:,}")
     if state.last_scan_at:
@@ -1642,7 +2015,7 @@ def storage_status(as_text: bool):
         click.echo(f"last error:     {state.last_error}")
 
 
-@storage_group.command(name="configure-local")
+@storage_group.command(name="configure-local", hidden=True)
 @click.option("--path", "fs_path", required=True, help="Mirror directory")
 def storage_configure_local(fs_path: str):
     """Configure a local-filesystem mirror (for testing or NAS)."""
@@ -1652,7 +2025,7 @@ def storage_configure_local(fs_path: str):
     click.echo("Restart the daemon for changes to take effect.")
 
 
-@storage_group.command(name="configure-s3")
+@storage_group.command(name="configure-s3", hidden=True)
 @click.option("--bucket", required=True)
 @click.option("--endpoint", default=None,
               help="S3 endpoint URL (e.g. https://<acct>.r2.cloudflarestorage.com); "
@@ -1684,7 +2057,7 @@ def storage_configure_s3(bucket, endpoint, key_id, secret, region, prefix):
               help="Refresh token from the OOB OAuth flow (see docs/drive-setup.md)")
 @click.option("--folder-name", "folder_name", default="fisherman", show_default=True)
 def storage_configure_drive(client_id, client_secret, refresh_token, folder_name):
-    """Configure a Google Drive mirror (BYO OAuth client; see docs/drive-setup.md)."""
+    """Configure Google Drive backup (BYO OAuth client; see docs/drive-setup.md)."""
     from fisherman import storage_config
     storage_config.save({
         "kind": "drive",
@@ -1697,7 +2070,7 @@ def storage_configure_drive(client_id, client_secret, refresh_token, folder_name
     click.echo("Restart the daemon for changes to take effect.")
 
 
-@storage_group.command(name="configure-webdav")
+@storage_group.command(name="configure-webdav", hidden=True)
 @click.option("--url", required=True, help="Base URL (e.g. https://u123456.your-storagebox.de/fisherman/)")
 @click.option("--username", required=True)
 @click.option("--password", required=True)
@@ -1718,10 +2091,10 @@ def storage_configure_webdav(url, username, password, prefix):
 
 @storage_group.command(name="disable")
 def storage_disable():
-    """Turn off the storage mirror (keeps local capture only)."""
+    """Turn off backup (keeps local capture only)."""
     from fisherman import storage_config
     storage_config.disable()
-    click.echo("storage mirror disabled")
+    click.echo("backup disabled")
     click.echo("Restart the daemon for changes to take effect.")
 
 

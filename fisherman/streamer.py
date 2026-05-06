@@ -224,7 +224,7 @@ class Streamer:
                     log.error(
                         "server_unreachable",
                         url=self._url,
-                        hint="Frames saved locally. Check FISH_SERVER_URL. Retrying...",
+                        hint="Frames saved locally. Check the configured backend URL. Retrying...",
                     )
                 else:
                     log.warning("websocket_disconnected", backoff=backoff, exc_info=True)

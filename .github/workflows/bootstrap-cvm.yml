@@ -20,7 +20,8 @@ name: Bootstrap fisherman-mirror CVM (one-time)
 #   FISHERMAN_APP_AUTH_ETH_SEPOLIA   set by contract-deploy workflow
 #
 # Set BEFORE running:
-#   secrets.MIRROR_DOMAIN                e.g. mirror.fisherman.app
+#   variables.MIRROR_DOMAIN              e.g. fisherman.teleport.computer
+#   variables.RELAY_DOMAIN               optional; default relay.fisherman.teleport.computer
 #   variables.PHALA_NODE_ID              numeric node id (currently prod9 = "18")
 #   variables.PHALA_GATEWAY              dstack-pha-prod9.phala.network
 
@@ -52,6 +53,7 @@ jobs:
       GATEWAY:      ${{ vars.PHALA_GATEWAY }}
       COMPOSE_FILE: mirror/deploy/docker-compose.phala.yaml
       MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
+      RELAY_DOMAIN:  ${{ vars.RELAY_DOMAIN || 'relay.fisherman.teleport.computer' }}
 
     steps:
       - name: Gate on explicit confirmation
@@ -116,6 +118,7 @@ jobs:
             -e CF_API_TOKEN="$CF_API_TOKEN" \
             -e CF_ZONE_ID="$CF_ZONE_ID" \
             -e DOMAIN="$MIRROR_DOMAIN" \
+            -e RELAY_DOMAIN="$RELAY_DOMAIN" \
             --wait -j 2>&1 | tee /tmp/deploy.log
 
           # Tail of the log is a JSON document — extract app_id + vm_uuid
@@ -129,17 +132,19 @@ jobs:
           echo "app_id=$APP_ID"   >> "$GITHUB_OUTPUT"
           echo "vm_uuid=$VM_UUID" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for ingress + LE certs
+      - name: Wait for Cloud + relay ingress
         run: |
           set -euo pipefail
           DEADLINE=$(( $(date +%s) + 600 ))   # 10 min
           while [[ $(date +%s) -lt $DEADLINE ]]; do
-            HTTP=$(curl -sk -o /dev/null -w "%{http_code}" "https://$MIRROR_DOMAIN/health" || true)
-            echo "  https://$MIRROR_DOMAIN/health → $HTTP"
-            if [[ "$HTTP" == "200" ]]; then exit 0; fi
+            MIRROR_HTTP=$(curl -sk -o /dev/null -w "%{http_code}" "https://$MIRROR_DOMAIN/health" || true)
+            RELAY_HTTP=$(curl -sk -o /dev/null -w "%{http_code}" "https://$RELAY_DOMAIN/health" || true)
+            echo "  https://$MIRROR_DOMAIN/health → $MIRROR_HTTP"
+            echo "  https://$RELAY_DOMAIN/health → $RELAY_HTTP"
+            if [[ "$MIRROR_HTTP" == "200" && "$RELAY_HTTP" == "200" ]]; then exit 0; fi
             sleep 15
           done
-          echo "::error::ingress never came up at https://$MIRROR_DOMAIN/health"
+          echo "::error::ingress never came up for both Cloud and relay"
           exit 1
 
       - name: Compute compose_hash + publish on-chain
@@ -198,6 +203,7 @@ jobs:
             echo "| VM UUID | \`${{ steps.deploy.outputs.vm_uuid }}\` |"
             echo "| Compose | \`$COMPOSE_FILE\` @ \`$(git rev-parse --short HEAD)\` |"
             echo "| Domain | $MIRROR_DOMAIN |"
+            echo "| Relay | $RELAY_DOMAIN |"
             echo "| Workflow run | https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} |"
           } >> mirror/deploy/DEPLOYMENTS.md
           git config user.name  "fisherman-ci"
@@ -213,5 +219,6 @@ jobs:
             echo "- App ID: \`${{ steps.deploy.outputs.app_id }}\`"
             echo "- VM UUID: \`${{ steps.deploy.outputs.vm_uuid }}\`"
             echo "- Domain: https://$MIRROR_DOMAIN"
+            echo "- Relay: https://$RELAY_DOMAIN"
             echo "- Dashboard: https://cloud.phala.com/dashboard/cvms/${{ steps.deploy.outputs.vm_uuid }}"
           } >> "$GITHUB_STEP_SUMMARY"

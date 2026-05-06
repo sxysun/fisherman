@@ -1,6 +1,6 @@
 ---
 name: fisherman
-description: One-stop guide for any agent (Claude Code, OpenCode, Hermes, ...) operating Fisherman — sets up the screen-capture ingest server end-to-end, queries the encrypted user-activity store, and maintains a durable Obsidian-native memory wiki.
+description: One-stop guide for any agent operating Fisherman — configures backend mode, can set up a self-hosted ingest server, queries captured context, and maintains a durable Obsidian-native memory wiki.
 version: 1.0.0
 license: MIT
 ---
@@ -9,17 +9,45 @@ license: MIT
 
 You are an AI agent. The user wants you to operate Fisherman for them. Read this whole file, then do whatever phase the user is asking about.
 
-There are three phases. They are independent — you do not have to do all of them in one session.
+There are four phases. They are independent — you do not have to do all of them in one session.
 
-1. **Setup** — bring up the ingest server and hand the user a setup code for the macOS client.
-2. **Query** — answer questions like *"what have I been doing?"* by reading the encrypted capture store.
-3. **Memory** — keep a durable, searchable wiki under `~/mind` (or `/home/ubuntu/mind`) so you have long-term context.
+1. **Backend mode** — choose Local Only, Fisherman Cloud, or Self-Hosted.
+2. **Self-hosted setup** — bring up the ingest server when the user wants their own backend.
+3. **Query** — answer questions like *"what have I been doing?"* by reading captured context.
+4. **Memory** — keep a durable, searchable wiki under `~/mind` (or `/home/ubuntu/mind`) so you have long-term context.
 
-If the user just said *"set up Fisherman"* with no further context, do **phase 1** and stop.
+If the user just said *"set up Fisherman"* with no further context, prefer **Local Only** unless they explicitly ask for Cloud or Self-Hosted.
 
 ---
 
-## Phase 1 — Server setup
+## Phase 1 — Backend mode
+
+Fisherman has three user-facing backend modes:
+
+- `local`: raw context stays on the laptop; friend status can still use the encrypted relay.
+- `cloud`: managed Fisherman Cloud backend; do not pair unless attestation passes.
+- `self_hosted`: user-operated backend using the `server/`, `relay/`, and `mirror/` pieces.
+
+Commands:
+
+```bash
+fisherman backend status
+fisherman backend configure local
+fisherman cloud audit https://fisherman.teleport.computer
+fisherman backend configure cloud
+fisherman backend configure self-hosted --url wss://your-host:9999/ingest
+```
+
+Privacy rules:
+
+- Local Only means no raw context ingest.
+- Fisherman Cloud means private-context processing must happen inside an attested TDX CVM.
+- Self-Hosted means the user trusts their own server/operator.
+- The status relay is low-trust because payloads are signed and encrypted client-side.
+
+---
+
+## Phase 2 — Self-hosted server setup
 
 **Goal:** stand up the ingest server, generate auth + encryption material, and report back a one-line setup code the user pastes into the macOS client.
 
@@ -43,11 +71,11 @@ cd server
 bash bootstrap-agent.sh --start
 ```
 
-This is the canonical agent entry point. It will:
+This is the self-hosted backend entry point. It will:
 
 - run `setup.sh` (creates `.env`, installs Python deps via `uv`, sets up local Postgres, generates an encryption key, generates `INGEST_AUTH_TOKEN` if missing)
 - start `ingest.py` in the background via `nohup`, logging to `server/ingest.log`
-- print `SERVER_WS_URL`, `CLIENT_AUTH_TOKEN`, and a base64 `SETUP_CODE` like `fish:eyJ1cmwi...`
+- print `SERVER_WS_URL`, `CLIENT_AUTH_TOKEN`, and a base64 `SETUP_CODE`
 
 If `bootstrap-agent.sh` is unavailable, do the equivalent by hand:
 
@@ -89,7 +117,7 @@ Tell the user, in this exact shape:
 - **Server WebSocket URL:** `ws://...` or `wss://...`
 - **Auth token:** the value of `INGEST_AUTH_TOKEN`
 - **Setup code:** `fishsetup:...` (or just the raw URL + token for manual entry)
-- **Storage:** local disk under `server/frames/` *or* R2 (whichever is configured)
+- **Server storage:** local disk under `server/frames/` *or* R2 (whichever is configured)
 - **Process status:** running as PID `<pid>`, logs at `server/ingest.log`
 
 If a token already existed in `.env`, say so and confirm you reused it rather than overwriting it.
@@ -98,15 +126,18 @@ If a token already existed in `.env`, say so and confirm you reused it rather th
 
 **Ed25519 key auth (primary):** The server and client share an ed25519 key pair via `FISH_PRIVATE_KEY`. The client signs each request with a timestamp; the server verifies the signature. This is used for WebSocket ingest, the activity API, and the friends API.
 
-**Bearer token auth (legacy):** `INGEST_AUTH_TOKEN` is a shared bearer password. The client sets `FISH_AUTH_TOKEN` to the same value. Still supported for backward compatibility.
+**Bearer token auth:** Setup scripts still mint `INGEST_AUTH_TOKEN`. Current client/server auth should use FishKey. Verify the code path before relying on bearer auth.
 
-**Friends:** The server maintains a `friends.json` allow-list of friend public keys. Friends can query your activity via `GET /api/current_activity`. Manage friends via `POST/DELETE /api/friends` (owner-only) or through the client's Settings → Friends tab using friend codes.
+**Server-direct friends:** The server maintains a `friends.json`
+allow-list of friend public keys. Friends can query your activity via
+`GET /api/current_activity`. The current menubar uses relay/E2EE friend
+codes by default.
 
-**Friend codes:** A `fish:<base64url(json)>` URI encoding display name, public key, hostname, and ports. Users share these to add each other — no SSH or .env editing needed. The client auto-registers friends on the server via the `/api/friends` endpoint.
+**Friend codes:** Friend status should use the relay/E2EE model from `fisherman friend code`.
 
 ---
 
-## Phase 2 — Querying captured data
+## Phase 3 — Querying captured data
 
 Use this when the user asks something like *"what was I doing in the last hour?"*, *"find the chat where we discussed X"*, or *"show me the screenshot from when I was looking at Y"*.
 
@@ -161,7 +192,7 @@ For the full operational playbook (every mismatch trap encountered in production
 
 ---
 
-## Phase 3 — Durable memory wiki
+## Phase 4 — Durable memory wiki
 
 Use this when the user wants more than ephemeral chat answers — when they want a layered, searchable memory of what they've been doing, who they've been talking to, and what themes are emerging across days or weeks.
 

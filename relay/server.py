@@ -24,9 +24,11 @@ import base64
 import json
 import os
 import secrets
+import sqlite3
 import struct
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 from aiohttp import WSMsgType, web
@@ -36,7 +38,6 @@ import structlog
 
 log = structlog.get_logger()
 
-# Per-pubkey ring buffer; not persisted across restarts (v0).
 _DEFAULT_BUFFER_SIZE = 200
 _DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 _MAX_CIPHERTEXT_BYTES = 64 * 1024  # 64 KiB ceiling per event
@@ -45,6 +46,8 @@ _MAX_PAST_DRIFT = 7 * 24 * 3600    # reject events older than 7d at submit time
 
 
 class EventStore:
+    """In-memory event store for local development and tests."""
+
     def __init__(self, buffer_size: int = _DEFAULT_BUFFER_SIZE, ttl: int = _DEFAULT_TTL_SECONDS):
         self._buffers: dict[str, deque[dict]] = {}
         self._buffer_size = buffer_size
@@ -84,6 +87,112 @@ class EventStore:
             if not buf:
                 del self._buffers[author]
         return removed
+
+
+class SQLiteEventStore:
+    """Durable relay event store.
+
+    The relay still holds no secrets: it persists only author pubkeys,
+    timestamps, signatures, and opaque ciphertext. The buffer-size limit is
+    enforced per author so public relay storage cannot grow unboundedly.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        buffer_size: int = _DEFAULT_BUFFER_SIZE,
+        ttl: int = _DEFAULT_TTL_SECONDS,
+    ):
+        self._path = Path(path).expanduser()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._buffer_size = buffer_size
+        self._ttl = ttl
+        self._db = sqlite3.connect(str(self._path), isolation_level=None)
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                author_pubkey TEXT NOT NULL,
+                ts REAL NOT NULL,
+                ciphertext TEXT NOT NULL,
+                sig TEXT NOT NULL
+            )
+        """)
+        self._db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_author_ts
+            ON events(author_pubkey, ts DESC, event_id DESC)
+        """)
+
+    def append(self, author_hex: str, event: dict) -> int:
+        cur = self._db.execute(
+            """
+            INSERT INTO events(author_pubkey, ts, ciphertext, sig)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                author_hex,
+                float(event["ts"]),
+                event["ciphertext"],
+                event["sig"],
+            ),
+        )
+        event_id = int(cur.lastrowid)
+        self._trim_author(author_hex)
+        return event_id
+
+    def fetch(self, author_hex: str, since_ts: float | None, limit: int) -> list[dict]:
+        cutoff = time.time() - self._ttl
+        params: list[Any] = [author_hex, cutoff]
+        where = "author_pubkey = ? AND ts >= ?"
+        if since_ts is not None:
+            where += " AND ts > ?"
+            params.append(since_ts)
+        params.append(limit)
+        rows = self._db.execute(
+            f"""
+            SELECT event_id, author_pubkey, ts, ciphertext, sig
+            FROM events
+            WHERE {where}
+            ORDER BY ts DESC, event_id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        return [
+            {
+                "author_pubkey": row["author_pubkey"],
+                "ts": float(row["ts"]),
+                "ciphertext": row["ciphertext"],
+                "sig": row["sig"],
+                "event_id": int(row["event_id"]),
+            }
+            for row in rows
+        ]
+
+    def evict_expired(self) -> int:
+        cutoff = time.time() - self._ttl
+        cur = self._db.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
+        return int(cur.rowcount or 0)
+
+    def _trim_author(self, author_hex: str) -> None:
+        self._db.execute(
+            """
+            DELETE FROM events
+            WHERE author_pubkey = ?
+              AND event_id NOT IN (
+                SELECT event_id FROM events
+                WHERE author_pubkey = ?
+                ORDER BY ts DESC, event_id DESC
+                LIMIT ?
+              )
+            """,
+            (author_hex, author_hex, self._buffer_size),
+        )
+
+    def close(self) -> None:
+        self._db.close()
 
 
 def _verify_event(author_hex: str, ts: float, ciphertext: bytes, sig_hex: str) -> bool:
@@ -431,9 +540,17 @@ async def _eviction_task(app: web.Application) -> None:
             log.warning("eviction_failed", exc_info=True)
 
 
-def build_app(buffer_size: int = _DEFAULT_BUFFER_SIZE, ttl: int = _DEFAULT_TTL_SECONDS) -> web.Application:
+def build_app(
+    buffer_size: int = _DEFAULT_BUFFER_SIZE,
+    ttl: int = _DEFAULT_TTL_SECONDS,
+    db_path: str | None = None,
+) -> web.Application:
     app = web.Application(client_max_size=2 * _MAX_CIPHERTEXT_BYTES)
-    app["store"] = EventStore(buffer_size=buffer_size, ttl=ttl)
+    app["store"] = (
+        SQLiteEventStore(db_path, buffer_size=buffer_size, ttl=ttl)
+        if db_path else
+        EventStore(buffer_size=buffer_size, ttl=ttl)
+    )
     app["router"] = Router()
     app.router.add_post("/events", post_events)
     app.router.add_get("/events", get_events)
@@ -452,6 +569,10 @@ def build_app(buffer_size: int = _DEFAULT_BUFFER_SIZE, ttl: int = _DEFAULT_TTL_S
                 await task
             except asyncio.CancelledError:
                 pass
+        store = app.get("store")
+        close = getattr(store, "close", None)
+        if close:
+            close()
 
     app.on_startup.append(_start_evictor)
     app.on_cleanup.append(_stop_evictor)
@@ -464,6 +585,7 @@ def main():
     parser.add_argument("--port", type=int, default=int(os.environ.get("RELAY_PORT", "9100")))
     parser.add_argument("--buffer-size", type=int, default=_DEFAULT_BUFFER_SIZE)
     parser.add_argument("--ttl-days", type=int, default=7)
+    parser.add_argument("--db-path", default=os.environ.get("RELAY_DB_PATH"))
     args = parser.parse_args()
 
     structlog.configure(
@@ -474,9 +596,14 @@ def main():
         ],
     )
 
-    app = build_app(buffer_size=args.buffer_size, ttl=args.ttl_days * 86400)
+    app = build_app(
+        buffer_size=args.buffer_size,
+        ttl=args.ttl_days * 86400,
+        db_path=args.db_path,
+    )
     log.info("relay_starting", host=args.host, port=args.port,
-             buffer_size=args.buffer_size, ttl_days=args.ttl_days)
+             buffer_size=args.buffer_size, ttl_days=args.ttl_days,
+             durable=bool(args.db_path), db_path=args.db_path or "")
     web.run_app(app, host=args.host, port=args.port, print=None)
 
 

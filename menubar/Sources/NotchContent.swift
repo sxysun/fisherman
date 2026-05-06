@@ -108,7 +108,7 @@ struct ExpandedContent: View {
 
             // Process rows
             processRow(name: "screenpipe", ok: state.screenpipeHealthy)
-            processRow(name: "fisherman", ok: state.fishermanRunning && state.fishermanConnected)
+            processRow(name: "fisherman", ok: state.fishermanHealthy)
 
             Divider()
 

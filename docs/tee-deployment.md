@@ -1,8 +1,15 @@
-# TEE deployment for the mirror endpoint
+# TEE deployment for Fisherman Cloud backend
 
-Phase 6 from the design. Today the mirror runs as a regular process
-(see `mirror/server.py`); for hosted Fisherman Cloud we deploy the same
-binary into a TDX CVM where the operator (us) cannot read user data.
+Fisherman Cloud is the managed backend mode. The current deployable
+binary is the mirror/query endpoint, but the product direction is broader:
+the CVM should become the managed backend surface for ingest, query,
+processors, agent access, and sealed per-user state.
+
+Any component that decrypts, indexes, queries, summarizes, or stores
+private context must run inside the attested CVM or remain on the user's
+device. The low-trust relay can stay outside the TEE while it only stores
+signed, client-encrypted payloads; the Cloud compose still deploys the
+official relay beside the attested backend so users get one default URL.
 
 The pattern follows `feedling-mcp-v1` — same shape, different workload.
 
@@ -27,9 +34,9 @@ not Nitro. Reasons:
 
 ```
 mirror/deploy/
-├── Dockerfile                    # one image, entrypoint = fisherman-mirror serve
+├── Dockerfile                    # one image, mirror service + relay module
 ├── requirements.lock             # uv pip compile --generate-hashes
-├── docker-compose.phala.yaml     # ingress + mirror service
+├── docker-compose.phala.yaml     # ingress + mirror + official relay
 ├── docker-compose.yaml           # local dev / non-TDX self-host
 ├── build-reproducible.sh         # back-to-back build → byte-identical OCI tarball
 ├── build-manifest.json           # committed; carries expected sha256 + image digest
@@ -49,6 +56,7 @@ COPY mirror/requirements.lock ./requirements.lock
 RUN pip install --require-hashes -r requirements.lock
 COPY fisherman/ ./fisherman/
 COPY mirror/    ./mirror/
+COPY relay/     ./relay/
 ARG FISHERMAN_GIT_COMMIT=dev
 ARG FISHERMAN_BUILT_AT=dev
 ARG FISHERMAN_IMAGE_DIGEST=sha256:dev
@@ -65,12 +73,17 @@ byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.
 
 ### 2. dstack compose
 
-`docker-compose.phala.yaml` declares two services:
+`docker-compose.phala.yaml` declares three services:
 
 - **ingress** (`dstacktee/dstack-ingress:<digest>`) — TLS termination
-  for `mirror.fisherman.app`, LE certs via CF DNS-01 inside the CVM.
+  for the Cloud backend and relay hostnames, LE certs via CF DNS-01
+  inside the CVM.
 - **mirror** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
   `fisherman-mirror serve`, reads its config from KMS-derived secrets.
+- **relay** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
+  `python -m relay.server` with a SQLite event store. It persists only
+  signed ciphertext and is not allowed to decrypt, index, summarize, or
+  store raw context.
 
 Every literal in this file enters the compose_hash. Cosmetic env vars
 (commit SHA, build timestamp) are explicitly category (A) — never
@@ -91,12 +104,12 @@ gets a new compose_hash committed with `addComposeHash()` before any
 client is willing to talk to it. Old compose_hashes stay allowed so
 older client builds keep working until users update.
 
-### 4. Pairing flow (replaces today's `fisherman mirror pair-mint` env-var trick)
+### 4. Pairing flow
 
 For the hosted Cloud variant the user should not see env vars or config
 files. The intended self-serve flow:
 
-1. Menubar → Settings → Mirror → managed Fisherman Cloud pairing
+1. Menubar -> Settings -> Backend -> Fisherman Cloud
 2. Menubar fetches `https://mirror.fisherman.app/.well-known/attestation`
    - Returns the TDX quote, RTMR3 event log, compose_hash, app_id,
      ingress cert fingerprint
@@ -111,8 +124,9 @@ files. The intended self-serve flow:
    `enclave_content_pk` (returned by `/v1/pair/init`). The user's
    X25519 priv + `K_blob_at_rest` are encrypted to this enclave-bound
    key; the enclave decrypts inside the CVM, never on the wire.
-5. The mirror is now paired. Same RPC protocol as today's
-   `mirror/server.py` — just with sealed keys.
+5. The Cloud backend is now paired. The first paired capability is the
+   mirror/RPC protocol in `mirror/server.py`; ingest and processor
+   surfaces should use the same attestation-gated trust root.
 
 This matches feedling's content-encryption pattern: the key derivation
 path is stable for a given `app_id`, so v1 envelopes survive compose
@@ -133,11 +147,9 @@ If any row fails, menubar refuses to send the pairing token.
 
 ## What's NOT blocking dogfooding
 
-Self-hosted mirrors (`mirror/server.py` running on a user's VPS) work
-today — the trust model is "you trust your VPS." That covers everyone
-who's ok running their own Hetzner box. The TEE variant is for users
-who don't want to operate infrastructure but still want operator-untrusted
-hosting.
+Self-hosted backends can continue to run on a user's VPS. The trust model
+is "you trust your server." Fisherman Cloud is for users who do not want
+to operate infrastructure but still want operator-untrusted hosting.
 
 ## When to revisit
 
@@ -149,10 +161,9 @@ know:
 - Failover speed under real network conditions
 - How often the mirror actually serves agent traffic vs the laptop
 
-Then commit to the multi-week TEE push. Until then, the pattern is
-mapped (this doc) and the binary is ready (`mirror/server.py`); the
-remaining work is build infrastructure + on-chain governance, not new
-crypto.
+Then finish the multi-week TEE backend push. The deployment, audit, and
+governance foundations are already present; the remaining work is to
+expand the CVM service from mirror fallback into the full managed backend.
 
 ## References
 

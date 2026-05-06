@@ -14,7 +14,7 @@ Source modes (--from selector):
   - --from-branch X    git fetch + reset to origin/X
 
 What gets synced (only these — never user data):
-  fisherman/                 (Python source incl. data/)
+  fisherman/, mirror/, relay/ (Python source incl. data/)
   pyproject.toml
   uv.lock
   menubar/   (only if the source has changed since last install,
@@ -43,6 +43,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +53,7 @@ DEFAULT_INSTALL_DIR = Path.home() / ".fisherman"
 BACKUP_DIRNAME = ".backup"
 KEEP_BACKUPS = 3
 DEFAULT_CONTROL_PORT = 7892
+PYTHON_PACKAGES = ("fisherman", "mirror", "relay")
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +246,7 @@ def make_backup(install_dir: Path) -> Path:
     ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     bdir = install_dir / BACKUP_DIRNAME / ts
     bdir.mkdir(parents=True, exist_ok=True)
-    for item in ("fisherman", "pyproject.toml", "uv.lock"):
+    for item in (*PYTHON_PACKAGES, "pyproject.toml", "uv.lock"):
         src = install_dir / item
         if src.exists():
             dst = bdir / item
@@ -267,7 +269,7 @@ def prune_backups(install_dir: Path, keep: int = KEEP_BACKUPS) -> int:
 
 
 def restore_backup(install_dir: Path, backup_dir: Path) -> None:
-    for item in ("fisherman", "pyproject.toml", "uv.lock"):
+    for item in (*PYTHON_PACKAGES, "pyproject.toml", "uv.lock"):
         src = backup_dir / item
         dst = install_dir / item
         if not src.exists():
@@ -284,7 +286,7 @@ def restore_backup(install_dir: Path, backup_dir: Path) -> None:
 
 
 def sync_python_code(src: Path, install_dir: Path) -> dict:
-    """Rsync the Python source tree + lockfiles into the install dir.
+    """Rsync Python packages + lockfiles into the install dir.
 
     Returns a small report {"files_changed": int, "menubar_changed": bool}.
 
@@ -298,15 +300,21 @@ def sync_python_code(src: Path, install_dir: Path) -> dict:
     if same:
         files_changed = 0
     else:
-        cmd = [
-            "rsync", "-a", "--delete",
-            "--exclude=__pycache__",
-            "--exclude=.pytest_cache",
-            "--out-format=%n",
-            f"{src}/fisherman/", f"{install_dir}/fisherman/",
-        ]
-        out = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        files_changed = len([ln for ln in out.stdout.splitlines() if ln.strip()])
+        files_changed = 0
+        for package in PYTHON_PACKAGES:
+            package_src = src / package
+            if not package_src.is_dir():
+                continue
+            package_dst = install_dir / package
+            cmd = [
+                "rsync", "-a", "--delete",
+                "--exclude=__pycache__",
+                "--exclude=.pytest_cache",
+                "--out-format=%n",
+                f"{package_src}/", f"{package_dst}/",
+            ]
+            out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            files_changed += len([ln for ln in out.stdout.splitlines() if ln.strip()])
 
         # pyproject.toml + uv.lock — required for `uv sync` to pick up new deps.
         for f in ("pyproject.toml", "uv.lock"):
@@ -572,6 +580,24 @@ def diagnose() -> dict:
     Returns a flat dict {check: {ok, detail}}. Used by `fisherman repair`
     and `fisherman doctor`."""
     out: dict = {}
+    try:
+        from fisherman.config import FishermanConfig
+        cfg = FishermanConfig()
+        out["backend"] = {
+            "ok": True,
+            "detail": (
+                f"{cfg.backend_summary}; "
+                f"ingest={'enabled' if cfg.streaming_enabled else 'disabled'}; "
+                f"relay={cfg.status_relay_url}"
+            ),
+        }
+        out["identity"] = {
+            "ok": bool(cfg.private_key),
+            "detail": "FISH_PRIVATE_KEY present"
+                      if cfg.private_key else "FISH_PRIVATE_KEY missing",
+        }
+    except Exception as e:
+        out["backend"] = {"ok": False, "detail": f"config error: {e}"}
     out["menubar"] = {
         "ok": menubar_running(),
         "detail": "FishermanMenu process found"
@@ -583,6 +609,13 @@ def diagnose() -> dict:
         "detail": (f"control port up; frames_sent={daemon.get('frames_sent')}"
                    if daemon else "no response on 127.0.0.1:7892"),
     }
+    if "backend" in out:
+        try:
+            cfg = FishermanConfig()
+            relay_ok, relay_detail = relay_health(cfg.status_relay_url, daemon=daemon)
+            out["status_relay"] = {"ok": relay_ok, "detail": relay_detail}
+        except Exception as e:
+            out["status_relay"] = {"ok": False, "detail": f"relay config error: {e}"}
     sp_path = shutil.which("screenpipe")
     sp_detail = sp_path or "not on PATH (install from https://docs.screenpi.pe/)"
     if sp_path:
@@ -686,6 +719,7 @@ def repair() -> dict:
     _kill_and_wait("screenpipe.*fisherman", timeout=3.0)
     # 3. Bring the menubar back up (which spawns daemon + screenpipe).
     launch_app(retries=3)
+    _maybe_start_local_relay()
     # 4. Give it a moment for screenpipe + daemon to come up.
     time.sleep(3.0)
     return diagnose()
@@ -704,6 +738,79 @@ def daemon_status(port: int = DEFAULT_CONTROL_PORT,
             return json.loads(r.read())
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
         return None
+
+
+def relay_health(relay_url: str, *, daemon: Optional[dict] = None,
+                 timeout: float = 1.0) -> tuple[bool, str]:
+    relay_url = (relay_url or "").rstrip("/")
+    if not relay_url:
+        return False, "no relay URL configured"
+    health_url = relay_url + "/health"
+    try:
+        with urllib.request.urlopen(health_url, timeout=timeout) as r:
+            ok = r.status == 200
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as e:
+        return False, f"{relay_url} not reachable: {e}"
+    relay_ws = bool(daemon and daemon.get("relay_connected"))
+    detail = f"{relay_url} reachable"
+    if daemon is not None:
+        detail += "; daemon RPC mailbox " + ("connected" if relay_ws else "not connected yet")
+    return ok, detail
+
+
+def _local_relay_port(relay_url: str) -> Optional[int]:
+    try:
+        parsed = urllib.parse.urlparse(relay_url)
+    except Exception:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return None
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def _maybe_start_local_relay() -> None:
+    try:
+        from fisherman.config import FishermanConfig
+        cfg = FishermanConfig()
+        port = _local_relay_port(cfg.status_relay_url)
+        if port is None:
+            return
+        ok, _ = relay_health(cfg.status_relay_url, timeout=0.5)
+        if ok:
+            return
+    except Exception:
+        return
+
+    python_exe = DEFAULT_INSTALL_DIR / ".venv" / "bin" / "python"
+    if not python_exe.exists():
+        python_exe = Path(sys.executable)
+    data_dir = DEFAULT_INSTALL_DIR / "relay"
+    log_dir = DEFAULT_INSTALL_DIR / "logs"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "relay.log"
+    db_path = data_dir / "events.sqlite"
+    logf = open(log_path, "ab")
+    subprocess.Popen(
+        [
+            str(python_exe),
+            "-u",
+            "-m",
+            "relay.server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--db-path",
+            str(db_path),
+        ],
+        cwd=str(DEFAULT_INSTALL_DIR),
+        stdout=logf,
+        stderr=logf,
+        start_new_session=True,
+    )
 
 
 def stop_daemon(port: int = DEFAULT_CONTROL_PORT) -> None:

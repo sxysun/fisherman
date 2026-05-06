@@ -36,6 +36,7 @@ jobs:
     env:
       COMPOSE_FILE:  mirror/deploy/docker-compose.phala.yaml
       MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
+      RELAY_DOMAIN:  ${{ vars.RELAY_DOMAIN || 'relay.fisherman.teleport.computer' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -73,7 +74,7 @@ jobs:
           CF_ZONE_ID:          ${{ vars.CF_ZONE_ID }}
         run: |
           set -euo pipefail
-          # The legacy `phala cvms upgrade` wrapper mis-parses -e KEY=VALUE
+          # The older `phala cvms upgrade` wrapper mis-parses -e KEY=VALUE
           # (treats it as an env-file path). The modern `phala deploy
           # --cvm-id <uuid>` does the same in-place upgrade and accepts
           # -e correctly. See `phala deploy --help`.
@@ -85,7 +86,7 @@ jobs:
           # Use the last commit that would have triggered docker-publish
           # (matches its `paths:` filter), so the tag is guaranteed to
           # exist on ghcr — workflow-only commits don't get an image.
-          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror pyproject.toml)
+          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay pyproject.toml)
           if [[ -z "$IMAGE_TAG" ]]; then
             echo "::error::no commit touching image-relevant paths found"
             exit 1
@@ -98,6 +99,7 @@ jobs:
             -e CF_API_TOKEN="$CF_API_TOKEN" \
             -e CF_ZONE_ID="$CF_ZONE_ID" \
             -e DOMAIN="$MIRROR_DOMAIN" \
+            -e RELAY_DOMAIN="$RELAY_DOMAIN" \
             -e MIRROR_IMAGE_TAG="$IMAGE_TAG" \
             --wait
 
@@ -144,17 +146,19 @@ jobs:
                 --private-key "$OWNER_PK"
           fi
 
-      - name: Wait for /health
+      - name: Wait for Cloud + relay /health
         run: |
           set -euo pipefail
           DEADLINE=$(( $(date +%s) + 600 ))
           while [[ $(date +%s) -lt $DEADLINE ]]; do
-            HTTP=$(curl -sk -o /dev/null -w "%{http_code}" "https://$MIRROR_DOMAIN/health" || true)
-            echo "https://$MIRROR_DOMAIN/health → $HTTP"
-            if [[ "$HTTP" == "200" ]]; then exit 0; fi
+            MIRROR_HTTP=$(curl -sk -o /dev/null -w "%{http_code}" "https://$MIRROR_DOMAIN/health" || true)
+            RELAY_HTTP=$(curl -sk -o /dev/null -w "%{http_code}" "https://$RELAY_DOMAIN/health" || true)
+            echo "https://$MIRROR_DOMAIN/health → $MIRROR_HTTP"
+            echo "https://$RELAY_DOMAIN/health → $RELAY_HTTP"
+            if [[ "$MIRROR_HTTP" == "200" && "$RELAY_HTTP" == "200" ]]; then exit 0; fi
             sleep 10
           done
-          echo "::error::ingress never came back up"
+          echo "::error::ingress never came back up for both Cloud and relay"
           exit 1
 
       - name: Attestation verifier (structural + DCAP)
@@ -210,6 +214,7 @@ jobs:
             echo "| compose_hash | \`0x${{ steps.hash.outputs.hash }}\` |"
             echo "| VM UUID | \`${{ vars.CVM_VM_UUID }}\` |"
             echo "| Domain | $MIRROR_DOMAIN |"
+            echo "| Relay | $RELAY_DOMAIN |"
             echo "| Workflow run | https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} |"
           } >> mirror/deploy/DEPLOYMENTS.md
           git config user.name  "fisherman-ci"

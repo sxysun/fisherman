@@ -90,6 +90,8 @@ final class AppState {
     // Fisherman daemon
     var fishermanRunning = false
     var fishermanConnected = false
+    var backendMode: String = "local"
+    var streamingEnabled = false
     var framesSent: Int = 0
     var framesDropped: Int = 0
 
@@ -123,11 +125,17 @@ final class AppState {
         return status.rawValue
     }
 
+    var fishermanHealthy: Bool {
+        fishermanRunning && (!streamingEnabled || fishermanConnected)
+    }
+
     func update(screenpipeOK: Bool, fishermanStatus: [String: Any]?) {
         screenpipeHealthy = screenpipeOK
 
         if let s = fishermanStatus {
             fishermanRunning = true
+            backendMode = s["backend_mode"] as? String ?? backendMode
+            streamingEnabled = s["streaming_enabled"] as? Bool ?? true
             fishermanConnected = s["connected"] as? Bool ?? false
             framesSent = s["frames_sent"] as? Int ?? 0
             framesDropped = s["frames_dropped"] as? Int ?? 0
@@ -141,7 +149,7 @@ final class AppState {
         // Derive overall status
         if isPaused {
             status = .paused
-        } else if screenpipeOK && fishermanConnected {
+        } else if screenpipeOK && fishermanHealthy {
             status = .running
             errorDetail = nil
         } else if screenpipeOK || fishermanRunning {

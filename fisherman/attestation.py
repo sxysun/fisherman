@@ -509,7 +509,7 @@ def validate_pck_chain(
 
 def _event_payload_bytes(event: dict) -> Optional[bytes]:
     """Tolerate both `event_payload` (dstack canonical, also feedling)
-    and `payload` (legacy fisherman) field names."""
+    and `payload` (older fisherman) field names."""
     raw = event.get("event_payload")
     if raw is None:
         raw = event.get("payload")
@@ -560,7 +560,7 @@ def find_compose_hash_event(events: list[dict]) -> Optional[bytes]:
 
     dstack emits this as an IMR=3 event named `compose-hash` whose
     `event_payload` IS the compose_hash. We accept both `event_payload`
-    and the legacy `payload` field name."""
+    and the older `payload` field name."""
     for ev in events:
         if ev.get("event") != "compose-hash":
             continue

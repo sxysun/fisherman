@@ -1,6 +1,6 @@
 # fisherman-mirror — Phala TDX CVM compose.
 #
-# Two services:
+# Three services:
 #   - ingress: dstack-ingress 2.2 — TLS termination + LE certs via CF
 #              DNS-01 inside the CVM. Reads CLOUDFLARE_API_TOKEN over
 #              the encrypted env channel (`phala deploy -e CF_API_TOKEN=...`).
@@ -11,6 +11,9 @@
 #              menubar after the CVM is up; that step provisions the
 #              MIRROR_USER_PUBKEY / MIRROR_USER_X25519_PRIV / MIRROR_BLOB_KEY
 #              env vars and the container restarts into paired mode.
+#   - relay:   fisherman-relay — official low-trust relay for friend
+#              status and deputy RPC routing. It persists only signed
+#              ciphertext, never raw context or plaintext status.
 #
 # IMPORTANT: every literal in this file enters the compose_hash that
 # we publish on-chain via FishermanAppAuth.addComposeHash(). Cosmetic
@@ -30,11 +33,13 @@ services:
       GATEWAY_DOMAIN: "_.dstack-pha-prod9.phala.network"
       SET_CAA: "true"
       CERTBOT_EMAIL: "admin@teleport.computer"
-      # Single-domain mode: one host SNI-routed to the mirror upstream.
+      # SNI-routed Cloud endpoint + official status relay.
       DOMAINS: |
-        fisherman.teleport.computer
+        ${DOMAIN:-fisherman.teleport.computer}
+        ${RELAY_DOMAIN:-relay.fisherman.teleport.computer}
       ROUTING_MAP: |
-        fisherman.teleport.computer=mirror:5001
+        ${DOMAIN:-fisherman.teleport.computer}=mirror:5001
+        ${RELAY_DOMAIN:-relay.fisherman.teleport.computer}=relay:9100
       # CLOUDFLARE_API_TOKEN must be injected via `phala deploy -e CF_API_TOKEN=...`
       # (encrypted env channel — NOT baked into compose_hash). Required
       # scope: Zone.DNS:Edit on the teleport.computer zone (for DNS-01
@@ -46,6 +51,8 @@ services:
       - fisherman_ingress_evidences:/evidences
     depends_on:
       mirror:
+        condition: service_started
+      relay:
         condition: service_started
 
   mirror:
@@ -72,7 +79,29 @@ services:
     expose:
       - "5001"
 
+  relay:
+    image: ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command:
+      - python
+      - -u
+      - -m
+      - relay.server
+      - --port
+      - "9100"
+      - --db-path
+      - /data/relay/events.sqlite
+    environment:
+      - RELAY_HOST=0.0.0.0
+      - RELAY_PORT=9100
+      - RELAY_DB_PATH=/data/relay/events.sqlite
+    volumes:
+      - relay-data:/data
+    expose:
+      - "9100"
+
 volumes:
   mirror-data:
+  relay-data:
   fisherman_ingress_letsencrypt:
   fisherman_ingress_evidences:

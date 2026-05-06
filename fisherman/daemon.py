@@ -40,7 +40,10 @@ class FishermanDaemon:
         self._differ = FrameDiffer(threshold=config.diff_threshold)
         self._privacy = PrivacyFilter(config)
         self._router = TierRouter(config)
-        self._streamer = Streamer(config.server_url, config.private_key)
+        self._streamer: Streamer | None = (
+            Streamer(config.server_url, config.private_key)
+            if config.streaming_enabled else None
+        )
         self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
         self._audio_store = AudioStore(config.audio_dir, config.audio_max_days)
         self._screenpipe = ScreenpipeCaptureClient(
@@ -65,6 +68,10 @@ class FishermanDaemon:
         self._relay_client: RelayClient | None = None
         self._rpc_handled = 0
         self._rpc_denied = 0
+        self._processor_runs = 0
+        self._processor_last_run_at: float | None = None
+        self._processor_last_ok: bool | None = None
+        self._processor_last_error: str | None = None
         self._blob_at_rest_key: bytes | None = None
         if config.private_key:
             try:
@@ -121,11 +128,16 @@ class FishermanDaemon:
         )
         await control.start()
 
-        # Start WebSocket streamer
-        await self._streamer.start()
+        # Start WebSocket streamer only for backends that explicitly
+        # ingest raw context. Local-only mode keeps capture on-device.
+        if self._streamer is not None:
+            await self._streamer.start()
 
         log.info(
             "fisherman_started",
+            backend_mode=self._config.backend_mode,
+            backend=self._config.backend_summary,
+            streaming=self._streamer is not None,
             server=self._config.server_url,
             interval=self._config.capture_interval,
             control_port=self._config.control_port,
@@ -142,9 +154,17 @@ class FishermanDaemon:
         # timestamps the streamer has confirmed forwarded upstream.
         # Never deletes unbacked-up data.
         cleanup_task: asyncio.Task | None = None
-        if (self._config.screenpipe_cleanup_enabled
+        if (self._streamer is not None
+                and self._config.screenpipe_cleanup_enabled
                 and self._capture_backend == "screenpipe"):
             cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+        # Recurring processors are Fisherman's first-class "cron" path.
+        # The scheduler is lightweight when no schedules exist and lets
+        # users install distillers without separately configuring launchd.
+        processor_task: asyncio.Task | None = asyncio.create_task(
+            self._processor_schedule_loop()
+        )
 
         # Connect to relay (RPC mailbox) if we have keys + a configured URL.
         if self._signing_priv is not None and self._config.ledger_url:
@@ -196,11 +216,18 @@ class FishermanDaemon:
                     await cleanup_task
                 except (asyncio.CancelledError, Exception):
                     pass
+            if processor_task is not None:
+                processor_task.cancel()
+                try:
+                    await processor_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if self._relay_client is not None:
                 await self._relay_client.stop()
             if self._mirror_sync is not None:
                 await self._mirror_sync.stop()
-            await self._streamer.stop()
+            if self._streamer is not None:
+                await self._streamer.stop()
             await control.stop()
             self._pool.shutdown(wait=False)
             log.info("fisherman_stopped")
@@ -400,9 +427,15 @@ class FishermanDaemon:
         status = {
             "running": self._running,
             "paused": self._privacy.is_paused,
-            "frames_sent": self._streamer.frames_sent,
-            "frames_dropped": self._streamer.frames_dropped,
-            "connected": self._streamer.connected,
+            "backend_mode": self._config.backend_mode,
+            "backend": self._config.backend_summary,
+            "backend_url": self._config.backend_url,
+            "server_url": self._config.server_url,
+            "streaming_enabled": self._streamer is not None,
+            "frames_sent": self._streamer.frames_sent if self._streamer else self._frames_sent,
+            "frames_streamed": self._streamer.frames_sent if self._streamer else 0,
+            "frames_dropped": self._streamer.frames_dropped if self._streamer else 0,
+            "connected": self._streamer.connected if self._streamer else False,
             "on_battery": on_battery(),
             "capture_interval": self._get_interval(),
             "capture_backend": self._capture_backend,
@@ -413,6 +446,10 @@ class FishermanDaemon:
             "relay_connected": (self._relay_client.connected if self._relay_client else False),
             "rpc_handled": self._rpc_handled,
             "rpc_denied": self._rpc_denied,
+            "processor_runs": self._processor_runs,
+            "processor_last_run_at": self._processor_last_run_at,
+            "processor_last_ok": self._processor_last_ok,
+            "processor_last_error": self._processor_last_error,
             "mirror_active": self._mirror_sync is not None,
             "mirror_uploaded": (self._mirror_sync.state.uploaded_files if self._mirror_sync else 0),
             "mirror_failed": (self._mirror_sync.state.failed_files if self._mirror_sync else 0),
@@ -502,6 +539,43 @@ class FishermanDaemon:
             return {"ok": True}
 
         return {"error": f"unknown_command:{cmd}"}
+
+    async def _processor_schedule_loop(self) -> None:
+        """Run due processor schedules from ~/.fisherman/processor-schedules.json."""
+        from fisherman import processor as _processor
+
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(5.0)
+
+        while self._running:
+            try:
+                results = await loop.run_in_executor(self._pool, _processor.run_due)
+                if results:
+                    self._processor_runs += len(results)
+                    self._processor_last_run_at = time.time()
+                    failed = [r for r in results if not r.get("ok")]
+                    self._processor_last_ok = not failed
+                    self._processor_last_error = (
+                        "; ".join(str(r.get("error")) for r in failed) if failed else None
+                    )
+                    for row in results:
+                        if row.get("ok"):
+                            log.info("processor_schedule_ok", schedule=row.get("id"))
+                        else:
+                            log.warning(
+                                "processor_schedule_failed",
+                                schedule=row.get("id"),
+                                error=row.get("error"),
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._processor_last_run_at = time.time()
+                self._processor_last_ok = False
+                self._processor_last_error = str(e)
+                log.warning("processor_schedule_loop_failed", exc_info=True)
+
+            await asyncio.sleep(60.0)
 
     async def _cleanup_loop(self) -> None:
         """Periodically trim local screenpipe DB to the retention
@@ -640,13 +714,14 @@ class FishermanDaemon:
                             ap.device_name,
                             ap.is_input_device,
                         )
-                        await self._streamer.send_audio(
-                            ts=ap.timestamp,
-                            transcript=ap.transcription,
-                            meeting_app=self._call_app,
-                            device_name=ap.device_name,
-                            is_input_device=ap.is_input_device,
-                        )
+                        if self._streamer is not None:
+                            await self._streamer.send_audio(
+                                ts=ap.timestamp,
+                                transcript=ap.transcription,
+                                meeting_app=self._call_app,
+                                device_name=ap.device_name,
+                                is_input_device=ap.is_input_device,
+                            )
                         self._audio_sent += 1
 
             except asyncio.CancelledError:
@@ -670,10 +745,10 @@ class FishermanDaemon:
             dhash_distance, ocr_text, urls, frame.bundle_id or ""
         )
 
-        await self._streamer.send(frame, ocr_text, urls, routing=routing)
-
         await loop.run_in_executor(
             self._pool, self._frame_store.save, frame, ocr_text, urls, routing,
             video_path, video_offset,
         )
+        if self._streamer is not None:
+            await self._streamer.send(frame, ocr_text, urls, routing=routing)
         self._frames_sent += 1

@@ -37,6 +37,9 @@ final class StatusPoller: @unchecked Sendable {
         pollScreenpipe()
         pollFisherman()
         pollAllActivity()
+        if pollCycleCount % 5 == 0 {
+            pollRelayFriendActivity()
+        }
 
         // Poll history every 20 cycles (~60s at 3s interval)
         pollCycleCount += 1
@@ -163,23 +166,93 @@ final class StatusPoller: @unchecked Sendable {
                 return updated
             }
 
-            self.state.allActivity = activities
+            self.commitActivities(activities, preservingRelay: true)
 
             // Surface pokes from "me" entry
             if let me = activities.first(where: { $0.id == "me" }), !me.pokes.isEmpty {
                 self.state.incomingPokes = me.pokes
             }
+        }
+    }
 
-            // Hangout suggestion: 2+ friends in low-key states simultaneously
-            let lowKeyCategories: Set<String> = ["browsing", "news", "reading", "idle"]
-            let lowKeyFriends = activities.filter { $0.id != "me" && lowKeyCategories.contains($0.category) && !$0.stale }
-            let meIsLowKey = activities.first(where: { $0.id == "me" }).map { lowKeyCategories.contains($0.category) } ?? false
-            if meIsLowKey && lowKeyFriends.count >= 1 {
-                let names = lowKeyFriends.map { $0.name }.joined(separator: " & ")
-                self.state.hangoutSuggestion = "\(names) also free"
-            } else {
-                self.state.hangoutSuggestion = nil
+    private func pollRelayFriendActivity() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let result = CliBridge.run(["friend", "status", "--limit", "1"], timeout: 8)
+            guard result.exitCode == 0,
+                  let data = result.stdout.data(using: .utf8),
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+            else { return }
+
+            let now = Date().timeIntervalSince1970
+            let activities: [UserActivity] = rows.compactMap { row in
+                guard let friend = row["friend"] as? String,
+                      let pubkey = row["pubkey"] as? String,
+                      let ts = row["ts"] as? Double,
+                      let digest = row["digest"] as? [String: Any]
+                else { return nil }
+
+                let emoji = digest["emoji"] as? String ?? "?"
+                let category = digest["category"] as? String ?? "idle"
+                let status = digest["status"] as? String ?? ""
+                let stale = now - ts > 15 * 60
+                var activity = UserActivity(
+                    id: "relay:\(pubkey)",
+                    name: friend,
+                    emoji: emoji,
+                    category: category,
+                    status: status,
+                    stale: stale
+                )
+                activity.inFlow = digest["flow"] as? Bool ?? false
+                return activity
             }
+            guard !activities.isEmpty else { return }
+
+            DispatchQueue.main.async { [weak self] in
+                self?.commitActivities(activities, preservingRelay: false)
+            }
+        }
+    }
+
+    private func commitActivities(_ incoming: [UserActivity], preservingRelay: Bool) {
+        var byId: [String: UserActivity] = [:]
+
+        for existing in state.allActivity {
+            if preservingRelay || !existing.id.hasPrefix("relay:") {
+                byId[existing.id] = existing
+            }
+        }
+
+        for activity in incoming {
+            var updated = activity
+            if let existing = byId[activity.id] {
+                updated.history = existing.history
+                updated.sessionStart = existing.sessionStart
+            }
+            byId[activity.id] = updated
+        }
+
+        state.allActivity = byId.values.sorted { a, b in
+            if a.id == "me" { return true }
+            if b.id == "me" { return false }
+            return a.name < b.name
+        }
+        updateHangoutSuggestion()
+    }
+
+    private func updateHangoutSuggestion() {
+        let lowKeyCategories: Set<String> = ["browsing", "news", "reading", "idle"]
+        let lowKeyFriends = state.allActivity.filter {
+            $0.id != "me" && lowKeyCategories.contains($0.category) && !$0.stale
+        }
+        let meIsLowKey = state.allActivity.first(where: { $0.id == "me" })
+            .map { lowKeyCategories.contains($0.category) } ?? false
+        if meIsLowKey && lowKeyFriends.count >= 1 {
+            let names = lowKeyFriends.map { $0.name }.joined(separator: " & ")
+            state.hangoutSuggestion = "\(names) also free"
+        } else {
+            state.hangoutSuggestion = nil
         }
     }
 

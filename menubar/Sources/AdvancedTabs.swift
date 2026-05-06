@@ -27,14 +27,14 @@ struct DeputiesTab: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Deputies")
+                Text("Agent Access")
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
                 Button("+ New") { showingNewDeputy = true }
                     .buttonStyle(.bordered)
             }
 
-            Text("Authorize remote agents to query your fisherman context. Each deputy is scope-bounded and revocable.")
+            Text("Authorize remote agents to query your Fisherman context. Each token is scope-bounded and revocable.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
@@ -184,71 +184,60 @@ struct DeputiesTab: View {
 }
 
 
-// MARK: - Storage tab
+// MARK: - Backup tab
 
-struct StorageTab: View {
+struct BackupTab: View {
     @State private var statusOutput: String = ""
     @State private var selectedKind: String = "none"
-    @State private var s3Bucket = ""
-    @State private var s3Endpoint = ""
-    @State private var s3KeyId = ""
-    @State private var s3Secret = ""
-    @State private var s3Prefix = ""
-    @State private var localPath = ""
-    @State private var davUrl = ""
-    @State private var davUser = ""
-    @State private var davPassword = ""
     @State private var driveClientId = ""
     @State private var driveSecret = ""
     @State private var driveRefresh = ""
+    @State private var driveFolderName = "fisherman"
     @State private var statusMessage: String?
+    @State private var existingAdvancedKind: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Storage Mirror")
+            Text("Backup")
                 .font(.system(size: 14, weight: .semibold))
-            Text("Encrypted backup of your local capture. Required for offline-mirror endpoints.")
+            Text("Optional encrypted backup for laptop-local context.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-            Text("Storage chooses where encrypted snapshots are written. It does not answer agent queries by itself; a Mirror endpoint reads this storage.")
+            Text("You do not need this for Self-hosted or Fisherman Cloud. Those backends already store context for their mode.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
 
-            Picker("Backend", selection: $selectedKind) {
-                Text("None").tag("none")
-                Text("Local filesystem").tag("localfs")
-                Text("S3 / R2 / B2").tag("s3")
-                Text("WebDAV (Hetzner SB)").tag("webdav")
-                Text("Google Drive").tag("drive")
+            if let existingAdvancedKind {
+                Text("A \(existingAdvancedKind) backup is configured from the CLI. The app now only supports Google Drive backup.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Button("Disable backup") { disable() }
+                    .buttonStyle(.bordered)
+            } else {
+                Picker("Backup", selection: $selectedKind) {
+                    Text("Off").tag("none")
+                    Text("Google Drive").tag("drive")
+                }
+                .pickerStyle(.segmented)
             }
-            .pickerStyle(.menu)
 
-            switch selectedKind {
-            case "localfs":
-                TextField("Path", text: $localPath).textFieldStyle(.roundedBorder)
-            case "s3":
-                TextField("Bucket", text: $s3Bucket).textFieldStyle(.roundedBorder)
-                TextField("Endpoint URL (or empty for AWS)", text: $s3Endpoint).textFieldStyle(.roundedBorder)
-                TextField("Access Key ID", text: $s3KeyId).textFieldStyle(.roundedBorder)
-                SecureField("Secret Access Key", text: $s3Secret).textFieldStyle(.roundedBorder)
-                TextField("Prefix (optional)", text: $s3Prefix).textFieldStyle(.roundedBorder)
-            case "webdav":
-                TextField("Base URL", text: $davUrl).textFieldStyle(.roundedBorder)
-                TextField("Username", text: $davUser).textFieldStyle(.roundedBorder)
-                SecureField("Password", text: $davPassword).textFieldStyle(.roundedBorder)
-            case "drive":
-                Text("See docs/drive-setup.md to mint these.")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            if existingAdvancedKind == nil && selectedKind == "drive" {
+                Text("Bring your own Google Drive account. Fisherman encrypts snapshots before upload.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                Text("See docs/drive-setup.md to create the OAuth credentials.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
                 TextField("Client ID", text: $driveClientId).textFieldStyle(.roundedBorder)
                 SecureField("Client Secret", text: $driveSecret).textFieldStyle(.roundedBorder)
                 SecureField("Refresh Token", text: $driveRefresh).textFieldStyle(.roundedBorder)
-            default:
-                EmptyView()
+                TextField("Folder Name", text: $driveFolderName).textFieldStyle(.roundedBorder)
             }
 
             HStack {
-                Button("Apply") { apply() }
+                Button(selectedKind == "drive" ? "Save Google Drive Backup" : "Save") { apply() }
                     .buttonStyle(.borderedProminent)
-                if selectedKind == "none" {
-                    Button("Disable storage") { disable() }
+                    .disabled(existingAdvancedKind != nil)
+                if selectedKind != "none" || existingAdvancedKind != nil {
+                    Button("Disable backup") { disable() }
                 }
                 Spacer()
                 Button("Refresh status") { reloadStatus() }
@@ -272,7 +261,38 @@ struct StorageTab: View {
             }
             .frame(height: 90)
         }
-        .onAppear { reloadStatus() }
+        .onAppear {
+            loadExistingConfig()
+            reloadStatus()
+        }
+    }
+
+    private func loadExistingConfig() {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".fisherman/storage.json")
+        guard let data = try? Data(contentsOf: url),
+              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            selectedKind = "none"
+            existingAdvancedKind = nil
+            return
+        }
+
+        let kind = cfg["kind"] as? String ?? "none"
+        if kind == "drive" {
+            selectedKind = "drive"
+            existingAdvancedKind = nil
+            driveClientId = cfg["client_id"] as? String ?? ""
+            driveSecret = cfg["client_secret"] as? String ?? ""
+            driveRefresh = cfg["refresh_token"] as? String ?? ""
+            driveFolderName = cfg["folder_name"] as? String ?? "fisherman"
+        } else if kind == "none" {
+            selectedKind = "none"
+            existingAdvancedKind = nil
+        } else {
+            selectedKind = "none"
+            existingAdvancedKind = kind
+        }
     }
 
     private func reloadStatus() {
@@ -284,29 +304,18 @@ struct StorageTab: View {
         statusMessage = nil
         let r: CliBridge.Result
         switch selectedKind {
-        case "localfs":
-            r = CliBridge.run(["storage", "configure-local", "--path", localPath])
-        case "s3":
-            var args = ["storage", "configure-s3",
-                        "--bucket", s3Bucket,
-                        "--key-id", s3KeyId,
-                        "--secret", s3Secret]
-            if !s3Endpoint.isEmpty { args += ["--endpoint", s3Endpoint] }
-            if !s3Prefix.isEmpty { args += ["--prefix", s3Prefix] }
-            r = CliBridge.run(args)
-        case "webdav":
-            r = CliBridge.run(["storage", "configure-webdav",
-                               "--url", davUrl, "--username", davUser, "--password", davPassword])
         case "drive":
             r = CliBridge.run(["storage", "configure-drive",
                                "--client-id", driveClientId,
                                "--client-secret", driveSecret,
-                               "--refresh-token", driveRefresh])
+                               "--refresh-token", driveRefresh,
+                               "--folder-name", driveFolderName.isEmpty ? "fisherman" : driveFolderName])
         default:
             disable(); return
         }
         if r.exitCode == 0 {
             statusMessage = "Configured. Restart the daemon for changes to take effect."
+            loadExistingConfig()
             reloadStatus()
         } else {
             statusMessage = "Error: " + r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -316,6 +325,7 @@ struct StorageTab: View {
     private func disable() {
         let r = CliBridge.run(["storage", "disable"])
         statusMessage = r.exitCode == 0 ? "Disabled." : r.stderr
+        loadExistingConfig()
         reloadStatus()
     }
 }
@@ -330,17 +340,17 @@ struct MirrorTab: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Offline Mirror")
+            Text("Self-hosted Replica")
                 .font(.system(size: 14, weight: .semibold))
-            Text("A mirror endpoint serves agent queries when your laptop is offline. It runs on a server you trust (or on Fisherman Cloud TEE).")
+            Text("A replica can serve agent queries when your laptop is offline. It runs on a server you trust, or inside Fisherman Cloud.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
-            Text("Mirror is the query server; Storage is the encrypted backing store it reads from. Configure Storage first, then pair the Mirror.")
+            Text("This is an advanced self-hosted backend capability. Most users should choose Local Only or Fisherman Cloud in Backend settings.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
 
             Divider()
 
             Text("Self-hosted").font(.system(size: 12, weight: .medium))
-            Text("Configure a storage backend first (Storage tab). Then mint a setup token below and paste it on your server after running `fisherman-mirror init <token>`.")
+            Text("Configure storage first. Then mint a setup token and paste it on your server after running `fisherman-mirror init <token>`.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             Button("Mint pairing token") { mintToken() }
                 .buttonStyle(.borderedProminent)
@@ -368,7 +378,7 @@ struct MirrorTab: View {
             Divider()
 
             Text("Managed Fisherman Cloud").font(.system(size: 12, weight: .medium))
-            Text("The hosted TEE mirror backend is deployed and attested, but self-serve pairing is not wired into this app build. Use Self-hosted pairing above for now.")
+            Text("Cloud is configured from the Backend tab and must pass TEE attestation before private context is sent.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }

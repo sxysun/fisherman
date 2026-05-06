@@ -1,8 +1,9 @@
 # fisherman-mirror — TDX-deployable mirror endpoint container.
 #
-# Same shape as feedling-mcp-v1/deploy/Dockerfile. One image, one
-# entrypoint (`fisherman-mirror serve`). State lives in the mounted
-# /data volume; secrets arrive via dstack-KMS-derived env at runtime.
+# Same shape as feedling-mcp-v1/deploy/Dockerfile. One image is used by
+# the Cloud mirror service and the low-trust relay service. State lives
+# in the mounted /data volumes; secrets arrive via dstack-KMS-derived env
+# at runtime.
 #
 # Reproducibility:
 #  - Base image pinned by sha256 digest.
@@ -40,9 +41,10 @@ RUN apt-get update \
 COPY mirror/deploy/requirements.lock ./requirements.lock
 RUN pip install --require-hashes -r requirements.lock
 
-# The mirror only needs the fisherman + mirror packages.
+# The Cloud image runs mirror plus the low-trust relay.
 COPY fisherman/ ./fisherman/
 COPY mirror/    ./mirror/
+COPY relay/     ./relay/
 # Stub package metadata so `python -m mirror.cli` can resolve the
 # `fisherman-mirror` console script when installed via pip later.
 COPY pyproject.toml ./
@@ -63,7 +65,7 @@ RUN useradd --system --uid 1000 --home-dir /home/fisherman --create-home fisherm
  && chown -R fisherman:fisherman /data /app
 USER fisherman
 
-EXPOSE 5001 5003
+EXPOSE 5001 5003 9100
 
 # In TDX deployments dstack-KMS provisions secrets to /etc/secrets/* and
 # the mirror reads them at startup. Locally `docker compose up` provides

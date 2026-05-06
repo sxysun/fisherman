@@ -6,7 +6,11 @@ struct SettingsView: View {
     var onCancel: () -> Void
 
     @State private var serverURL: String = ""
+    @State private var backendMode: String = "local"
+    @State private var backendURL: String = ""
+    @State private var statusRelayURL: String = ""
     @State private var controlPort: String = ""
+    @State private var showAdvancedBackend = false
     @State private var selectedTab: SettingsTab = .server
 
     @State private var displayName: String = ""
@@ -26,13 +30,14 @@ struct SettingsView: View {
     @State private var showManualAdd = false
     @State private var addFriendError: String?
 
+    private let defaultCloudURL = "https://fisherman.teleport.computer"
+
     enum SettingsTab: String, CaseIterable {
-        case server = "Server"
+        case server = "Backend"
         case identity = "Identity"
         case friends = "Friends"
-        case deputies = "Deputies"
-        case storage = "Storage"
-        case mirror = "Mirror"
+        case deputies = "Agent Access"
+        case storage = "Backup"
         case agent = "Agent"
         case diagnostics = "Diagnostics"
     }
@@ -80,9 +85,7 @@ struct SettingsView: View {
                     case .deputies:
                         DeputiesTab()
                     case .storage:
-                        StorageTab()
-                    case .mirror:
-                        MirrorTab()
+                        BackupTab()
                     case .agent:
                         AgentTab()
                     case .diagnostics:
@@ -103,8 +106,19 @@ struct SettingsView: View {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
-                    config.serverURL = serverURL
-                    config.controlPort = controlPort
+                    let trimmedBackendURL = backendURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedServerURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    config.backendMode = backendMode
+                    if backendMode == "cloud" {
+                        config.backendURL = trimmedBackendURL.isEmpty ? defaultCloudURL : trimmedBackendURL
+                    } else if backendMode == "self_hosted" {
+                        config.backendURL = trimmedBackendURL
+                        config.serverURL = trimmedServerURL.isEmpty ? trimmedBackendURL : trimmedServerURL
+                    } else {
+                        config.backendURL = ""
+                    }
+                    config.statusRelayURL = statusRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    config.controlPort = controlPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "7892" : controlPort
                     config.displayName = displayName
                     config.save()
                     onSave()
@@ -116,9 +130,13 @@ struct SettingsView: View {
         }
         .frame(width: 420, height: 480)
         .onAppear {
+            backendMode = config.backendMode
+            backendURL = config.backendMode == "cloud" && config.backendURL.isEmpty ? defaultCloudURL : config.backendURL
+            statusRelayURL = config.statusRelayURL
             serverURL = config.serverURL
             controlPort = config.controlPort
             displayName = config.displayName
+            config.refreshRelayFriends()
         }
     }
 
@@ -126,12 +144,39 @@ struct SettingsView: View {
 
     private var serverTab: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("Connection")
+            sectionHeader("Backend")
 
-            fieldRow("Server URL", placeholder: "ws://your-server:9999/ingest", text: $serverURL)
-            fieldRow("Control Port", placeholder: "7892", text: $controlPort)
+            Picker("Mode", selection: $backendMode) {
+                Text("Local Only").tag("local")
+                Text("Fisherman Cloud").tag("cloud")
+                Text("Self-hosted").tag("self_hosted")
+            }
+            .pickerStyle(.segmented)
 
-            hintText("Your server runs ingest.py. Set FISH_PRIVATE_KEY in the server's .env to the same private key shown in the Identity tab.")
+            if backendMode == "cloud" {
+                hintText("Managed by Fisherman. The service endpoint, relay, and local control port are configured automatically after Cloud pairing.")
+                hintText("Private context is only sent after the Cloud audit passes attestation.")
+            } else if backendMode == "self_hosted" {
+                fieldRow("Backend URL", placeholder: "wss://your-server:9999/ingest", text: $backendURL)
+                hintText("Use this when you run your own Fisherman backend. That backend handles ingest, storage, and processing under your trust model.")
+            } else {
+                hintText("Raw context stays on this laptop. Friend status can still use the encrypted relay when configured.")
+            }
+
+            DisclosureGroup("Advanced endpoints", isExpanded: $showAdvancedBackend) {
+                VStack(alignment: .leading, spacing: 10) {
+                    if backendMode == "cloud" {
+                        fieldRow("Cloud service URL", placeholder: defaultCloudURL, text: $backendURL)
+                    }
+                    fieldRow("Status relay", placeholder: "https://relay.fisherman.teleport.computer", text: $statusRelayURL)
+                    fieldRow("Local control port", placeholder: "7892", text: $controlPort)
+                    hintText("Only change these for local development or custom relays.")
+                }
+                .padding(.top, 8)
+            }
+            .font(.system(size: 12, weight: .medium))
+
+            hintText("Backup and agent access are optional capabilities. They are not required for Self-hosted or Fisherman Cloud.")
         }
     }
 
@@ -221,9 +266,15 @@ struct SettingsView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(code.n)
                                 .font(.system(size: 12, weight: .semibold))
-                            Text("\(code.h):\(code.w)")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.secondary)
+                            if let relay = code.r {
+                                Text("relay: \(relay)")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("\(code.h ?? "?"):\(code.w ?? 9999)")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
                             Text(code.k.prefix(16) + "...")
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(.tertiary)
@@ -259,7 +310,7 @@ struct SettingsView: View {
             Divider()
 
             // Existing friends list
-            if config.friends.isEmpty {
+            if config.relayFriends.isEmpty && config.friends.isEmpty {
                 HStack {
                     Spacer()
                     VStack(spacing: 6) {
@@ -274,6 +325,10 @@ struct SettingsView: View {
                 }
                 .padding(.vertical, 12)
             } else {
+                ForEach(config.relayFriends, id: \.pubkeyHex) { friend in
+                    relayFriendRow(friend)
+                }
+
                 ForEach(Array(config.friends.enumerated()), id: \.offset) { index, friend in
                     friendRow(friend, index: index)
                 }
@@ -383,6 +438,46 @@ struct SettingsView: View {
         .padding(.vertical, 4)
     }
 
+    private func relayFriendRow(_ friend: RelayFriend) -> some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text(friend.name)
+                        .font(.system(size: 12, weight: .medium))
+                    Text("Relay")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
+                Text(friend.relayURL ?? "default relay")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(friend.pubkeyHex.prefix(16) + "...")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+
+            Button {
+                let result = CliBridge.run(["friend", "remove", friend.pubkeyHex])
+                if result.exitCode == 0 {
+                    config.refreshRelayFriends()
+                }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 4)
+    }
+
     private func fieldRow(_ label: String, placeholder: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
@@ -469,13 +564,30 @@ struct SettingsView: View {
         guard let code = parsedFriendCode else { return }
 
         // Check for duplicate
-        if config.friends.contains(where: { $0.publicKey == code.k }) {
+        if code.g != nil && config.relayFriends.contains(where: { $0.pubkeyHex == code.k }) {
+            friendCodeError = "Already added this friend"
+            return
+        }
+        if code.g == nil && config.friends.contains(where: { $0.publicKey == code.k }) {
             friendCodeError = "Already added this friend"
             return
         }
 
         let name = friendCodeOverrideName.trimmingCharacters(in: .whitespaces)
-        config.addFriendFromCode(code, overrideName: name.isEmpty ? nil : name)
+        if code.g != nil {
+            var args = ["friend", "add", friendCodeInput]
+            if !name.isEmpty {
+                args += ["--name", name]
+            }
+            let r = CliBridge.run(args)
+            if r.exitCode != 0 {
+                friendCodeError = r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                return
+            }
+            config.refreshRelayFriends()
+        } else {
+            config.addFriendFromCode(code, overrideName: name.isEmpty ? nil : name)
+        }
 
         // Reset
         friendCodeInput = ""

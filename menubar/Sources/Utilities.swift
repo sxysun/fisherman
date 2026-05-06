@@ -112,15 +112,15 @@ func userEnvPath() -> String {
     NSHomeDirectory() + "/.fisherman/.env"
 }
 
-func legacyProjectEnvPath() -> String? {
-    let legacy = findProjectDir() + "/.env"
-    return legacy == userEnvPath() ? nil : legacy
+func projectEnvPath() -> String? {
+    let project = findProjectDir() + "/.env"
+    return project == userEnvPath() ? nil : project
 }
 
 func envFilePaths() -> [String] {
     var paths = [userEnvPath()]
-    if let legacy = legacyProjectEnvPath() {
-        paths.append(legacy)
+    if let project = projectEnvPath() {
+        paths.append(project)
     }
     return paths
 }

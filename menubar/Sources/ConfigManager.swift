@@ -15,16 +15,28 @@ struct Friend: Sendable {
     var sharingTier: SharingTier = .high
 }
 
+struct RelayFriend: Sendable {
+    let name: String
+    let pubkeyHex: String
+    let relayURL: String?
+    let addedAt: Double?
+}
+
 struct FriendCode: Codable {
     let n: String  // display name
     let k: String  // pubkey hex
-    let h: String  // hostname
-    let w: Int     // ws port (default 9999)
-    let a: Int     // activity port (default 9996)
+    let h: String? // server-direct hostname
+    let w: Int?    // server-direct ws port
+    let a: Int?    // server-direct activity port
+    let g: String? // relay friends-group key
+    let r: String? // relay URL
 }
 
 @Observable
 final class ConfigManager {
+    var backendMode: String = "local"
+    var backendURL: String = ""
+    var statusRelayURL: String = "https://relay.fisherman.teleport.computer"
     var serverURL: String = "ws://localhost:9999/ingest"
     var controlPort: String = "7892"
     var activityPort: String = "9998"
@@ -38,6 +50,7 @@ final class ConfigManager {
 
     // P2P friends
     var friends: [Friend] = []
+    var relayFriends: [RelayFriend] = []
 
     /// Lines from .env that we don't manage (comments, unknown keys)
     private var passthroughLines: [(index: Int, line: String)] = []
@@ -58,8 +71,8 @@ final class ConfigManager {
             parseEnv(contents, trackLines: true, fillMissingOnly: false, loadedKeys: &loadedKeys)
         }
 
-        if let legacyPath = legacyProjectEnvPath(),
-           let contents = try? String(contentsOfFile: legacyPath, encoding: .utf8)
+        if let projectPath = projectEnvPath(),
+           let contents = try? String(contentsOfFile: projectPath, encoding: .utf8)
         {
             needsSave = parseEnv(
                 contents,
@@ -67,6 +80,22 @@ final class ConfigManager {
                 fillMissingOnly: true,
                 loadedKeys: &loadedKeys
             ) || needsSave
+        }
+
+        if !loadedKeys.contains("FISH_BACKEND_MODE") {
+            if !serverURL.isEmpty && serverURL != "ws://localhost:9999/ingest" {
+                backendMode = "self_hosted"
+                if backendURL.isEmpty { backendURL = serverURL }
+            } else {
+                backendMode = "local"
+            }
+            needsSave = true
+        } else if backendMode == "self_hosted" && backendURL.isEmpty {
+            backendURL = serverURL
+            needsSave = true
+        } else if backendMode == "cloud" && backendURL.isEmpty {
+            backendURL = "https://fisherman.teleport.computer"
+            needsSave = true
         }
 
         // Generate key pair on first load if not present anywhere we support.
@@ -78,6 +107,7 @@ final class ConfigManager {
         if needsSave {
             save()
         }
+        refreshRelayFriends()
     }
 
     @discardableResult
@@ -92,7 +122,37 @@ final class ConfigManager {
         for (i, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
-            if let value = extractValue(trimmed, key: "FISH_SERVER_URL") {
+            if let value = extractValue(trimmed, key: "FISH_BACKEND_MODE") {
+                if shouldLoad("FISH_BACKEND_MODE", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    backendMode = value
+                    loadedKeys.insert("FISH_BACKEND_MODE")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_BACKEND_MODE", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_BACKEND_URL") {
+                if shouldLoad("FISH_BACKEND_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    backendURL = value
+                    loadedKeys.insert("FISH_BACKEND_URL")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_BACKEND_URL", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_STATUS_RELAY_URL") {
+                if shouldLoad("FISH_STATUS_RELAY_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    statusRelayURL = value
+                    loadedKeys.insert("FISH_STATUS_RELAY_URL")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_STATUS_RELAY_URL", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_LEDGER_URL") {
+                if shouldLoad("FISH_LEDGER_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys)
+                    && shouldLoad("FISH_STATUS_RELAY_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys)
+                {
+                    statusRelayURL = value
+                    loadedKeys.insert("FISH_LEDGER_URL")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_LEDGER_URL", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_SERVER_URL") {
                 if shouldLoad("FISH_SERVER_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
                     serverURL = value
                     loadedKeys.insert("FISH_SERVER_URL")
@@ -173,7 +233,9 @@ final class ConfigManager {
             .joined(separator: ",")
 
         let updates: [(String, String)] = [
-            ("FISH_SERVER_URL", serverURL),
+            ("FISH_BACKEND_MODE", backendMode),
+            ("FISH_BACKEND_URL", backendURL),
+            ("FISH_STATUS_RELAY_URL", statusRelayURL),
             ("FISH_CONTROL_PORT", controlPort),
             ("FISH_PRIVATE_KEY", privateKeyHex),
             ("FISH_DISPLAY_NAME", displayName),
@@ -182,6 +244,11 @@ final class ConfigManager {
 
         // Track which line indices to delete (duplicates of any tracked key)
         var indicesToDelete = Set<Int>()
+        for key in ["FISH_SERVER_URL"] {
+            for index in knownKeyLines[key] ?? [] {
+                indicesToDelete.insert(index)
+            }
+        }
 
         for (key, value) in updates {
             guard let indices = knownKeyLines[key], !indices.isEmpty else { continue }
@@ -224,7 +291,7 @@ final class ConfigManager {
     }
 
     var isConfigured: Bool {
-        !serverURL.isEmpty && serverURL != "ws://localhost:9999/ingest"
+        backendMode == "local" || !backendURL.isEmpty || !serverURL.isEmpty
     }
 
     // MARK: - Ed25519 signing
@@ -269,19 +336,60 @@ final class ConfigManager {
         deregisterFriendOnServer(pubkey: friend.publicKey)
     }
 
+    func refreshRelayFriends() {
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".fisherman/friends.json")
+        guard let data = try? Data(contentsOf: path) else {
+            relayFriends = []
+            return
+        }
+
+        let raw = try? JSONSerialization.jsonObject(with: data)
+        let rows: [[String: Any]]
+        if let list = raw as? [[String: Any]] {
+            rows = list
+        } else if let object = raw as? [String: Any],
+                  let list = object["friends"] as? [[String: Any]]
+        {
+            rows = list
+        } else {
+            relayFriends = []
+            return
+        }
+
+        relayFriends = rows.compactMap { row in
+            guard let name = row["name"] as? String,
+                  let pubkey = row["pubkey_hex"] as? String
+            else { return nil }
+            return RelayFriend(
+                name: name,
+                pubkeyHex: pubkey,
+                relayURL: row["relay_url"] as? String,
+                addedAt: row["added_at"] as? Double
+            )
+        }
+    }
+
     // MARK: - Friend codes
 
-    /// Generate a friend code encoding this user's connection info.
+    /// Generate a relay/E2EE friend code.
     func generateFriendCode(name: String) -> String? {
-        guard !publicKeyHex.isEmpty else { return nil }
+        guard !publicKeyHex.isEmpty,
+              let seed = hexToData(privateKeyHex)
+        else { return nil }
 
-        // Extract host and ws port from serverURL (e.g. "ws://1.2.3.4:9999/ingest")
-        guard let url = URL(string: serverURL),
-              let host = url.host else { return nil }
-        let wsPort = url.port ?? 9999
-        let actPort = Int(activityPort) ?? 9998
+        let groupKey = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: seed),
+            salt: Data(),
+            info: Data("fisherman/friends-group/v1".utf8),
+            outputByteCount: 32
+        )
+        let groupHex = groupKey.withUnsafeBytes {
+            Data($0).map { String(format: "%02x", $0) }.joined()
+        }
 
-        let code = FriendCode(n: name, k: publicKeyHex, h: host, w: wsPort, a: actPort)
+        let relay = statusRelayURL.isEmpty ? nil : statusRelayURL
+        let code = FriendCode(n: name, k: publicKeyHex, h: nil, w: nil, a: nil, g: groupHex, r: relay)
         guard let jsonData = try? JSONEncoder().encode(code) else { return nil }
 
         let base64 = jsonData.base64EncodedString()
@@ -311,9 +419,11 @@ final class ConfigManager {
 
     /// Add a friend from a parsed code, optionally overriding the display name.
     func addFriendFromCode(_ code: FriendCode, overrideName: String? = nil) {
+        guard code.g == nil else { return }
         let name = overrideName?.isEmpty == false ? overrideName! : code.n
-        let wsURL = "ws://\(code.h):\(code.w)"
-        let actPort = String(code.a)
+        guard let host = code.h else { return }
+        let wsURL = "ws://\(host):\(code.w ?? 9999)"
+        let actPort = String(code.a ?? 9998)
 
         addFriend(name: name, publicKey: code.k, serverURL: wsURL, activityPort: actPort)
         registerFriendOnServer(pubkey: code.k)

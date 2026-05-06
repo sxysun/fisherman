@@ -38,13 +38,13 @@ class ConfigIdentityTests(unittest.TestCase):
                 f"FISH_PRIVATE_KEY={TEST_SEED_HEX}\n",
                 encoding="utf-8",
             )
-            missing_legacy = home / "missing" / ".env"
+            missing_project = home / "missing" / ".env"
 
             old_cwd = os.getcwd()
             try:
                 os.chdir(cwd)
                 with mock.patch.object(
-                    config_mod, "legacy_project_env_path", return_value=missing_legacy
+                    config_mod, "project_env_path", return_value=missing_project
                 ):
                     cfg = config_mod.FishermanConfig()
             finally:
@@ -52,23 +52,143 @@ class ConfigIdentityTests(unittest.TestCase):
 
             self.assertEqual(cfg.server_url, "ws://home.example:9999/ingest")
             self.assertEqual(cfg.private_key, TEST_SEED_HEX)
+            self.assertEqual(cfg.backend_mode, "self_hosted")
+            self.assertTrue(cfg.streaming_enabled)
 
-    def test_load_keys_migrates_legacy_private_key_to_user_env(self) -> None:
+    def test_default_backend_is_local_only(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.backend_mode, "local")
+            self.assertFalse(cfg.streaming_enabled)
+            self.assertEqual(cfg.status_relay_url, config_mod.DEFAULT_STATUS_RELAY_URL)
+
+    def test_backend_mode_local_overrides_server_url(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            self._home_env(home).write_text(
+                "FISH_BACKEND_MODE=local\n"
+                "FISH_SERVER_URL=ws://old.example:9999/ingest\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.backend_mode, "local")
+            self.assertFalse(cfg.streaming_enabled)
+
+    def test_backend_url_derives_self_hosted_ingest_url(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            self._home_env(home).write_text(
+                "FISH_BACKEND_MODE=self_hosted\n"
+                "FISH_BACKEND_URL=https://fish.example\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.backend_mode, "self_hosted")
+            self.assertEqual(cfg.server_url, "wss://fish.example/ingest")
+            self.assertTrue(cfg.streaming_enabled)
+
+    def test_backend_config_removes_server_url_env_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            user_env = self._home_env(home)
+            user_env.write_text(
+                "FISH_SERVER_URL=ws://old.example:9999/ingest\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = cli._persist_backend_config(
+                    mode="self_hosted",
+                    backend_url="ws://new.example:9999/ingest",
+                )
+
+            written = user_env.read_text(encoding="utf-8")
+            self.assertIn("FISH_BACKEND_MODE=self_hosted\n", written)
+            self.assertIn("FISH_BACKEND_URL=ws://new.example:9999/ingest\n", written)
+            self.assertNotIn("FISH_SERVER_URL=", written)
+            self.assertEqual(cfg.server_url, "ws://new.example:9999/ingest")
+
+    def test_cloud_mode_ignores_stale_self_hosted_server_url(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            self._home_env(home).write_text(
+                "FISH_BACKEND_MODE=cloud\n"
+                "FISH_BACKEND_URL=https://fisherman.teleport.computer\n"
+                "FISH_SERVER_URL=ws://old.example:9999/ingest\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.backend_mode, "cloud")
+            self.assertFalse(cfg.streaming_enabled)
+            self.assertEqual(cfg.server_url, config_mod.DEFAULT_SERVER_URL)
+
+    def test_status_relay_url_is_public_alias_for_ledger_url(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            self._home_env(home).write_text(
+                "FISH_STATUS_RELAY_URL=https://relay.example\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.status_relay_url, "https://relay.example")
+            self.assertEqual(cfg.ledger_url, "https://relay.example")
+
+    def test_load_keys_migrates_project_private_key_to_user_env(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as repo_dir:
             home = Path(home_dir)
             os.environ["HOME"] = str(home)
             user_env = self._home_env(home)
             user_env.write_text("FISH_SERVER_URL=ws://home.example:9999/ingest\n", encoding="utf-8")
 
-            legacy_env = Path(repo_dir) / ".env"
-            legacy_env.write_text(
+            project_env = Path(repo_dir) / ".env"
+            project_env.write_text(
                 f"FISH_PRIVATE_KEY={TEST_SEED_HEX}\n"
-                "FISH_DISPLAY_NAME=Legacy\n",
+                "FISH_DISPLAY_NAME=Project\n",
                 encoding="utf-8",
             )
 
             with mock.patch.object(
-                config_mod, "legacy_project_env_path", return_value=legacy_env
+                config_mod, "project_env_path", return_value=project_env
             ):
                 with contextlib.redirect_stderr(io.StringIO()):
                     _priv, pub, group = cli._load_keys()
@@ -85,10 +205,10 @@ class ConfigIdentityTests(unittest.TestCase):
             os.environ["HOME"] = str(home)
             user_env = self._home_env(home)
             user_env.write_text("FISH_SERVER_URL=ws://home.example:9999/ingest\n", encoding="utf-8")
-            missing_legacy = home / "missing" / ".env"
+            missing_project = home / "missing" / ".env"
 
             with mock.patch.object(
-                config_mod, "legacy_project_env_path", return_value=missing_legacy
+                config_mod, "project_env_path", return_value=missing_project
             ):
                 with contextlib.redirect_stderr(io.StringIO()):
                     cli._load_keys()
@@ -109,10 +229,10 @@ class ConfigIdentityTests(unittest.TestCase):
                 "FISH_PRIVATE_KEY=not-hex\n",
                 encoding="utf-8",
             )
-            missing_legacy = home / "missing" / ".env"
+            missing_project = home / "missing" / ".env"
 
             with mock.patch.object(
-                config_mod, "legacy_project_env_path", return_value=missing_legacy
+                config_mod, "project_env_path", return_value=missing_project
             ):
                 with contextlib.redirect_stderr(io.StringIO()):
                     with self.assertRaises(SystemExit) as raised:
