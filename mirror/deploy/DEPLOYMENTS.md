@@ -55,3 +55,12 @@ When a CVM is deployed, append a row like:
 | On-chain entries | tx `0x…` block `…` for compose_hash `0x…` |
 | Dashboard | https://cloud.phala.com/dashboard/cvms/<uuid> |
 ```
+
+### 2026-05-06 — Upgrade — compose @ `7dbe446`
+
+| | |
+|---|---|
+| compose_hash | `0xdf73b94ef7f2606d2c600e9a6be939af20e07021b4dd41553cf14b97e1341af3` |
+| VM UUID | `4cd0bd82-e1e1-4a31-a604-4cb192c37f69` |
+| Domain | fisherman.teleport.computer |
+| Workflow run | https://github.com/sxysun/fisherman/actions/runs/25416667652 |
