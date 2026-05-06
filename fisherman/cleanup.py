@@ -224,12 +224,18 @@ def set_last_uploaded_ts(
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
-    # `timeout=` controls how long Python's sqlite3 driver waits for a
-    # busy lock before raising; `busy_timeout` does the same at the
-    # SQLite level (used by the engine itself, not just the driver).
-    # Need both — we're contending with screenpipe's INSERT writer.
+    # Concurrency notes:
+    #
+    # - DON'T set `PRAGMA journal_mode = WAL` here. screenpipe already
+    #   set the DB to WAL at its own startup; setting it again from
+    #   another connection issues an exclusive-lock write that contends
+    #   with screenpipe's continuous INSERT path → 60s busy_timeout
+    #   followed by `database is locked`.
+    #
+    # - `timeout=` is the Python driver's wait; `busy_timeout` is
+    #   SQLite's. We set both to 60s. WAL means our SELECTs never wait
+    #   on screenpipe; only our DELETEs do.
     conn = sqlite3.connect(str(db_path), timeout=60.0)
-    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 60000")  # 60s
     return conn
 
