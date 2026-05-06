@@ -24,9 +24,9 @@ of the same protocols.
 - Production rollout of the public/default relay. The compose and CI
   health checks are wired; it becomes live after the deploy workflow is
   pushed and run against the Cloud CVM.
-- Managed Fisherman Cloud pairing. The hosted TEE deployment,
-  attestation verifier, and CI/CD pipeline exist, but the self-serve key
-  provisioning flow in the app is not wired yet.
+- Managed Fisherman Cloud ingest enrollment. The hosted TEE deployment,
+  attestation verifier, and CI/CD pipeline exist, but the self-serve
+  account/ingest enablement flow in the app is not wired yet.
 - Per-recipient status envelopes. The current friend-code protocol shares
   one friends-group key, so revocation is not cryptographically complete.
 - Daemon endpoint `/endpoints/mine` returning the relay's view of which

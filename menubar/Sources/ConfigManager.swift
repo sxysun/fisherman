@@ -34,6 +34,8 @@ struct FriendCode: Codable {
 
 @Observable
 final class ConfigManager {
+    private let defaultServerURL = "ws://localhost:9999/ingest"
+
     var backendMode: String = "local"
     var backendURL: String = ""
     var statusRelayURL: String = "https://relay.fisherman.teleport.computer"
@@ -83,20 +85,16 @@ final class ConfigManager {
         }
 
         if !loadedKeys.contains("FISH_BACKEND_MODE") {
-            if !serverURL.isEmpty && serverURL != "ws://localhost:9999/ingest" {
+            if !serverURL.isEmpty && serverURL != defaultServerURL {
                 backendMode = "self_hosted"
                 if backendURL.isEmpty { backendURL = serverURL }
             } else {
                 backendMode = "local"
             }
             needsSave = true
-        } else if backendMode == "self_hosted" && backendURL.isEmpty {
-            backendURL = serverURL
-            needsSave = true
-        } else if backendMode == "cloud" && backendURL.isEmpty {
-            backendURL = "https://fisherman.teleport.computer"
-            needsSave = true
         }
+
+        normalizeBackendURLs(loadedKeys: loadedKeys, needsSave: &needsSave)
 
         // Generate key pair on first load if not present anywhere we support.
         if privateKeyHex.isEmpty {
@@ -294,6 +292,35 @@ final class ConfigManager {
         backendMode == "local" || !backendURL.isEmpty || !serverURL.isEmpty
     }
 
+    var effectiveOwnServerURL: String {
+        if backendMode == "self_hosted" && !backendURL.isEmpty {
+            return Self.ingestURL(from: backendURL)
+        }
+        if backendMode == "cloud", backendURL.hasPrefix("ws://") || backendURL.hasPrefix("wss://") {
+            return Self.ingestURL(from: backendURL)
+        }
+        return serverURL
+    }
+
+    func ownActivityPortCandidates() -> [String] {
+        var ports: [String] = []
+        appendUniquePort(activityPort, to: &ports)
+        // Historical self-hosted installs used either 9998 (repo default) or
+        // 9996 (current EC2/systemd setup). Try both so settings can expose a
+        // single backend URL instead of a second "activity port" knob.
+        appendUniquePort("9998", to: &ports)
+        appendUniquePort("9996", to: &ports)
+        return ports
+    }
+
+    func ownHTTPBaseURLCandidates() -> [String] {
+        guard let url = URL(string: effectiveOwnServerURL), let host = url.host else {
+            return ["http://localhost:9998"]
+        }
+        let scheme = effectiveOwnServerURL.hasPrefix("wss://") ? "https" : "http"
+        return ownActivityPortCandidates().map { "\(scheme)://\(host):\($0)" }
+    }
+
     // MARK: - Ed25519 signing
 
     /// Create FishKey auth header value for HTTP requests.
@@ -432,63 +459,126 @@ final class ConfigManager {
     /// POST friend pubkey to own server's /api/friends (owner auth).
     func registerFriendOnServer(pubkey: String) {
         guard let authValue = signRequest() else { return }
-
-        // Build HTTP URL from WS URL
-        let httpBase = httpBaseURL()
-        guard let url = URL(string: "\(httpBase)/api/friends") else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(authValue, forHTTPHeaderField: "Authorization")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["pubkey": pubkey])
-
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            if let error = error {
-                NSLog("[Fisherman] register friend failed: \(error)")
-                return
-            }
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            NSLog("[Fisherman] register friend response: \(status)")
-        }.resume()
+        Self.mutateFriendOnServer(
+            method: "POST",
+            pubkey: pubkey,
+            authValue: authValue,
+            bases: ownHTTPBaseURLCandidates(),
+            index: 0
+        )
     }
 
     /// DELETE friend pubkey from own server's /api/friends.
     private func deregisterFriendOnServer(pubkey: String) {
         guard let authValue = signRequest() else { return }
+        Self.mutateFriendOnServer(
+            method: "DELETE",
+            pubkey: pubkey,
+            authValue: authValue,
+            bases: ownHTTPBaseURLCandidates(),
+            index: 0
+        )
+    }
 
-        let httpBase = httpBaseURL()
-        guard let url = URL(string: "\(httpBase)/api/friends") else { return }
+    private static func mutateFriendOnServer(
+        method: String,
+        pubkey: String,
+        authValue: String,
+        bases: [String],
+        index: Int
+    ) {
+        guard index < bases.count,
+              let url = URL(string: "\(bases[index])/api/friends")
+        else {
+            NSLog("[Fisherman] \(method) friend failed on all activity endpoints")
+            return
+        }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "DELETE"
+        request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(authValue, forHTTPHeaderField: "Authorization")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["pubkey": pubkey])
 
         URLSession.shared.dataTask(with: request) { _, response, error in
-            if let error = error {
-                NSLog("[Fisherman] deregister friend failed: \(error)")
+            if let error {
+                NSLog("[Fisherman] \(method) friend failed at \(bases[index]): \(error)")
+                Self.mutateFriendOnServer(
+                    method: method,
+                    pubkey: pubkey,
+                    authValue: authValue,
+                    bases: bases,
+                    index: index + 1
+                )
                 return
             }
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            NSLog("[Fisherman] deregister friend response: \(status)")
+            if (200..<300).contains(status) {
+                NSLog("[Fisherman] \(method) friend response: \(status) at \(bases[index])")
+            } else {
+                NSLog("[Fisherman] \(method) friend response: \(status) at \(bases[index])")
+                Self.mutateFriendOnServer(
+                    method: method,
+                    pubkey: pubkey,
+                    authValue: authValue,
+                    bases: bases,
+                    index: index + 1
+                )
+            }
         }.resume()
     }
 
-    /// Derive HTTP API base URL from the WS server URL.
-    private func httpBaseURL() -> String {
-        // serverURL is like "ws://host:9999/ingest" — HTTP API is on activityPort or 9998
-        guard let url = URL(string: serverURL), let host = url.host else {
-            return "http://localhost:9998"
+    // MARK: - Private helpers
+
+    private func normalizeBackendURLs(loadedKeys: Set<String>, needsSave: inout Bool) {
+        if backendMode == "self_hosted" {
+            if backendURL.isEmpty {
+                backendURL = serverURL
+                needsSave = true
+            }
+            if !backendURL.isEmpty
+                && (!loadedKeys.contains("FISH_SERVER_URL") || serverURL == defaultServerURL)
+            {
+                serverURL = Self.ingestURL(from: backendURL)
+            }
+        } else if backendMode == "cloud" {
+            if backendURL.isEmpty {
+                backendURL = "https://fisherman.teleport.computer"
+                needsSave = true
+            }
+            if backendURL.hasPrefix("ws://") || backendURL.hasPrefix("wss://") {
+                serverURL = Self.ingestURL(from: backendURL)
+            } else {
+                serverURL = defaultServerURL
+            }
         }
-        // The HTTP API runs on HTTP_API_PORT (default 9998) which is stored as activityPort
-        let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
-        let port = Int(activityPort) ?? 9998
-        return "\(scheme)://\(host):\(port)"
     }
 
-    // MARK: - Private helpers
+    private static func ingestURL(from raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme
+        else { return trimmed }
+
+        if scheme == "http" {
+            components.scheme = "ws"
+        } else if scheme == "https" {
+            components.scheme = "wss"
+        } else if scheme != "ws" && scheme != "wss" {
+            return trimmed
+        }
+
+        if components.path.isEmpty || components.path == "/" {
+            components.path = "/ingest"
+        }
+        return components.string ?? trimmed
+    }
+
+    private func appendUniquePort(_ raw: String, to ports: inout [String]) {
+        let port = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !port.isEmpty, Int(port) != nil, !ports.contains(port) else { return }
+        ports.append(port)
+    }
 
     private func generateKeyPair() {
         let key = Curve25519.Signing.PrivateKey()

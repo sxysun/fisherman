@@ -118,11 +118,9 @@ final class StatusPoller: @unchecked Sendable {
 
         // Poll own server
         group.enter()
-        pollSingleActivity(
+        pollOwnActivity(
             id: "me",
-            name: "me",
-            serverURL: config.serverURL,
-            activityPort: config.activityPort
+            name: "me"
         ) { activity in
             if let activity { collector.append(activity) }
             group.leave()
@@ -331,6 +329,54 @@ final class StatusPoller: @unchecked Sendable {
         }.resume()
     }
 
+    private func pollOwnActivity(
+        id: String,
+        name: String,
+        completion: @Sendable @escaping (UserActivity?) -> Void
+    ) {
+        pollSingleActivityCandidate(
+            id: id,
+            name: name,
+            serverURL: config.effectiveOwnServerURL,
+            activityPorts: config.ownActivityPortCandidates(),
+            index: 0,
+            completion: completion
+        )
+    }
+
+    private func pollSingleActivityCandidate(
+        id: String,
+        name: String,
+        serverURL: String,
+        activityPorts: [String],
+        index: Int,
+        completion: @Sendable @escaping (UserActivity?) -> Void
+    ) {
+        guard index < activityPorts.count else {
+            completion(nil)
+            return
+        }
+        pollSingleActivity(
+            id: id,
+            name: name,
+            serverURL: serverURL,
+            activityPort: activityPorts[index]
+        ) { [weak self] activity in
+            if let activity {
+                completion(activity)
+            } else {
+                self?.pollSingleActivityCandidate(
+                    id: id,
+                    name: name,
+                    serverURL: serverURL,
+                    activityPorts: activityPorts,
+                    index: index + 1,
+                    completion: completion
+                )
+            }
+        }
+    }
+
     // MARK: - Poke
 
     func sendPoke(to friend: Friend) {
@@ -363,10 +409,12 @@ final class StatusPoller: @unchecked Sendable {
     }
 
     func clearMyPokes() {
-        guard let wsURL = URL(string: config.serverURL),
-              let host = wsURL.host else { return }
-        let scheme = config.serverURL.hasPrefix("wss://") ? "https" : "http"
-        let httpURL = "\(scheme)://\(host):\(config.activityPort)/api/pokes"
+        clearMyPokes(bases: config.ownHTTPBaseURLCandidates(), index: 0)
+    }
+
+    private func clearMyPokes(bases: [String], index: Int) {
+        guard index < bases.count else { return }
+        let httpURL = "\(bases[index])/api/pokes"
         guard let url = URL(string: httpURL) else { return }
 
         var request = URLRequest(url: url)
@@ -376,8 +424,14 @@ final class StatusPoller: @unchecked Sendable {
             request.setValue(authValue, forHTTPHeaderField: "Authorization")
         }
 
-        session.dataTask(with: request) { _, _, _ in
-            DispatchQueue.main.async { [weak self] in
+        session.dataTask(with: request) { [weak self] _, response, error in
+            if error != nil || !(((response as? HTTPURLResponse)?.statusCode ?? 0) >= 200
+                && ((response as? HTTPURLResponse)?.statusCode ?? 0) < 300)
+            {
+                self?.clearMyPokes(bases: bases, index: index + 1)
+                return
+            }
+            DispatchQueue.main.async {
                 self?.state.incomingPokes = []
             }
         }.resume()
@@ -391,10 +445,8 @@ final class StatusPoller: @unchecked Sendable {
 
         // Poll own server
         group.enter()
-        pollSingleHistory(
+        pollOwnHistory(
             id: "me",
-            serverURL: config.serverURL,
-            activityPort: config.activityPort
         ) { id, entries in
             historyCollector.set(id: id, entries: entries)
             group.leave()
@@ -499,6 +551,49 @@ final class StatusPoller: @unchecked Sendable {
 
             completion(capturedId, entries)
         }.resume()
+    }
+
+    private func pollOwnHistory(
+        id: String,
+        completion: @Sendable @escaping (String, [ActivityEntry]) -> Void
+    ) {
+        pollSingleHistoryCandidate(
+            id: id,
+            serverURL: config.effectiveOwnServerURL,
+            activityPorts: config.ownActivityPortCandidates(),
+            index: 0,
+            completion: completion
+        )
+    }
+
+    private func pollSingleHistoryCandidate(
+        id: String,
+        serverURL: String,
+        activityPorts: [String],
+        index: Int,
+        completion: @Sendable @escaping (String, [ActivityEntry]) -> Void
+    ) {
+        guard index < activityPorts.count else {
+            completion(id, [])
+            return
+        }
+        pollSingleHistory(
+            id: id,
+            serverURL: serverURL,
+            activityPort: activityPorts[index]
+        ) { [weak self] id, entries in
+            if !entries.isEmpty {
+                completion(id, entries)
+            } else {
+                self?.pollSingleHistoryCandidate(
+                    id: id,
+                    serverURL: serverURL,
+                    activityPorts: activityPorts,
+                    index: index + 1,
+                    completion: completion
+                )
+            }
+        }
     }
 
     /// Walk history backwards from newest; find where category changed to determine session start.

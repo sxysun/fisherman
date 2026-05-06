@@ -138,7 +138,7 @@ A processor manifest is JSON:
 
 Custom processors receive normalized context JSON on stdin and return
 JSON on stdout. They can run locally, in a self-hosted backend, or inside
-the managed TEE once Cloud pairing is complete. Recurring schedules are
+the managed TEE once Fisherman Cloud ingest is enabled. Recurring schedules are
 stored in `~/.fisherman/processor-schedules.json` and the daemon runs due
 jobs automatically; `fisherman processor schedule run-due` exists for
 manual or external cron execution.

@@ -154,11 +154,11 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
 
             if backendMode == "cloud" {
-                hintText("Managed by Fisherman. The service endpoint, relay, and local control port are configured automatically after Cloud pairing.")
-                hintText("Private context is only sent after the Cloud audit passes attestation.")
+                hintText("Managed by Fisherman. Service endpoints and encrypted friend-status relay are configured automatically.")
+                hintText("Private context is only sent after the Fisherman Cloud TEE audit passes and Cloud ingest is enabled for your account.")
             } else if backendMode == "self_hosted" {
-                fieldRow("Backend URL", placeholder: "wss://your-server:9999/ingest", text: $backendURL)
-                hintText("Use this when you run your own Fisherman backend. That backend handles ingest, storage, and processing under your trust model.")
+                fieldRow("Self-hosted URL", placeholder: "wss://your-server:9999/ingest", text: $backendURL)
+                hintText("Use this when you run your own Fisherman server. One URL is enough; Fisherman derives the activity and history endpoints automatically.")
             } else {
                 hintText("Raw context stays on this laptop. Friend status can still use the encrypted relay when configured.")
             }
@@ -166,11 +166,15 @@ struct SettingsView: View {
             DisclosureGroup("Advanced endpoints", isExpanded: $showAdvancedBackend) {
                 VStack(alignment: .leading, spacing: 10) {
                     if backendMode == "cloud" {
-                        fieldRow("Cloud service URL", placeholder: defaultCloudURL, text: $backendURL)
+                        fieldRow("Fisherman Cloud URL", placeholder: defaultCloudURL, text: $backendURL)
                     }
                     fieldRow("Status relay", placeholder: "https://relay.fisherman.teleport.computer", text: $statusRelayURL)
-                    fieldRow("Local control port", placeholder: "7892", text: $controlPort)
-                    hintText("Only change these for local development or custom relays.")
+                    if backendMode != "cloud" {
+                        fieldRow("Local control port", placeholder: "7892", text: $controlPort)
+                    }
+                    hintText(backendMode == "cloud"
+                             ? "Only change these for Fisherman Cloud development or a custom relay."
+                             : "Only change these for local development or custom relays.")
                 }
                 .padding(.top, 8)
             }

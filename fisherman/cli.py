@@ -885,7 +885,7 @@ def backend_configure_cloud(
     cfg = _persist_backend_config(mode="cloud", backend_url=url, relay_url=relay_url)
     click.echo("configured backend: Fisherman Cloud")
     click.echo(f"  backend: {cfg.backend_url}")
-    click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until cloud ingest pairing is available'}")
+    click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until Cloud ingest is enabled for this account'}")
     click.echo(f"  relay:   {cfg.status_relay_url}")
     click.echo("Restart the daemon for changes to take effect.")
 
@@ -1963,7 +1963,7 @@ def mirror_status():
     online = data.get("relay_connected", False)
     click.echo(f"laptop relay-connected: {online}")
     click.echo("self-hosted mirror pairing: use `fisherman mirror pair-mint`")
-    click.echo("managed Fisherman Cloud pairing: use `fisherman backend configure cloud` once `fisherman cloud audit` passes")
+    click.echo("managed Fisherman Cloud: use `fisherman backend configure cloud` once `fisherman cloud audit` passes and Cloud ingest is enabled")
 
 
 @main.group(name="storage")
