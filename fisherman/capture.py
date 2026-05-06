@@ -57,7 +57,7 @@ _FORCE_SCREENCAPTURE = os.environ.get("FISHERMAN_FORCE_SCREENCAPTURE", "") == "1
 
 
 def _require_macos() -> None:
-    if sys.platform != "darwin":
+    if sys.platform != "darwin" or objc is None or Quartz is None:
         raise RuntimeError(
             "native screen capture is only supported on macOS; "
             "use FISH_CAPTURE_BACKEND=screenpipe on Windows"

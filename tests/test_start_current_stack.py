@@ -10,9 +10,9 @@ from unittest import mock
 
 def load_start_stack_module():
     module_name = "fisherman_start_current_stack"
-    module_path = Path(
-        "D:/项目/工作/tk/repos/fisherman/scripts/start_current_stack.py"
-    )
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "start_current_stack.py"
+    if not module_path.exists():
+        raise unittest.SkipTest(f"{module_path} is not present in this checkout")
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader

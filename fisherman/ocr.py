@@ -33,7 +33,7 @@ def ocr_fast(jpeg_data: bytes) -> tuple[str, list[str]]:
     Run Apple Vision OCR on JPEG data. Synchronous.
     Returns (full_text, extracted_urls).
     """
-    if sys.platform != "darwin":
+    if sys.platform != "darwin" or objc is None or Quartz is None or Vision is None:
         raise RuntimeError(
             "native OCR is only supported on macOS; "
             "use FISH_CAPTURE_BACKEND=screenpipe or provide OCR text upstream on Windows"

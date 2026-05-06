@@ -66,7 +66,9 @@ class FakeServerContext:
 
 
 def load_ingest_module():
-    server_dir = Path("D:/项目/工作/tk/repos/fisherman/server")
+    if importlib.util.find_spec("asyncpg") is None:
+        raise unittest.SkipTest("asyncpg is not installed in this environment")
+    server_dir = Path(__file__).resolve().parents[1] / "server"
     if str(server_dir) not in sys.path:
         sys.path.insert(0, str(server_dir))
 

@@ -109,6 +109,25 @@ _QE_REPORT_SIG_SIZE = 64
 ISAPPALLOWED_SELECTOR = bytes.fromhex("90144031")
 
 
+def keccak256(data: bytes) -> bytes:
+    """Return Ethereum Keccak-256, not FIPS SHA3-256."""
+    try:
+        from Crypto.Hash import keccak
+    except ImportError as e:
+        raise RuntimeError(
+            "keccak256 requires pycryptodome; install fisherman[tee] "
+            "or add pycryptodome to the runtime environment"
+        ) from e
+    h = keccak.new(digest_bits=256)
+    h.update(data)
+    return h.digest()
+
+
+def function_selector(signature: str) -> bytes:
+    """Return the 4-byte EVM selector for a function signature."""
+    return keccak256(signature.encode("ascii"))[:4]
+
+
 # ---------------------------------------------------------------------------
 # Quote parsing
 # ---------------------------------------------------------------------------
