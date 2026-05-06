@@ -488,23 +488,32 @@ def _kill_and_wait(pattern: str, timeout: float = 5.0) -> None:
 def menubar_running() -> bool:
     """True iff /Applications/Fisherman.app's binary is in the process list.
 
-    `pgrep -x FishermanMenu` is flaky when called from a process the
-    OS has just forked (the in-kernel comm cache can be stale for a few
+    `pgrep -x FishermanMenu` was flaky when invoked from a process the
+    OS just forked (the in-kernel comm cache can be stale for a few
     hundred ms — the Diagnostics tab shells out from FishermanMenu and
-    can hit this every time). `pgrep -af` against the full command line,
-    filtered to the .app binary path, is reliable in both cases.
+    hit this every time). `pgrep -lf` (full command line, with command
+    printed) lets us match against the actual .app binary path.
+
+    NOTE: `-l` (lowercase L) prints the command, NOT `-a`. macOS BSD
+    pgrep doesn't support `-a` — using it silently drops the cmdline
+    output and we'd see only PIDs.
     """
     r = subprocess.run(
-        ["pgrep", "-af", "FishermanMenu"],
+        ["pgrep", "-lf", "FishermanMenu"],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
         return False
     for line in r.stdout.splitlines():
-        if "/Fisherman.app/Contents/MacOS/FishermanMenu" in line:
+        # Format: "<pid> <full command line>"
+        parts = line.strip().split(" ", 1)
+        if len(parts) < 2:
+            continue
+        cmd = parts[1]
+        if "/Fisherman.app/Contents/MacOS/FishermanMenu" in cmd:
             return True
         # Dev installs run from .build/ before the .app swap.
-        if line.rstrip().endswith("/.build/release/FishermanMenu"):
+        if cmd.rstrip().endswith("/.build/release/FishermanMenu"):
             return True
     return False
 
