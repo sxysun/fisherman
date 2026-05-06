@@ -625,24 +625,41 @@ def diagnose() -> dict:
                   if Path("/Applications/Fisherman.app").exists()
                   else "/Applications/Fisherman.app MISSING",
     }
-    # Screenpipe DB size — when it grows past a few hundred MB, /search
-    # SQL latency exceeds the daemon's poll timeout and frames stop
-    # flowing. We warn loudly so the user knows to bump
-    # FISH_SCREENPIPE_SEARCH_TIMEOUT or trim the DB.
-    sp_db = Path.home() / ".fisherman" / "screenpipe-data" / "db.sqlite"
-    if sp_db.exists():
-        size_mb = sp_db.stat().st_size / (1024 * 1024)
-        if size_mb > 1000:
-            out["screenpipe_db_size"] = {
-                "ok": False,
-                "detail": (f"{size_mb:.0f} MB — /search likely slow; "
-                           f"raise FISH_SCREENPIPE_SEARCH_TIMEOUT or trim the DB"),
-            }
+    # Screenpipe DB — surfaces both the size and the age of the
+    # oldest frame, plus whether the daemon's auto-cleanup has a
+    # safety bound to work with. Reuses fisherman.cleanup so the row
+    # text matches what `fisherman cleanup --dry-run` would say.
+    try:
+        from fisherman import cleanup as _cl
+        stats = _cl.get_db_stats()
+        last_safe = _cl.get_last_uploaded_ts()
+    except Exception:
+        stats = None
+        last_safe = None
+
+    if stats is not None:
+        size_mb = stats.size_bytes / (1024 * 1024)
+        oldest_age_h = (
+            (time.time() - stats.oldest_ts) / 3600
+            if stats.oldest_ts else None
+        )
+        bits = [f"{size_mb:.0f} MB", f"{stats.frames_count:,} frames"]
+        if oldest_age_h is not None:
+            bits.append(f"oldest {oldest_age_h:.1f}h ago")
+        # Auto-cleanup safety status — never deletes unbacked-up data.
+        if last_safe is None:
+            bits.append("auto-cleanup waiting (no upload bound yet)")
+            ok = size_mb < 1000  # warn on huge DB even without bound
         else:
-            out["screenpipe_db_size"] = {
-                "ok": True,
-                "detail": f"{size_mb:.0f} MB",
-            }
+            mark_age_h = (time.time() - last_safe) / 3600
+            bits.append(f"upload bound {mark_age_h:.1f}h ago")
+            ok = True
+        # Hard warn at 2 GB regardless — at that point /search is slow
+        # enough that frames probably aren't flowing.
+        if size_mb > 2000:
+            ok = False
+            bits.append("⚠ raise FISH_SCREENPIPE_SEARCH_TIMEOUT or run `fisherman cleanup`")
+        out["screenpipe_db"] = {"ok": ok, "detail": "; ".join(bits)}
     return out
 
 

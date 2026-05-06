@@ -52,12 +52,17 @@ class Streamer:
         self._url = url
         self._priv_key, self._pub_hex = _load_signing_key(private_key_hex)
         self._ws: websockets.WebSocketClientProtocol | None = None
-        self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_MAX_QUEUE)
+        # Queue items are tuples (payload_json, frame_screenpipe_ts | None).
+        # Carrying the screenpipe timestamp through to the send-success
+        # path lets the cleanup task know which local rows are safely
+        # backed up and can be deleted.
+        self._queue: asyncio.Queue[tuple[str, float | None]] = asyncio.Queue(maxsize=_MAX_QUEUE)
         self._connected_event = asyncio.Event()
         self._connected = False
         self._ever_connected = False
         self._frames_sent = 0
         self._frames_dropped = 0
+        self._last_uploaded_ts: float | None = None
         self._tasks: list[asyncio.Task] = []
 
     @property
@@ -71,6 +76,13 @@ class Streamer:
     @property
     def frames_dropped(self) -> int:
         return self._frames_dropped
+
+    @property
+    def last_uploaded_ts(self) -> float | None:
+        """Most recent frame timestamp that was successfully forwarded
+        upstream. The cleanup task uses this as a safety bound — only
+        local rows with timestamp ≤ this can be safely deleted."""
+        return self._last_uploaded_ts
 
     async def start(self) -> None:
         self._tasks = [
@@ -116,7 +128,7 @@ class Streamer:
                 log.warning("queue_full_dropping_frame")
             except asyncio.QueueEmpty:
                 pass
-        await self._queue.put(payload)
+        await self._queue.put((payload, frame.timestamp))
 
     async def send_audio(
         self,
@@ -142,11 +154,13 @@ class Streamer:
                 log.warning("queue_full_dropping_audio")
             except asyncio.QueueEmpty:
                 pass
-        await self._queue.put(msg)
+        # Audio messages don't gate cleanup (we cleanup screen frames,
+        # not audio rows in screenpipe), so pass None for the ts.
+        await self._queue.put((msg, None))
 
     async def _send_loop(self) -> None:
         while True:
-            msg = await self._queue.get()
+            msg, frame_ts = await self._queue.get()
             while True:
                 await self._connected_event.wait()
                 try:
@@ -156,6 +170,14 @@ class Streamer:
                         continue
                     await asyncio.wait_for(ws.send(msg), timeout=30)
                     self._frames_sent += 1
+                    if frame_ts is not None:
+                        # Track the most recent frame timestamp the
+                        # upstream definitely received. The cleanup task
+                        # uses this as a safety bound to ensure we never
+                        # delete unbacked-up data.
+                        if (self._last_uploaded_ts is None
+                                or frame_ts > self._last_uploaded_ts):
+                            self._last_uploaded_ts = frame_ts
                     break
                 except asyncio.TimeoutError:
                     log.warning("send_timeout")

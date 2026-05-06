@@ -26,6 +26,22 @@ class FishermanConfig(BaseSettings):
     # via FISH_SCREENPIPE_SEARCH_TIMEOUT.
     screenpipe_search_timeout: float = 30.0
 
+    # Local-DB cleanup: prevent the SQLite from growing unboundedly
+    # by deleting frames older than `screenpipe_local_retention_hours`,
+    # but ONLY when those frames have already been uploaded upstream
+    # (the daemon's WebSocket-send high-water mark gates this — never
+    # delete unbacked data). See fisherman/cleanup.py for the SQL.
+    screenpipe_cleanup_enabled: bool = True
+    screenpipe_local_retention_hours: int = 24
+    # How often the cleanup task runs in the daemon (seconds). The
+    # delete itself is fast (~seconds for hundreds of MB); we don't
+    # need to thrash it.
+    screenpipe_cleanup_interval: float = 3600.0
+    # VACUUM is what actually shrinks the file on disk. It's slow on
+    # large DBs (locks for tens of seconds) so we only run it when a
+    # cleanup deleted a lot. 0 disables.
+    screenpipe_cleanup_vacuum_threshold: int = 50_000
+
     # Ambient audio (meeting transcripts). Only forwarded while the meeting
     # detector says the user is in a call. Requires screenpipe to have audio
     # capture enabled (i.e. menubar launched it without --disable-audio).

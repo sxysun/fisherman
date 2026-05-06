@@ -144,7 +144,8 @@ struct DiagnosticsTab: View {
         else { return nil }
         // Stable presentation order regardless of dict iteration order.
         let order = ["menubar", "daemon", "screenpipe_binary",
-                     "screenpipe_process", "screenpipe_http", "app_bundle"]
+                     "screenpipe_process", "screenpipe_http",
+                     "app_bundle", "screenpipe_db"]
         var out: [(String, Bool, String)] = []
         for key in order {
             if let r = dict[key] as? [String: Any] {
@@ -172,6 +173,7 @@ struct DiagnosticsTab: View {
         case "screenpipe_process": return "Screenpipe process"
         case "screenpipe_http":    return "Screenpipe HTTP (127.0.0.1:3030)"
         case "app_bundle":         return "/Applications/Fisherman.app"
+        case "screenpipe_db":      return "Screenpipe local DB"
         default:                   return key.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }

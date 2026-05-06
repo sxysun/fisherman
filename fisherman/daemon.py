@@ -137,6 +137,15 @@ class FishermanDaemon:
         if self._config.audio_enabled and self._capture_backend == "screenpipe":
             audio_task = asyncio.create_task(self._audio_loop())
 
+        # Background DB cleanup. Trims local screenpipe SQLite to the
+        # configured retention window — but only the rows whose
+        # timestamps the streamer has confirmed forwarded upstream.
+        # Never deletes unbacked-up data.
+        cleanup_task: asyncio.Task | None = None
+        if (self._config.screenpipe_cleanup_enabled
+                and self._capture_backend == "screenpipe"):
+            cleanup_task = asyncio.create_task(self._cleanup_loop())
+
         # Connect to relay (RPC mailbox) if we have keys + a configured URL.
         if self._signing_priv is not None and self._config.ledger_url:
             self._relay_client = RelayClient(
@@ -179,6 +188,12 @@ class FishermanDaemon:
                 audio_task.cancel()
                 try:
                     await audio_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if cleanup_task is not None:
+                cleanup_task.cancel()
+                try:
+                    await cleanup_task
                 except (asyncio.CancelledError, Exception):
                     pass
             if self._relay_client is not None:
@@ -487,6 +502,74 @@ class FishermanDaemon:
             return {"ok": True}
 
         return {"error": f"unknown_command:{cmd}"}
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically trim local screenpipe DB to the retention
+        window, but only rows the streamer has confirmed forwarded
+        upstream (the safety bound).
+
+        First run delayed so the streamer has time to upload at least
+        one frame and establish a meaningful safety bound.
+        """
+        from fisherman import cleanup as _cl
+
+        cfg = self._config
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(min(cfg.screenpipe_cleanup_interval, 60.0))
+
+        while self._running:
+            try:
+                last_safe = self._streamer.last_uploaded_ts
+                if last_safe is not None:
+                    # Persist for the next daemon restart (a fresh
+                    # daemon doesn't have an in-memory bound until it
+                    # sends its first frame).
+                    await loop.run_in_executor(
+                        self._pool, _cl.set_last_uploaded_ts, last_safe,
+                    )
+                else:
+                    last_safe = await loop.run_in_executor(
+                        self._pool, _cl.get_last_uploaded_ts,
+                    )
+
+                # cleanup_db handles vacuum itself based on the flag.
+                # We pass vacuum=True only when a "big" delete is
+                # expected (peeked via dry_run to avoid an unnecessary
+                # multi-second VACUUM blocking screenpipe writes).
+                threshold = cfg.screenpipe_cleanup_vacuum_threshold
+                peek = await loop.run_in_executor(
+                    self._pool,
+                    lambda: _cl.cleanup_db(
+                        retention_hours=cfg.screenpipe_local_retention_hours,
+                        last_safe_ts=last_safe,
+                        dry_run=True,
+                    ),
+                )
+                want_vacuum = (
+                    threshold > 0 and peek.frames_deleted >= threshold
+                )
+                result = await loop.run_in_executor(
+                    self._pool,
+                    lambda: _cl.cleanup_db(
+                        retention_hours=cfg.screenpipe_local_retention_hours,
+                        last_safe_ts=last_safe,
+                        vacuum=want_vacuum,
+                    ),
+                )
+
+                if result.skipped_reason:
+                    log.info("screenpipe_cleanup_skipped",
+                             reason=result.skipped_reason)
+                else:
+                    log.info(
+                        "screenpipe_cleanup",
+                        deleted=result.frames_deleted,
+                        bytes_freed=result.bytes_freed,
+                        vacuum=result.vacuum_ran,
+                    )
+            except Exception:
+                log.warning("screenpipe_cleanup_failed", exc_info=True)
+            await asyncio.sleep(cfg.screenpipe_cleanup_interval)
 
     async def _audio_loop(self) -> None:
         """Detect calls and forward screenpipe audio transcripts only while in one.
