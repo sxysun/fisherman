@@ -78,8 +78,16 @@ jobs:
           # MIRROR_IMAGE_TAG forces a pull of the freshly-built image
           # (compose pins to ${MIRROR_IMAGE_TAG:-latest}); without this,
           # docker reuses the cached :latest and never sees the new code.
-          IMAGE_TAG=$(git rev-parse --short HEAD)
-          echo "Deploying mirror image tag: $IMAGE_TAG"
+          #
+          # Use the last commit that would have triggered docker-publish
+          # (matches its `paths:` filter), so the tag is guaranteed to
+          # exist on ghcr — workflow-only commits don't get an image.
+          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror pyproject.toml)
+          if [[ -z "$IMAGE_TAG" ]]; then
+            echo "::error::no commit touching image-relevant paths found"
+            exit 1
+          fi
+          echo "Deploying mirror image tag: $IMAGE_TAG (last image-relevant commit)"
           phala deploy \
             --api-token "$PHALA_CLOUD_API_KEY" \
             --cvm-id ${{ vars.CVM_VM_UUID }} \
