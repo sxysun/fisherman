@@ -209,6 +209,8 @@ struct StorageTab: View {
                 .font(.system(size: 14, weight: .semibold))
             Text("Encrypted backup of your local capture. Required for offline-mirror endpoints.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Storage chooses where encrypted snapshots are written. It does not answer agent queries by itself; a Mirror endpoint reads this storage.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
 
             Picker("Backend", selection: $selectedKind) {
                 Text("None").tag("none")
@@ -331,6 +333,8 @@ struct MirrorTab: View {
             Text("Offline Mirror")
                 .font(.system(size: 14, weight: .semibold))
             Text("A mirror endpoint serves agent queries when your laptop is offline. It runs on a server you trust (or on Fisherman Cloud TEE).")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Mirror is the query server; Storage is the encrypted backing store it reads from. Configure Storage first, then pair the Mirror.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
 
             Divider()

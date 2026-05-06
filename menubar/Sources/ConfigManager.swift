@@ -45,56 +45,117 @@ final class ConfigManager {
     private var knownKeyLines: [String: [Int]] = [:]
 
     private var envPath: String {
-        findProjectDir() + "/.env"
+        userEnvPath()
     }
 
     func load() {
         passthroughLines = []
         knownKeyLines = [:]
+        var loadedKeys = Set<String>()
+        var needsSave = false
 
-        guard let contents = try? String(contentsOfFile: envPath, encoding: .utf8) else {
-            return
+        if let contents = try? String(contentsOfFile: envPath, encoding: .utf8) {
+            parseEnv(contents, trackLines: true, fillMissingOnly: false, loadedKeys: &loadedKeys)
         }
 
+        if let legacyPath = legacyProjectEnvPath(),
+           let contents = try? String(contentsOfFile: legacyPath, encoding: .utf8)
+        {
+            needsSave = parseEnv(
+                contents,
+                trackLines: false,
+                fillMissingOnly: true,
+                loadedKeys: &loadedKeys
+            ) || needsSave
+        }
+
+        // Generate key pair on first load if not present anywhere we support.
+        if privateKeyHex.isEmpty {
+            generateKeyPair()
+            needsSave = true
+        }
+
+        if needsSave {
+            save()
+        }
+    }
+
+    @discardableResult
+    private func parseEnv(
+        _ contents: String,
+        trackLines: Bool,
+        fillMissingOnly: Bool,
+        loadedKeys: inout Set<String>
+    ) -> Bool {
+        var loadedAnyManagedValue = false
         let lines = contents.components(separatedBy: "\n")
         for (i, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
             if let value = extractValue(trimmed, key: "FISH_SERVER_URL") {
-                serverURL = value
-                knownKeyLines["FISH_SERVER_URL", default: []].append(i)
-            } else if let value = extractValue(trimmed, key: "FISH_CONTROL_PORT") {
-                controlPort = value
-                knownKeyLines["FISH_CONTROL_PORT", default: []].append(i)
-            } else if let value = extractValue(trimmed, key: "FISH_ACTIVITY_PORT") {
-                activityPort = value
-                knownKeyLines["FISH_ACTIVITY_PORT", default: []].append(i)
-            } else if let value = extractValue(trimmed, key: "FISH_PRIVATE_KEY") {
-                privateKeyHex = value
-                knownKeyLines["FISH_PRIVATE_KEY", default: []].append(i)
-                // Derive public key
-                if let privData = hexToData(value),
-                   let signing = try? Curve25519.Signing.PrivateKey(rawRepresentation: privData)
-                {
-                    publicKeyHex = signing.publicKey.rawRepresentation
-                        .map { String(format: "%02x", $0) }.joined()
+                if shouldLoad("FISH_SERVER_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    serverURL = value
+                    loadedKeys.insert("FISH_SERVER_URL")
+                    loadedAnyManagedValue = true
                 }
+                if trackLines { knownKeyLines["FISH_SERVER_URL", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_CONTROL_PORT") {
+                if shouldLoad("FISH_CONTROL_PORT", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    controlPort = value
+                    loadedKeys.insert("FISH_CONTROL_PORT")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_CONTROL_PORT", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_ACTIVITY_PORT") {
+                if shouldLoad("FISH_ACTIVITY_PORT", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    activityPort = value
+                    loadedKeys.insert("FISH_ACTIVITY_PORT")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_ACTIVITY_PORT", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_PRIVATE_KEY") {
+                if shouldLoad("FISH_PRIVATE_KEY", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    privateKeyHex = value
+                    loadedKeys.insert("FISH_PRIVATE_KEY")
+                    loadedAnyManagedValue = true
+                    // Derive public key
+                    if let privData = hexToData(value),
+                       let signing = try? Curve25519.Signing.PrivateKey(rawRepresentation: privData)
+                    {
+                        publicKeyHex = signing.publicKey.rawRepresentation
+                            .map { String(format: "%02x", $0) }.joined()
+                    }
+                }
+                if trackLines { knownKeyLines["FISH_PRIVATE_KEY", default: []].append(i) }
             } else if let value = extractValue(trimmed, key: "FISH_DISPLAY_NAME") {
-                displayName = value
-                knownKeyLines["FISH_DISPLAY_NAME", default: []].append(i)
+                if shouldLoad("FISH_DISPLAY_NAME", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    displayName = value
+                    loadedKeys.insert("FISH_DISPLAY_NAME")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_DISPLAY_NAME", default: []].append(i) }
             } else if let value = extractValue(trimmed, key: "FISH_FRIENDS") {
-                knownKeyLines["FISH_FRIENDS", default: []].append(i)
-                friends = parseFriends(value)
+                if shouldLoad("FISH_FRIENDS", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    friends = parseFriends(value)
+                    loadedKeys.insert("FISH_FRIENDS")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_FRIENDS", default: []].append(i) }
             } else {
-                passthroughLines.append((index: i, line: line))
+                if trackLines {
+                    passthroughLines.append((index: i, line: line))
+                }
             }
         }
+        return fillMissingOnly && loadedAnyManagedValue
+    }
 
-        // Generate key pair on first load if not present
-        if privateKeyHex.isEmpty {
-            generateKeyPair()
-            save()
-        }
+    private func shouldLoad(
+        _ key: String,
+        fillMissingOnly: Bool,
+        loadedKeys: Set<String>
+    ) -> Bool {
+        !fillMissingOnly || !loadedKeys.contains(key)
     }
 
     func save() {
@@ -158,6 +219,7 @@ final class ConfigManager {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
 
         try? output.write(toFile: envPath, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: envPath)
         NSLog("[Fisherman] saved config to \(envPath)")
     }
 

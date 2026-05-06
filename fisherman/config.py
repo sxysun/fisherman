@@ -1,8 +1,111 @@
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 
+def user_env_path() -> Path:
+    """Canonical per-user config path."""
+    return Path.home() / ".fisherman" / ".env"
+
+
+def legacy_project_env_path() -> Path:
+    """Repo-local config path used by older dev/menubar builds.
+
+    The installed app lives in ~/.fisherman, so this resolves to the same
+    file there. In a development checkout it lets us reuse and migrate an
+    existing identity without making the process cwd-sensitive.
+    """
+    return Path(__file__).resolve().parents[1] / ".env"
+
+
+def env_file_paths() -> tuple[str, ...]:
+    """Dotenv files to load, from lowest to highest precedence."""
+    user_path = user_env_path()
+    legacy_path = legacy_project_env_path()
+    paths: list[Path] = []
+    try:
+        same_file = legacy_path.resolve() == user_path.resolve()
+    except OSError:
+        same_file = False
+    if legacy_path.exists() and not same_file:
+        paths.append(legacy_path)
+    paths.append(user_path)
+    return tuple(str(p) for p in paths)
+
+
+def read_env_var(path: Path, key: str) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[len("export "):].lstrip()
+        prefix = f"{key}="
+        if not stripped.startswith(prefix):
+            continue
+        value = stripped[len(prefix):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value
+    return None
+
+
+def user_env_has_var(key: str) -> bool:
+    return read_env_var(user_env_path(), key) is not None
+
+
+def _line_sets_key(line: str, key: str) -> bool:
+    stripped = line.lstrip()
+    if stripped.startswith("export "):
+        stripped = stripped[len("export "):].lstrip()
+    return stripped.startswith(f"{key}=")
+
+
+def persist_user_env_var(key: str, value: str) -> None:
+    """Atomically upsert KEY=VALUE in ~/.fisherman/.env."""
+    env_path = user_env_path()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    out: list[str] = []
+    found = False
+    for line in lines:
+        if _line_sets_key(line, key):
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        out.append(f"{key}={value}")
+
+    tmp = env_path.with_name(f".{env_path.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, env_path)
+        os.chmod(env_path, 0o600)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class FishermanConfig(BaseSettings):
-    model_config = {"env_prefix": "FISH_", "env_file": ".env", "extra": "ignore"}
+    model_config = {
+        "env_prefix": "FISH_",
+        "extra": "ignore",
+    }
+
+    def __init__(self, **values):
+        values.setdefault("_env_file", env_file_paths())
+        super().__init__(**values)
 
     # Server
     server_url: str = "ws://localhost:9999/ingest"

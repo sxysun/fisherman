@@ -108,40 +108,57 @@ func findProjectDir() -> String {
 
 // MARK: - .env parsing
 
+func userEnvPath() -> String {
+    NSHomeDirectory() + "/.fisherman/.env"
+}
+
+func legacyProjectEnvPath() -> String? {
+    let legacy = findProjectDir() + "/.env"
+    return legacy == userEnvPath() ? nil : legacy
+}
+
+func envFilePaths() -> [String] {
+    var paths = [userEnvPath()]
+    if let legacy = legacyProjectEnvPath() {
+        paths.append(legacy)
+    }
+    return paths
+}
+
+func readEnvValue(_ key: String) -> String? {
+    let prefix = "\(key)="
+    for path in envFilePaths() {
+        guard let contents = try? String(contentsOfFile: path, encoding: .utf8) else {
+            continue
+        }
+        for line in contents.components(separatedBy: "\n") {
+            var trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("export ") {
+                trimmed = String(trimmed.dropFirst("export ".count))
+                    .trimmingCharacters(in: .whitespaces)
+            }
+            if trimmed.hasPrefix(prefix) {
+                return String(trimmed.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespaces)
+            }
+        }
+    }
+    return nil
+}
+
 func audioEnabled() -> Bool {
     // Default true. Set FISH_AUDIO_ENABLED=0 in .env to disable.
-    let projDir = findProjectDir()
-    let envPath = projDir + "/.env"
-    guard let contents = try? String(contentsOfFile: envPath, encoding: .utf8) else {
-        return true
-    }
-    for line in contents.components(separatedBy: "\n") {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        if trimmed.hasPrefix("FISH_AUDIO_ENABLED=") {
-            let val = String(trimmed.dropFirst("FISH_AUDIO_ENABLED=".count))
-                .trimmingCharacters(in: .whitespaces)
-                .lowercased()
-            if val == "0" || val == "false" || val == "no" || val == "off" {
-                return false
-            }
+    if let val = readEnvValue("FISH_AUDIO_ENABLED")?.lowercased() {
+        if val == "0" || val == "false" || val == "no" || val == "off" {
+            return false
         }
     }
     return true
 }
 
 func readControlPort() -> String {
-    let projDir = findProjectDir()
-    let envPath = projDir + "/.env"
-    guard let contents = try? String(contentsOfFile: envPath, encoding: .utf8) else {
-        return "7892"
-    }
-    for line in contents.components(separatedBy: "\n") {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        if trimmed.hasPrefix("FISH_CONTROL_PORT=") {
-            let val = String(trimmed.dropFirst("FISH_CONTROL_PORT=".count))
-                .trimmingCharacters(in: .whitespaces)
-            if !val.isEmpty { return val }
-        }
+    if let val = readEnvValue("FISH_CONTROL_PORT"), !val.isEmpty {
+        return val
     }
     return "7892"
 }

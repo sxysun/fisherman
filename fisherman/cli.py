@@ -681,8 +681,13 @@ def version():
     the stamp.
     """
     from fisherman import upgrade as _up
+    from fisherman import config as _cfg
     inst = _up.detect_installed()
+    cfg = FishermanConfig()
     click.echo(f"install dir:  {inst.install_dir}")
+    click.echo(f"config:       {_cfg.user_env_path()}")
+    click.echo(f"server:       {cfg.server_url}")
+    click.echo(f"identity:     {'yes' if cfg.private_key else 'NO'}")
     if inst.git_commit:
         src_label = (
             f" [{inst.source_kind}]" if inst.source_kind else ""
@@ -999,18 +1004,41 @@ def stop(port: int | None):
 
 
 def _load_keys():
-    """Load (priv, pubkey_bytes, friends_group_key) from FISH_PRIVATE_KEY env or .env."""
-    # Pull .env values into env if not already present
+    """Load or create the persistent user identity."""
     cfg = FishermanConfig()
-    if "FISH_PRIVATE_KEY" not in os.environ and cfg.private_key:
-        os.environ["FISH_PRIVATE_KEY"] = cfg.private_key
     from fisherman import keys
-    try:
-        seed = keys.load_seed()
-    except keys.KeyError as e:
-        click.echo(f"error: {e}", err=True)
-        click.echo("Set FISH_PRIVATE_KEY or run a daemon at least once.", err=True)
-        sys.exit(2)
+    from fisherman import config as _cfg
+
+    env_private_key = os.environ.get("FISH_PRIVATE_KEY", "").strip()
+    configured_private_key = (cfg.private_key or "").strip()
+    private_key = env_private_key or configured_private_key
+
+    if not private_key:
+        import secrets as _s
+
+        seed = _s.token_bytes(32)
+        private_key = seed.hex()
+        _cfg.persist_user_env_var("FISH_PRIVATE_KEY", private_key)
+        os.environ["FISH_PRIVATE_KEY"] = private_key
+        click.echo(
+            "Minted a new ed25519 keypair and saved to ~/.fisherman/.env.",
+            err=True,
+        )
+    else:
+        os.environ["FISH_PRIVATE_KEY"] = private_key
+        try:
+            seed = keys.load_seed()
+        except keys.KeyError as e:
+            click.echo(f"error: {e}", err=True)
+            click.echo("Fix FISH_PRIVATE_KEY in ~/.fisherman/.env.", err=True)
+            sys.exit(2)
+        if not env_private_key and not _cfg.user_env_has_var("FISH_PRIVATE_KEY"):
+            _cfg.persist_user_env_var("FISH_PRIVATE_KEY", private_key)
+            click.echo(
+                "Saved existing ed25519 keypair to ~/.fisherman/.env.",
+                err=True,
+            )
+
     priv, pub = keys.signing_keypair(seed)
     return priv, pub, keys.friends_group_key(seed)
 
