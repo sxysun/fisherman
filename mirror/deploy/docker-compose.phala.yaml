@@ -49,7 +49,12 @@ services:
         condition: service_started
 
   mirror:
-    image: ghcr.io/sxysun/fisherman-mirror:latest
+    # Pinned to a per-commit tag (substituted at deploy time via
+    # `phala deploy -e MIRROR_IMAGE_TAG=<sha>`) so each rollout forces
+    # a pull. Without this, `:latest` gets cached on the host and
+    # `phala deploy` keeps the previous image. Defaults to `:latest`
+    # for local dev.
+    image: ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       - FISHERMAN_DATA_DIR=/data

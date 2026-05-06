@@ -112,6 +112,12 @@ jobs:
           # (treats it as an env-file path). The modern `phala deploy
           # --cvm-id <uuid>` does the same in-place upgrade and accepts
           # -e correctly. See `phala deploy --help`.
+          #
+          # MIRROR_IMAGE_TAG forces a pull of the freshly-built image
+          # (compose pins to ${MIRROR_IMAGE_TAG:-latest}); without this,
+          # docker reuses the cached :latest and never sees the new code.
+          IMAGE_TAG=$(git rev-parse --short HEAD)
+          echo "Deploying mirror image tag: $IMAGE_TAG"
           phala deploy \
             --api-token "$PHALA_CLOUD_API_KEY" \
             --cvm-id ${{ vars.CVM_VM_UUID }} \
@@ -119,6 +125,7 @@ jobs:
             -e CF_API_TOKEN="$CF_API_TOKEN" \
             -e CF_ZONE_ID="$CF_ZONE_ID" \
             -e DOMAIN="$MIRROR_DOMAIN" \
+            -e MIRROR_IMAGE_TAG="$IMAGE_TAG" \
             --wait
 
       - name: Wait for /health
