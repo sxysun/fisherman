@@ -101,19 +101,25 @@ jobs:
                 --private-key "$OWNER_PK"
           fi
 
-      - name: phala cvms upgrade
+      - name: phala deploy --cvm-id (in-place upgrade)
         env:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
           CF_API_TOKEN:        ${{ secrets.CF_API_TOKEN }}
           CF_ZONE_ID:          ${{ vars.CF_ZONE_ID }}
         run: |
           set -euo pipefail
-          phala cvms upgrade ${{ vars.CVM_VM_UUID }} \
+          # The legacy `phala cvms upgrade` wrapper mis-parses -e KEY=VALUE
+          # (treats it as an env-file path). The modern `phala deploy
+          # --cvm-id <uuid>` does the same in-place upgrade and accepts
+          # -e correctly. See `phala deploy --help`.
+          phala deploy \
             --api-token "$PHALA_CLOUD_API_KEY" \
+            --cvm-id ${{ vars.CVM_VM_UUID }} \
             -c "$COMPOSE_FILE" \
             -e CF_API_TOKEN="$CF_API_TOKEN" \
             -e CF_ZONE_ID="$CF_ZONE_ID" \
-            -e DOMAIN="$MIRROR_DOMAIN"
+            -e DOMAIN="$MIRROR_DOMAIN" \
+            --wait
 
       - name: Wait for /health
         run: |
