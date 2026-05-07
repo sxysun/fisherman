@@ -276,11 +276,13 @@ def _tls_cert_file_candidates() -> list[str]:
         out.append(explicit)
     domain = os.environ.get("FISHERMAN_TLS_DOMAIN") or os.environ.get("DOMAIN")
     if domain:
+        out.append(f"/evidences/cert-{domain}.pem")
         live_dir = f"/etc/letsencrypt/live/{domain}"
         out.extend([
             f"{live_dir}/cert.pem",
             f"{live_dir}/fullchain.pem",
         ])
+    out.extend(glob.glob("/evidences/cert-*.pem"))
     out.extend(glob.glob("/etc/letsencrypt/live/*/cert.pem"))
     out.extend(glob.glob("/etc/letsencrypt/live/*/fullchain.pem"))
     return out

@@ -609,7 +609,10 @@ def is_app_allowed_on_chain(
     }).encode()
     req = urllib.request.Request(
         rpc_url, data=payload, method="POST",
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "fisherman-attestation/0.1",
+        },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = json.loads(resp.read())
