@@ -171,8 +171,8 @@ class FishermanConfig(BaseSettings):
 
     def _normalize_backend(self, values: dict) -> None:
         mode = normalize_backend_mode(self.backend_mode)
+        explicit_server = configured_env_has_var("FISH_SERVER_URL") or "server_url" in values
         if mode == "auto":
-            explicit_server = configured_env_has_var("FISH_SERVER_URL") or "server_url" in values
             explicit_backend = configured_env_has_var("FISH_BACKEND_URL") or "backend_url" in values
             if self.backend_url or explicit_backend:
                 mode = "cloud" if self.backend_url == DEFAULT_CLOUD_BACKEND_URL else "self_hosted"
@@ -194,9 +194,15 @@ class FishermanConfig(BaseSettings):
             if self.backend_url.startswith(("ws://", "wss://")):
                 self.server_url = ingest_url_from_backend_url(self.backend_url)
             else:
-                # Avoid accidentally streaming to a previous self-hosted
-                # ingest URL after the user switches to Cloud.
-                self.server_url = DEFAULT_SERVER_URL
+                expected = ingest_url_from_backend_url(self.backend_url)
+                # Accept an explicitly persisted Cloud ingest URL only
+                # when it matches the Cloud backend. This allows
+                # attestation-gated Cloud ingest enablement while still
+                # ignoring stale self-hosted FISH_SERVER_URL values.
+                if explicit_server and self.server_url == expected:
+                    self.server_url = expected
+                else:
+                    self.server_url = DEFAULT_SERVER_URL
         elif mode == "self_hosted":
             if not self.backend_url:
                 self.backend_url = self.server_url

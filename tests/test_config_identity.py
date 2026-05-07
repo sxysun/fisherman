@@ -155,6 +155,27 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertFalse(cfg.streaming_enabled)
             self.assertEqual(cfg.server_url, config_mod.DEFAULT_SERVER_URL)
 
+    def test_cloud_mode_accepts_matching_cloud_ingest_url(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            self._home_env(home).write_text(
+                "FISH_BACKEND_MODE=cloud\n"
+                "FISH_BACKEND_URL=https://fisherman.teleport.computer\n"
+                "FISH_SERVER_URL=wss://fisherman.teleport.computer/ingest\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.backend_mode, "cloud")
+            self.assertTrue(cfg.streaming_enabled)
+            self.assertEqual(cfg.server_url, "wss://fisherman.teleport.computer/ingest")
+
     def test_status_relay_url_is_public_alias_for_ledger_url(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             home = Path(home_dir)

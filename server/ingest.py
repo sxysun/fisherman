@@ -503,6 +503,23 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _http_health(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: GET /health - reports ingest readiness."""
+    storage_backend = "r2" if (
+        os.environ.get("R2_ACCOUNT_ID")
+        and os.environ.get("R2_ACCESS_KEY_ID")
+        and os.environ.get("R2_SECRET_ACCESS_KEY")
+    ) else "local"
+    return web.json_response({
+        "status": "ok",
+        "configured": True,
+        "ingest_ready": True,
+        "multi_tenant": is_multi_tenant_enabled(),
+        "storage": storage_backend,
+        "missing": [],
+    })
+
+
 async def _http_activity_history(request: "web.Request") -> "web.Response":
     """HTTP endpoint: GET /api/activity_history - returns recent activity entries.
 
@@ -699,6 +716,7 @@ async def _run(host: str, port: int) -> None:
     if web:
         app = web.Application()
         app["db"] = db
+        app.router.add_get("/health", _http_health)
         app.router.add_get("/api/current_activity", _http_current_activity)
         app.router.add_get("/api/activity_history", _http_activity_history)
         http_runner = web.AppRunner(app)

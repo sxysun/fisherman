@@ -45,6 +45,10 @@ Fisherman Cloud is a managed backend with hardware attestation, not a
 normal hosted server.
 Before private context is sent, clients must verify the TDX attestation
 bundle exposed by the Cloud endpoint.
+The Cloud endpoint also exposes `GET /health` as a capability manifest:
+attestation and relay can be live while multi-tenant ingest remains
+disabled until managed Postgres, encrypted object storage, and account
+enablement are ready.
 
 ```bash
 fisherman cloud audit https://fisherman.teleport.computer
@@ -65,6 +69,13 @@ The audit checks:
 The CI/CD pipeline builds the container, publishes it to GHCR, deploys or
 upgrades the Phala CVM, exposes the hosted relay, publishes compose
 hashes, and runs hourly attestation monitoring.
+
+Cloud multi-tenant ingest is intentionally fail-closed. If required
+storage or encryption env is missing, the CVM reports
+`ingest.ready=false` and refuses `/ingest` instead of accepting raw
+context into a half-configured service. `fisherman backend configure
+cloud` only persists the Cloud ingest WebSocket after that health
+manifest reports `ingest.ready=true`.
 
 ### Self-Hosted
 

@@ -103,7 +103,11 @@ class LocalStorage:
 
 def create_storage():
     """Return R2Storage if credentials are configured, otherwise LocalStorage."""
-    if os.environ.get("R2_ACCOUNT_ID") and os.environ.get("R2_ACCESS_KEY_ID"):
+    if (
+        os.environ.get("R2_ACCOUNT_ID")
+        and os.environ.get("R2_ACCESS_KEY_ID")
+        and os.environ.get("R2_SECRET_ACCESS_KEY")
+    ):
         return R2Storage()
     storage = LocalStorage()
     log.info("r2_not_configured", local_frames_dir=str(storage._base))

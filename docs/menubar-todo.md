@@ -21,12 +21,13 @@ of the same protocols.
 
 ## Known Gaps
 
-- Production rollout of the public/default relay. The compose and CI
-  health checks are wired; it becomes live after the deploy workflow is
-  pushed and run against the Cloud CVM.
 - Managed Fisherman Cloud ingest enrollment. The hosted TEE deployment,
-  attestation verifier, and CI/CD pipeline exist, but the self-serve
-  account/ingest enablement flow in the app is not wired yet.
+  attestation verifier, CI/CD pipeline, and multi-tenant ingest service
+  are wired, but the self-serve account/ingest enablement flow in the app
+  is not wired yet.
+- Cloud capability health in Settings. The CLI can read the Cloud
+  endpoint, but the app should render `attestation.ready`, `relay.ready`,
+  and `ingest.ready` instead of free-text backend endpoint fields.
 - Friend policy preview in Settings: run the current policy against a
   small recent-context sample and show what that friend would see before
   saving.

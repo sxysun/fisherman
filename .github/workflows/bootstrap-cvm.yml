@@ -15,6 +15,8 @@ name: Bootstrap fisherman-mirror CVM (one-time)
 #   CF_ZONE_ID             Cloudflare zone id for fisherman.app (or your domain)
 #   OWNER_PK               private key authorized to call addComposeHash()
 #   ETH_SEPOLIA_RPC_URL    testnet RPC for the on-chain step
+#   FISHERMAN_CLOUD_*      optional managed ingest secrets; if absent,
+#                          Cloud /health reports ingest.ready=false
 #
 # Required variables:
 #   FISHERMAN_APP_AUTH_ETH_SEPOLIA   set by contract-deploy workflow
@@ -107,6 +109,15 @@ jobs:
           PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
           CF_API_TOKEN:        ${{ secrets.CF_API_TOKEN }}
           CF_ZONE_ID:          ${{ vars.CF_ZONE_ID }}
+          CLOUD_DATABASE_URL:  ${{ secrets.FISHERMAN_CLOUD_DATABASE_URL }}
+          CLOUD_ENCRYPTION_KEY: ${{ secrets.FISHERMAN_CLOUD_ENCRYPTION_KEY }}
+          CLOUD_R2_ACCOUNT_ID: ${{ secrets.FISHERMAN_CLOUD_R2_ACCOUNT_ID }}
+          CLOUD_R2_ACCESS_KEY_ID: ${{ secrets.FISHERMAN_CLOUD_R2_ACCESS_KEY_ID }}
+          CLOUD_R2_SECRET_ACCESS_KEY: ${{ secrets.FISHERMAN_CLOUD_R2_SECRET_ACCESS_KEY }}
+          CLOUD_R2_BUCKET:     ${{ secrets.FISHERMAN_CLOUD_R2_BUCKET }}
+          CLOUD_OPENAI_API_KEY: ${{ secrets.FISHERMAN_CLOUD_OPENAI_API_KEY }}
+          CLOUD_OPENAI_BASE_URL: ${{ secrets.FISHERMAN_CLOUD_OPENAI_BASE_URL }}
+          CLOUD_OPENAI_MODEL:  ${{ vars.FISHERMAN_CLOUD_OPENAI_MODEL }}
         run: |
           set -euo pipefail
           echo ">>> phala deploy -n $CVM_NAME --node-id $NODE_ID -c $COMPOSE_FILE"
@@ -119,6 +130,15 @@ jobs:
             -e CF_ZONE_ID="$CF_ZONE_ID" \
             -e DOMAIN="$MIRROR_DOMAIN" \
             -e RELAY_DOMAIN="$RELAY_DOMAIN" \
+            -e FISHERMAN_CLOUD_DATABASE_URL="$CLOUD_DATABASE_URL" \
+            -e FISHERMAN_CLOUD_ENCRYPTION_KEY="$CLOUD_ENCRYPTION_KEY" \
+            -e FISHERMAN_CLOUD_R2_ACCOUNT_ID="$CLOUD_R2_ACCOUNT_ID" \
+            -e FISHERMAN_CLOUD_R2_ACCESS_KEY_ID="$CLOUD_R2_ACCESS_KEY_ID" \
+            -e FISHERMAN_CLOUD_R2_SECRET_ACCESS_KEY="$CLOUD_R2_SECRET_ACCESS_KEY" \
+            -e FISHERMAN_CLOUD_R2_BUCKET="$CLOUD_R2_BUCKET" \
+            -e FISHERMAN_CLOUD_OPENAI_API_KEY="$CLOUD_OPENAI_API_KEY" \
+            -e FISHERMAN_CLOUD_OPENAI_BASE_URL="$CLOUD_OPENAI_BASE_URL" \
+            -e FISHERMAN_CLOUD_OPENAI_MODEL="$CLOUD_OPENAI_MODEL" \
             --wait -j 2>&1 | tee /tmp/deploy.log
 
           # Tail of the log is a JSON document — extract app_id + vm_uuid

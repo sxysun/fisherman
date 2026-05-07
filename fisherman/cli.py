@@ -538,6 +538,26 @@ def _cloud_required_failures(res) -> list[str]:
     return failures
 
 
+def _cloud_capability_health(url: str, *, timeout: float = 10.0) -> dict | None:
+    """Best-effort read of the Cloud gateway /health capability manifest."""
+    from urllib.parse import urlparse, urlunparse
+    from urllib.request import urlopen
+
+    parsed = urlparse(url)
+    if parsed.scheme in {"ws", "wss"}:
+        scheme = "https" if parsed.scheme == "wss" else "http"
+        parsed = parsed._replace(scheme=scheme)
+    parsed = parsed._replace(path="/health", params="", query="", fragment="")
+    health_url = urlunparse(parsed)
+    try:
+        with urlopen(health_url, timeout=timeout) as resp:
+            body = resp.read(1024 * 64).decode("utf-8")
+        data = json.loads(body)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 @main.command()
 @click.option("--retention-hours", default=None, type=int,
               help="Override the configured retention window. Frames older "
@@ -751,13 +771,17 @@ def _persist_backend_config(
     mode: str,
     backend_url: str | None = None,
     relay_url: str | None = None,
+    server_url: str | None = None,
 ) -> FishermanConfig:
     from fisherman import config as _cfg
 
     _cfg.persist_user_env_var("FISH_BACKEND_MODE", mode)
     if backend_url is not None:
         _cfg.persist_user_env_var("FISH_BACKEND_URL", backend_url)
-    _cfg.remove_user_env_var("FISH_SERVER_URL")
+    if server_url:
+        _cfg.persist_user_env_var("FISH_SERVER_URL", server_url)
+    else:
+        _cfg.remove_user_env_var("FISH_SERVER_URL")
     if relay_url is not None:
         _cfg.persist_user_env_var("FISH_STATUS_RELAY_URL", relay_url)
     return FishermanConfig()
@@ -854,7 +878,7 @@ def backend_configure_cloud(
 ):
     """Use Fisherman Cloud."""
     from fisherman import attestation as _att
-    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL
+    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL, ingest_url_from_backend_url
 
     url = backend_url or DEFAULT_CLOUD_BACKEND_URL
     if not skip_audit:
@@ -882,11 +906,26 @@ def backend_configure_cloud(
             click.echo("refusing to configure Fisherman Cloud until attestation passes", err=True)
             sys.exit(1)
 
-    cfg = _persist_backend_config(mode="cloud", backend_url=url, relay_url=relay_url)
+    capabilities = _cloud_capability_health(url, timeout=timeout)
+    ingest_ready = bool(
+        isinstance(capabilities, dict)
+        and isinstance(capabilities.get("ingest"), dict)
+        and capabilities["ingest"].get("ready") is True
+    )
+    cfg = _persist_backend_config(
+        mode="cloud",
+        backend_url=url,
+        relay_url=relay_url,
+        server_url=ingest_url_from_backend_url(url) if ingest_ready else None,
+    )
     click.echo("configured backend: Fisherman Cloud")
     click.echo(f"  backend: {cfg.backend_url}")
     click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until Cloud ingest is enabled for this account'}")
     click.echo(f"  relay:   {cfg.status_relay_url}")
+    if isinstance(capabilities, dict):
+        att_ready = (capabilities.get("attestation") or {}).get("ready")
+        relay_ready = (capabilities.get("relay") or {}).get("ready")
+        click.echo(f"  cloud:   attestation={bool(att_ready)} relay={bool(relay_ready)} ingest={ingest_ready}")
     click.echo("Restart the daemon for changes to take effect.")
 
 

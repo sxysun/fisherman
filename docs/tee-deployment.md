@@ -1,15 +1,17 @@
 # TEE deployment for Fisherman Cloud backend
 
-Fisherman Cloud is the managed backend mode. The current deployable
-binary is the mirror/query endpoint, but the product direction is broader:
-the CVM should become the managed backend surface for ingest, query,
-processors, agent access, and sealed per-user state.
+Fisherman Cloud is the managed backend mode. The deployable CVM now has a
+public Cloud gateway, a multi-tenant ingest service, the mirror/query
+endpoint, and the official encrypted status relay. The gateway is the
+only user-facing Cloud backend surface; internal services stay behind it.
 
 Any component that decrypts, indexes, queries, summarizes, or stores
 private context must run inside the attested CVM or remain on the user's
-device. The low-trust relay can stay outside the TEE while it only stores
-signed, client-encrypted payloads; the Cloud compose still deploys the
-official relay beside the attested backend so users get one default URL.
+device. The low-trust relay can stay outside the private-context trust
+boundary while it only stores signed, client-encrypted payloads. The
+Cloud compose deploys the official relay beside the attested backend so
+users get one default URL, but the relay still receives no plaintext
+status or raw context.
 
 The pattern follows `feedling-mcp-v1` — same shape, different workload.
 
@@ -34,9 +36,9 @@ not Nitro. Reasons:
 
 ```
 mirror/deploy/
-├── Dockerfile                    # one image, mirror service + relay module
+├── Dockerfile                    # one image, cloud + mirror + relay + ingest
 ├── requirements.lock             # uv pip compile --generate-hashes
-├── docker-compose.phala.yaml     # ingress + mirror + official relay
+├── docker-compose.phala.yaml     # ingress + cloud + ingest + mirror + relay
 ├── docker-compose.yaml           # local dev / non-TDX self-host
 ├── build-reproducible.sh         # back-to-back build → byte-identical OCI tarball
 ├── build-manifest.json           # committed; carries expected sha256 + image digest
@@ -57,6 +59,7 @@ RUN pip install --require-hashes -r requirements.lock
 COPY fisherman/ ./fisherman/
 COPY mirror/    ./mirror/
 COPY relay/     ./relay/
+COPY server/    ./server/
 ARG FISHERMAN_GIT_COMMIT=dev
 ARG FISHERMAN_BUILT_AT=dev
 ARG FISHERMAN_IMAGE_DIGEST=sha256:dev
@@ -64,7 +67,7 @@ ENV FISHERMAN_GIT_COMMIT=${FISHERMAN_GIT_COMMIT} \
     FISHERMAN_BUILT_AT=${FISHERMAN_BUILT_AT} \
     FISHERMAN_IMAGE_DIGEST=${FISHERMAN_IMAGE_DIGEST}
 USER fisherman
-CMD ["fisherman-mirror", "serve"]
+CMD ["python", "-u", "-m", "mirror.server"]
 ```
 
 Hash-verified deps via `uv pip compile --generate-hashes` → checked
@@ -73,13 +76,20 @@ byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.
 
 ### 2. dstack compose
 
-`docker-compose.phala.yaml` declares three services:
+`docker-compose.phala.yaml` declares five services:
 
 - **ingress** (`dstacktee/dstack-ingress:<digest>`) — TLS termination
   for the Cloud backend and relay hostnames, LE certs via CF DNS-01
   inside the CVM.
+- **cloud** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — public gateway.
+  `/health` returns capability state; `/.well-known/attestation` is
+  proxied to mirror; `/ingest` and `/api/*` are proxied to Cloud ingest.
+- **cloud-ingest** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
+  `server/cloud_ingest.py`. Until `DATABASE_URL`, `ENCRYPTION_KEY`, and
+  R2 credentials are injected, it serves structured `not_configured`
+  health and does not accept raw context.
 - **mirror** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
-  `fisherman-mirror serve`, reads its config from KMS-derived secrets.
+  `python -m mirror.server`, reads its config from KMS-derived secrets.
 - **relay** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
   `python -m relay.server` with a SQLite event store. It persists only
   signed ciphertext and is not allowed to decrypt, index, summarize, or
@@ -110,7 +120,7 @@ For the hosted Cloud variant the user should not see env vars or config
 files. The intended self-serve flow:
 
 1. Menubar -> Settings -> Backend -> Fisherman Cloud
-2. Menubar fetches `https://mirror.fisherman.app/.well-known/attestation`
+2. Menubar fetches `https://fisherman.teleport.computer/.well-known/attestation`
    - Returns the TDX quote, RTMR3 event log, compose_hash, app_id,
      ingress cert fingerprint
 3. Menubar verifies:
@@ -120,13 +130,18 @@ files. The intended self-serve flow:
    - Ingress cert fingerprint matches REPORT_DATA
    - All four pinned values match the dmg's compiled-in expectations
      (so substituting the menubar gets noticed by users who recompare)
-4. Menubar derives a per-pair envelope key from the user's seed and
-   `enclave_content_pk` (returned by `/v1/pair/init`). The user's
-   X25519 priv + `K_blob_at_rest` are encrypted to this enclave-bound
-   key; the enclave decrypts inside the CVM, never on the wire.
-5. The Cloud backend is now paired. The first paired capability is the
-   mirror/RPC protocol in `mirror/server.py`; ingest and processor
-   surfaces should use the same attestation-gated trust root.
+4. Menubar reads `GET /health` from the Cloud gateway. The body must show
+   `attestation.ready=true`; private-context streaming remains disabled
+   unless `ingest.ready=true`.
+5. For private-context ingest, the daemon opens
+   `wss://fisherman.teleport.computer/ingest` with FishKey auth. In
+   Cloud multi-tenant mode, each valid FishKey pubkey becomes its own
+   tenant namespace in Postgres and object storage keys.
+6. For mirror/RPC pairing, menubar derives a per-pair envelope key from
+   the user's seed and `enclave_content_pk` (returned by `/v1/pair/init`).
+   The user's X25519 priv + `K_blob_at_rest` are encrypted to this
+   enclave-bound key; the enclave decrypts inside the CVM, never on the
+   wire.
 
 This matches feedling's content-encryption pattern: the key derivation
 path is stable for a given `app_id`, so v1 envelopes survive compose
@@ -151,6 +166,11 @@ Self-hosted backends can continue to run on a user's VPS. The trust model
 is "you trust your server." Fisherman Cloud is for users who do not want
 to operate infrastructure but still want operator-untrusted hosting.
 
+The Cloud gateway can deploy before managed storage is provisioned. In
+that state `/health` is expected to be HTTP 200 with `status=degraded`
+and `ingest.ready=false`; this keeps attestation and relay dogfooding
+live without silently accepting raw context.
+
 ## When to revisit
 
 Once we have ≥ 5 dogfooders running 24/7 self-hosted mirrors and we
@@ -161,9 +181,9 @@ know:
 - Failover speed under real network conditions
 - How often the mirror actually serves agent traffic vs the laptop
 
-Then finish the multi-week TEE backend push. The deployment, audit, and
-governance foundations are already present; the remaining work is to
-expand the CVM service from mirror fallback into the full managed backend.
+Then expand the managed backend from capability wiring into full product
+enrollment: account enablement, billing or invite gates, processor
+scheduling, and user-visible Cloud storage export.
 
 ## References
 

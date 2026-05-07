@@ -1,11 +1,14 @@
 # fisherman-mirror — Phala TDX CVM compose.
 #
-# Three services:
+# Five services:
 #   - ingress: dstack-ingress 2.2 — TLS termination + LE certs via CF
 #              DNS-01 inside the CVM. Reads CLOUDFLARE_API_TOKEN over
 #              the encrypted env channel (`phala deploy -e CF_API_TOKEN=...`).
 #              Mounts /var/run/tappd.sock so it can pin the TLS cert
 #              fingerprint into the TDX quote's REPORT_DATA.
+#   - cloud:   public Fisherman Cloud gateway. /health reports capability
+#              readiness; /.well-known/attestation, /ingest, and /api/*
+#              are proxied to the internal attested services.
 #   - mirror:  fisherman-mirror — runs unpaired-mode by default (only
 #              /health + /.well-known/attestation). Pairing happens via
 #              menubar after the CVM is up; that step provisions the
@@ -14,6 +17,9 @@
 #   - relay:   fisherman-relay — official low-trust relay for friend
 #              status and deputy RPC routing. It persists only signed
 #              ciphertext, never raw context or plaintext status.
+#   - cloud-ingest: multi-tenant raw-context ingest. It serves structured
+#              not_configured health until DATABASE_URL, ENCRYPTION_KEY,
+#              and R2 credentials are injected through encrypted env.
 #
 # IMPORTANT: every literal in this file enters the compose_hash that
 # we publish on-chain via FishermanAppAuth.addComposeHash(). Cosmetic
@@ -38,7 +44,7 @@ services:
         ${DOMAIN:-fisherman.teleport.computer}
         ${RELAY_DOMAIN:-relay.fisherman.teleport.computer}
       ROUTING_MAP: |
-        ${DOMAIN:-fisherman.teleport.computer}=mirror:5001
+        ${DOMAIN:-fisherman.teleport.computer}=cloud:5000
         ${RELAY_DOMAIN:-relay.fisherman.teleport.computer}=relay:9100
       # CLOUDFLARE_API_TOKEN must be injected via `phala deploy -e CF_API_TOKEN=...`
       # (encrypted env channel — NOT baked into compose_hash). Required
@@ -50,9 +56,36 @@ services:
       - fisherman_ingress_letsencrypt:/etc/letsencrypt
       - fisherman_ingress_evidences:/evidences
     depends_on:
+      cloud:
+        condition: service_started
+      relay:
+        condition: service_started
+
+  cloud:
+    image: ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    command:
+      - python
+      - -u
+      - -m
+      - mirror.cloud_gateway
+    environment:
+      - CLOUD_HOST=0.0.0.0
+      - CLOUD_PORT=5000
+      - CLOUD_PUBLIC_URL=https://${DOMAIN:-fisherman.teleport.computer}
+      - CLOUD_RELAY_URL=https://${RELAY_DOMAIN:-relay.fisherman.teleport.computer}
+      - CLOUD_MIRROR_URL=http://mirror:5001
+      - CLOUD_RELAY_HEALTH_URL=http://relay:9100
+      - CLOUD_INGEST_HTTP_URL=http://cloud-ingest:9998
+      - CLOUD_INGEST_WS_URL=ws://cloud-ingest:9999/ingest
+    expose:
+      - "5000"
+    depends_on:
       mirror:
         condition: service_started
       relay:
+        condition: service_started
+      cloud-ingest:
         condition: service_started
 
   mirror:
@@ -79,6 +112,35 @@ services:
     expose:
       - "5001"
 
+  cloud-ingest:
+    image: ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    working_dir: /app/server
+    command:
+      - python
+      - -u
+      - cloud_ingest.py
+    environment:
+      - INGEST_HOST=0.0.0.0
+      - INGEST_PORT=9999
+      - HTTP_API_PORT=9998
+      - FISH_MULTI_TENANT=1
+      - FISHERMAN_FRAMES_DIR=/data/frames
+      - DATABASE_URL=${FISHERMAN_CLOUD_DATABASE_URL:-}
+      - ENCRYPTION_KEY=${FISHERMAN_CLOUD_ENCRYPTION_KEY:-}
+      - R2_ACCOUNT_ID=${FISHERMAN_CLOUD_R2_ACCOUNT_ID:-}
+      - R2_ACCESS_KEY_ID=${FISHERMAN_CLOUD_R2_ACCESS_KEY_ID:-}
+      - R2_SECRET_ACCESS_KEY=${FISHERMAN_CLOUD_R2_SECRET_ACCESS_KEY:-}
+      - R2_BUCKET=${FISHERMAN_CLOUD_R2_BUCKET:-fisherman}
+      - OPENAI_API_KEY=${FISHERMAN_CLOUD_OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${FISHERMAN_CLOUD_OPENAI_BASE_URL:-}
+      - OPENAI_MODEL=${FISHERMAN_CLOUD_OPENAI_MODEL:-gpt-4o-mini}
+    volumes:
+      - cloud-ingest-data:/data
+    expose:
+      - "9998"
+      - "9999"
+
   relay:
     image: ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}
     restart: unless-stopped
@@ -102,6 +164,7 @@ services:
 
 volumes:
   mirror-data:
+  cloud-ingest-data:
   relay-data:
   fisherman_ingress_letsencrypt:
   fisherman_ingress_evidences:
