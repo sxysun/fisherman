@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings
 DEFAULT_SERVER_URL = "ws://localhost:9999/ingest"
 DEFAULT_STATUS_RELAY_URL = "https://relay.fisherman.teleport.computer"
 DEFAULT_CLOUD_BACKEND_URL = "https://fisherman.teleport.computer"
+DEFAULT_APP_AUTH_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
+DEFAULT_APP_AUTH_CONTRACT = "0x55b25eD5CA3c6ec9C05330F8958edcfCA3C9e922"
 BACKEND_MODES = {"local", "cloud", "self_hosted"}
 
 

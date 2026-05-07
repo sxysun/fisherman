@@ -98,6 +98,7 @@ services:
     restart: unless-stopped
     environment:
       - FISHERMAN_DATA_DIR=/data
+      - FISHERMAN_TLS_DOMAIN=${DOMAIN:-fisherman.teleport.computer}
     volumes:
       - mirror-data:/data
       # tappd.sock — dstack TEE-side API. The mirror reads:
@@ -105,6 +106,10 @@ services:
       #   Tappd.TdxQuote → live TDX quote bound to (mirror_pubkey ‖ tls_fp)
       # so /.well-known/attestation can be verified end-to-end.
       - /var/run/tappd.sock:/var/run/tappd.sock
+      # Same LE volume as ingress. The mirror reads the leaf cert and
+      # hashes it into REPORT_DATA so clients can verify that TLS
+      # terminates inside this attested CVM.
+      - fisherman_ingress_letsencrypt:/etc/letsencrypt:ro
       # Shared evidences volume — dstack-ingress drops the LE cert
       # fingerprint here when it provisions the cert; mirror reads it
       # to bind the TLS pin into REPORT_DATA. Read-only is enough.

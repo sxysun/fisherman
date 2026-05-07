@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import secrets
@@ -243,8 +244,10 @@ def _release_metadata() -> dict:
 
 def _read_ingress_tls_fingerprint() -> str:
     """Best-effort: read the ingress TLS cert fingerprint dstack-ingress
-    writes to a shared evidences volume. Returns empty string when
-    absent — the audit row degrades to "info" rather than failing."""
+    writes to a shared evidences volume. If that sidecar file is absent,
+    compute sha256(leaf DER) from the shared Let's Encrypt cert volume.
+    Returns empty string when absent — the audit row degrades to "info"
+    rather than failing."""
     candidates = [
         "/evidences/tls-cert-sha256.txt",
         "/evidences/tls_cert_sha256.txt",
@@ -257,7 +260,56 @@ def _read_ingress_tls_fingerprint() -> str:
                     return f.read().strip().lower().removeprefix("0x")
         except OSError:
             continue
+    for p in _tls_cert_file_candidates():
+        fp = _fingerprint_leaf_cert_pem(p)
+        if fp:
+            return fp
     return ""
+
+
+def _tls_cert_file_candidates() -> list[str]:
+    import glob
+
+    out: list[str] = []
+    explicit = os.environ.get("FISHERMAN_TLS_CERT_PATH")
+    if explicit:
+        out.append(explicit)
+    domain = os.environ.get("FISHERMAN_TLS_DOMAIN") or os.environ.get("DOMAIN")
+    if domain:
+        live_dir = f"/etc/letsencrypt/live/{domain}"
+        out.extend([
+            f"{live_dir}/cert.pem",
+            f"{live_dir}/fullchain.pem",
+        ])
+    out.extend(glob.glob("/etc/letsencrypt/live/*/cert.pem"))
+    out.extend(glob.glob("/etc/letsencrypt/live/*/fullchain.pem"))
+    return out
+
+
+def _fingerprint_leaf_cert_pem(path: str) -> str:
+    from cryptography import x509
+    from cryptography.hazmat.primitives import serialization
+
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return ""
+    begin = b"-----BEGIN CERTIFICATE-----"
+    end = b"-----END CERTIFICATE-----"
+    start = data.find(begin)
+    if start < 0:
+        return ""
+    stop = data.find(end, start)
+    if stop < 0:
+        return ""
+    pem = data[start:stop + len(end)] + b"\n"
+    try:
+        cert = x509.load_pem_x509_certificate(pem)
+    except Exception:
+        return ""
+    der = cert.public_bytes(serialization.Encoding.DER)
+    return hashlib.sha256(der).hexdigest()
 
 
 async def _build_attestation_bundle(

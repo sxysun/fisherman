@@ -878,15 +878,23 @@ def backend_configure_cloud(
 ):
     """Use Fisherman Cloud."""
     from fisherman import attestation as _att
-    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL, ingest_url_from_backend_url
+    from fisherman.config import (
+        DEFAULT_APP_AUTH_CONTRACT,
+        DEFAULT_APP_AUTH_RPC_URL,
+        DEFAULT_CLOUD_BACKEND_URL,
+        ingest_url_from_backend_url,
+    )
 
     url = backend_url or DEFAULT_CLOUD_BACKEND_URL
     if not skip_audit:
         live_tls_fp = _live_tls_fingerprint(url, timeout)
         res = _att.verify_attestation(
             url,
-            rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or None,
-            contract_address=os.environ.get("FISHERMAN_APP_AUTH_CONTRACT") or None,
+            rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or DEFAULT_APP_AUTH_RPC_URL,
+            contract_address=(
+                os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
+                or DEFAULT_APP_AUTH_CONTRACT
+            ),
             live_tls_cert_sha256_hex=live_tls_fp,
             timeout=timeout,
         )
@@ -896,7 +904,7 @@ def backend_configure_cloud(
             live_tls_fp=live_tls_fp,
             has_onchain_inputs=bool(
                 os.environ.get("FISHERMAN_ETH_RPC_URL")
-                and os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
+                or DEFAULT_APP_AUTH_RPC_URL
             ),
         )
         cloud_failures = _cloud_required_failures(res)
@@ -942,9 +950,15 @@ def cloud_group():
 @click.option("--timeout", default=15.0, show_default=True)
 def cloud_audit(cloud_url, rpc_url, contract_address, as_json, timeout):
     """Audit the managed TEE endpoint."""
-    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL
+    from fisherman.config import (
+        DEFAULT_APP_AUTH_CONTRACT,
+        DEFAULT_APP_AUTH_RPC_URL,
+        DEFAULT_CLOUD_BACKEND_URL,
+    )
 
     url = cloud_url or DEFAULT_CLOUD_BACKEND_URL
+    rpc_url = rpc_url or DEFAULT_APP_AUTH_RPC_URL
+    contract_address = contract_address or DEFAULT_APP_AUTH_CONTRACT
     from fisherman import attestation as _att
     live_tls_fp = _live_tls_fingerprint(url, timeout, quiet=as_json)
     res = _att.verify_attestation(
