@@ -191,13 +191,13 @@ class ConfigIdentityTests(unittest.TestCase):
                 config_mod, "project_env_path", return_value=project_env
             ):
                 with contextlib.redirect_stderr(io.StringIO()):
-                    _priv, pub, group = cli._load_keys()
+                    _priv, pub, _x_priv, x_pub = cli._load_keys()
 
             written = user_env.read_text(encoding="utf-8")
             self.assertIn(f"FISH_PRIVATE_KEY={TEST_SEED_HEX}\n", written)
             self.assertEqual(os.environ["FISH_PRIVATE_KEY"], TEST_SEED_HEX)
             self.assertEqual(len(pub), 32)
-            self.assertEqual(len(group), 32)
+            self.assertEqual(len(x_pub), 32)
 
     def test_load_keys_mints_once_when_key_is_absent(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:

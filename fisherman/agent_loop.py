@@ -27,6 +27,8 @@ from typing import Any
 
 import click
 
+from fisherman.friends import list_friends
+
 
 _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 _DEFAULT_MODEL = "openai/gpt-4o-mini"
@@ -49,6 +51,29 @@ STATUS RULES:
 
 PRIVACY — friends see this. Never include people's names, message content, health, finances, legal, or NSFW topics.
 """
+
+_AUDIENCE_RULES = {
+    "work": (
+        "Audience: work friend. Share only work-relevant activity: project area, "
+        "tooling, coding/design/review/docs state, and broad availability. Hide "
+        "personal apps, entertainment, private messages, health, finance, and "
+        "relationship context."
+    ),
+    "friends": (
+        "Audience: regular friend. Share lightweight activity and availability. "
+        "Prefer broad vibe/category over work details. Hide private messages, "
+        "sensitive work/client details, health, finance, and legal context."
+    ),
+    "close": (
+        "Audience: close friend or partner. You may share richer activity and "
+        "availability, but still hide secrets, passwords, private message content, "
+        "health, finance, legal, NSFW, and sensitive documents."
+    ),
+    "custom": (
+        "Audience: custom. Follow the custom sharing instruction below, after "
+        "applying the hard privacy rules."
+    ),
+}
 
 
 def _build_context(rows: list[dict], max_rows: int = 8) -> str:
@@ -109,8 +134,10 @@ def _run_query(since: str = "5m", limit: int = 10) -> list[dict]:
         return []
 
 
-def _publish(digest: dict) -> bool:
+def _publish(digest: dict, recipients: list[str]) -> bool:
     cmd = [sys.executable, "-m", "fisherman", "publish-status", "--from-stdin"]
+    for recipient in recipients:
+        cmd += ["--to", recipient]
     res = subprocess.run(
         cmd, input=json.dumps(digest), capture_output=True, text=True, timeout=15
     )
@@ -120,26 +147,60 @@ def _publish(digest: dict) -> bool:
     return True
 
 
+def _policy_key(friend: dict) -> tuple[str, str]:
+    audience = (friend.get("audience") or "friends").strip().lower()
+    prompt = (friend.get("policy_prompt") or "").strip()
+    return audience, prompt
+
+
+def _policy_prompt(audience: str, prompt: str) -> str:
+    rules = _AUDIENCE_RULES.get(audience, _AUDIENCE_RULES["friends"])
+    if prompt:
+        return f"{rules}\n\nCustom sharing instruction:\n{prompt}"
+    return rules
+
+
 def run_once(api_key: str, base_url: str, model: str, since: str = "5m") -> bool:
     rows = _run_query(since=since)
     if not rows:
         click.echo("  no recent context — skipping")
         return False
-    prompt = _PROMPT.format(context=_build_context(rows))
-    digest = _call_llm(api_key, base_url, model, prompt)
-    if digest is None:
+    friends = list_friends()
+    if not friends:
+        click.echo("  no friends — skipping status publish")
         return False
-    # Drop unknown keys + clamp lengths
-    digest = {
-        "emoji": (digest.get("emoji") or "❓")[:8],
-        "category": (digest.get("category") or "idle")[:20],
-        "status": (digest.get("status") or "")[:30],
-        "flow": bool(digest.get("flow", False)),
-    }
-    ok = _publish(digest)
-    if ok:
-        click.echo(f"  published: {digest['emoji']} {digest['category']:<12} {digest['status']}")
-    return ok
+
+    by_policy: dict[tuple[str, str], list[dict]] = {}
+    for friend in friends:
+        by_policy.setdefault(_policy_key(friend), []).append(friend)
+
+    ok_any = False
+    context = _build_context(rows)
+    for (audience, custom_prompt), group in by_policy.items():
+        policy = _policy_prompt(audience, custom_prompt)
+        prompt = _PROMPT.format(context=context) + "\n\n" + policy
+        digest = _call_llm(api_key, base_url, model, prompt)
+        if digest is None:
+            continue
+        # Drop unknown keys + clamp lengths
+        digest = {
+            "emoji": (digest.get("emoji") or "?")[:8],
+            "category": (digest.get("category") or "idle")[:20],
+            "status": (digest.get("status") or "")[:30],
+            "flow": bool(digest.get("flow", False)),
+        }
+        recipients = [friend["pubkey_hex"] for friend in group]
+        ok = _publish(digest, recipients)
+        ok_any = ok_any or ok
+        if ok:
+            names = ", ".join(friend["name"] for friend in group[:3])
+            if len(group) > 3:
+                names += f", +{len(group) - 3}"
+            click.echo(
+                f"  published {audience}: {digest['emoji']} "
+                f"{digest['category']:<12} {digest['status']} -> {names}"
+            )
+    return ok_any
 
 
 @click.command()

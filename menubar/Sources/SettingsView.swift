@@ -30,9 +30,14 @@ struct SettingsView: View {
     @State private var showAddFriend = false
     @State private var showManualAdd = false
     @State private var addFriendError: String?
+    @State private var editingRelayFriendPubkey: String?
+    @State private var editingFriendAudience: String = "friends"
+    @State private var editingFriendPolicyPrompt: String = ""
+    @State private var friendPolicyError: String?
 
     private let defaultCloudURL = "https://fisherman.teleport.computer"
     private let defaultServerURL = "ws://localhost:9999/ingest"
+    private let friendAudiences = ["friends", "work", "close", "custom"]
 
     enum SettingsTab: String, CaseIterable {
         case server = "Backend"
@@ -215,7 +220,7 @@ struct SettingsView: View {
                     monoBox(code)
                 }
             } else {
-                hintText("Configure your server URL first to generate a friend code.")
+                hintText("Identity key not ready yet. Fisherman generates it automatically on first launch.")
             }
 
             Divider()
@@ -226,13 +231,26 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Public Key")
+                    Text("Signing Public Key")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                     copyButton(config.publicKeyHex, label: "Copy")
                 }
                 monoBox(config.publicKeyHex)
+            }
+
+            if let encryptionPubkey = config.encryptionPublicKeyHex() {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Encryption Public Key")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        copyButton(encryptionPubkey, label: "Copy")
+                    }
+                    monoBox(encryptionPubkey)
+                }
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -283,11 +301,14 @@ struct SettingsView: View {
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             } else {
-                                Text("\(code.h ?? "?"):\(code.w ?? 9999)")
+                                Text("default relay")
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
                             Text(code.k.prefix(16) + "...")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                            Text("enc \(code.x.prefix(16))...")
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(.tertiary)
                         }
@@ -451,43 +472,125 @@ struct SettingsView: View {
     }
 
     private func relayFriendRow(_ friend: RelayFriend) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(friend.name)
-                        .font(.system(size: 12, weight: .medium))
-                    Text("Relay")
-                        .font(.system(size: 9, weight: .medium))
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Text(friend.name)
+                            .font(.system(size: 12, weight: .medium))
+                        Text("Relay")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.secondary.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Text(friend.audience.capitalized)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(friend.relayURL ?? "default relay")
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(Color.secondary.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(friend.pubkeyHex.prefix(16) + "...")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                    Text("enc \(friend.encryptionPubkeyHex.prefix(16))...")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                    if let prompt = friend.policyPrompt, !prompt.isEmpty {
+                        Text(prompt)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
-                Text(friend.relayURL ?? "default relay")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(friend.pubkeyHex.prefix(16) + "...")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer()
+                Spacer()
 
-            Button {
-                let result = CliBridge.run(["friend", "remove", friend.pubkeyHex])
-                if result.exitCode == 0 {
-                    config.refreshRelayFriends()
+                Button {
+                    beginEditingRelayFriend(friend)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 11))
                 }
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red.opacity(0.7))
+                .buttonStyle(.plain)
+                .help("Edit sharing policy")
+
+                Button {
+                    let result = CliBridge.run(["friend", "remove", friend.pubkeyHex])
+                    if result.exitCode == 0 {
+                        if editingRelayFriendPubkey == friend.pubkeyHex {
+                            cancelEditingRelayFriend()
+                        }
+                        config.refreshRelayFriends()
+                    }
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red.opacity(0.7))
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+
+            if editingRelayFriendPubkey == friend.pubkeyHex {
+                relayFriendPolicyEditor(friend)
+            }
         }
         .padding(.vertical, 4)
+    }
+
+    private func relayFriendPolicyEditor(_ friend: RelayFriend) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Audience")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Picker("", selection: $editingFriendAudience) {
+                    ForEach(friendAudiences, id: \.self) { audience in
+                        Text(audience.capitalized).tag(audience)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Custom instruction")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextEditor(text: $editingFriendPolicyPrompt)
+                    .font(.system(size: 12))
+                    .frame(minHeight: 58)
+                    .scrollContentBackground(.hidden)
+                    .background(Color.secondary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                hintText("Optional. Used by the status agent after hard privacy filters.")
+            }
+
+            if let error = friendPolicyError {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    cancelEditingRelayFriend()
+                }
+                .controlSize(.small)
+                Button("Save Policy") {
+                    saveRelayFriendPolicy(friend)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        }
+        .padding(10)
+        .background(Color.secondary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func fieldRow(_ label: String, placeholder: String, text: Binding<String>) -> some View {
@@ -543,6 +646,42 @@ struct SettingsView: View {
 
     // MARK: - Actions
 
+    private func beginEditingRelayFriend(_ friend: RelayFriend) {
+        editingRelayFriendPubkey = friend.pubkeyHex
+        editingFriendAudience = friendAudiences.contains(friend.audience) ? friend.audience : "friends"
+        editingFriendPolicyPrompt = friend.policyPrompt ?? ""
+        friendPolicyError = nil
+    }
+
+    private func cancelEditingRelayFriend() {
+        editingRelayFriendPubkey = nil
+        editingFriendAudience = "friends"
+        editingFriendPolicyPrompt = ""
+        friendPolicyError = nil
+    }
+
+    private func saveRelayFriendPolicy(_ friend: RelayFriend) {
+        friendPolicyError = nil
+        let prompt = editingFriendPolicyPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        var args = [
+            "friend", "policy", friend.pubkeyHex,
+            "--audience", editingFriendAudience,
+        ]
+        if prompt.isEmpty {
+            args.append("--clear-policy-prompt")
+        } else {
+            args += ["--policy-prompt", prompt]
+        }
+        let result = CliBridge.run(args)
+        if result.exitCode != 0 {
+            let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            friendPolicyError = detail.isEmpty ? "Could not save policy" : detail
+            return
+        }
+        cancelEditingRelayFriend()
+        config.refreshRelayFriends()
+    }
+
     private func parseFriendCodeInput(_ input: String) {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -557,6 +696,11 @@ struct SettingsView: View {
             guard code.k.count == 64, code.k.allSatisfy({ $0.isHexDigit }) else {
                 parsedFriendCode = nil
                 friendCodeError = "Invalid public key in code"
+                return
+            }
+            guard code.v == 2, code.x.count == 64, code.x.allSatisfy({ $0.isHexDigit }) else {
+                parsedFriendCode = nil
+                friendCodeError = "Invalid encryption key in code"
                 return
             }
             parsedFriendCode = code
@@ -576,30 +720,26 @@ struct SettingsView: View {
         guard let code = parsedFriendCode else { return }
 
         // Check for duplicate
-        if code.g != nil && config.relayFriends.contains(where: { $0.pubkeyHex == code.k }) {
+        if config.relayFriends.contains(where: { $0.pubkeyHex == code.k }) {
             friendCodeError = "Already added this friend"
             return
         }
-        if code.g == nil && config.friends.contains(where: { $0.publicKey == code.k }) {
+        if config.friends.contains(where: { $0.publicKey == code.k }) {
             friendCodeError = "Already added this friend"
             return
         }
 
         let name = friendCodeOverrideName.trimmingCharacters(in: .whitespaces)
-        if code.g != nil {
-            var args = ["friend", "add", friendCodeInput]
-            if !name.isEmpty {
-                args += ["--name", name]
-            }
-            let r = CliBridge.run(args)
-            if r.exitCode != 0 {
-                friendCodeError = r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                return
-            }
-            config.refreshRelayFriends()
-        } else {
-            config.addFriendFromCode(code, overrideName: name.isEmpty ? nil : name)
+        var args = ["friend", "add", friendCodeInput]
+        if !name.isEmpty {
+            args += ["--name", name]
         }
+        let r = CliBridge.run(args)
+        if r.exitCode != 0 {
+            friendCodeError = r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return
+        }
+        config.refreshRelayFriends()
 
         // Reset
         friendCodeInput = ""

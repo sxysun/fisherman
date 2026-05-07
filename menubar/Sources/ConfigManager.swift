@@ -18,17 +18,18 @@ struct Friend: Sendable {
 struct RelayFriend: Sendable {
     let name: String
     let pubkeyHex: String
+    let encryptionPubkeyHex: String
     let relayURL: String?
+    let audience: String
+    let policyPrompt: String?
     let addedAt: Double?
 }
 
 struct FriendCode: Codable {
+    let v: Int     // friend-code version
     let n: String  // display name
-    let k: String  // pubkey hex
-    let h: String? // server-direct hostname
-    let w: Int?    // server-direct ws port
-    let a: Int?    // server-direct activity port
-    let g: String? // relay friends-group key
+    let k: String  // signing pubkey hex
+    let x: String  // X25519 encryption pubkey hex
     let r: String? // relay URL
 }
 
@@ -386,12 +387,16 @@ final class ConfigManager {
 
         relayFriends = rows.compactMap { row in
             guard let name = row["name"] as? String,
-                  let pubkey = row["pubkey_hex"] as? String
+                  let pubkey = row["pubkey_hex"] as? String,
+                  let encryptionPubkey = row["encryption_pubkey"] as? String
             else { return nil }
             return RelayFriend(
                 name: name,
                 pubkeyHex: pubkey,
+                encryptionPubkeyHex: encryptionPubkey,
                 relayURL: row["relay_url"] as? String,
+                audience: row["audience"] as? String ?? "friends",
+                policyPrompt: row["policy_prompt"] as? String,
                 addedAt: row["added_at"] as? Double
             )
         }
@@ -405,18 +410,22 @@ final class ConfigManager {
               let seed = hexToData(privateKeyHex)
         else { return nil }
 
-        let groupKey = HKDF<SHA256>.deriveKey(
+        let xSeed = HKDF<SHA256>.deriveKey(
             inputKeyMaterial: SymmetricKey(data: seed),
             salt: Data(),
-            info: Data("fisherman/friends-group/v1".utf8),
+            info: Data("fisherman/x25519/v1".utf8),
             outputByteCount: 32
         )
-        let groupHex = groupKey.withUnsafeBytes {
-            Data($0).map { String(format: "%02x", $0) }.joined()
+        let xSeedData = xSeed.withUnsafeBytes { Data($0) }
+        guard let xPriv = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: xSeedData) else {
+            return nil
         }
+        let xPubHex = xPriv.publicKey.rawRepresentation.map {
+            String(format: "%02x", $0)
+        }.joined()
 
         let relay = statusRelayURL.isEmpty ? nil : statusRelayURL
-        let code = FriendCode(n: name, k: publicKeyHex, h: nil, w: nil, a: nil, g: groupHex, r: relay)
+        let code = FriendCode(v: 2, n: name, k: publicKeyHex, x: xPubHex, r: relay)
         guard let jsonData = try? JSONEncoder().encode(code) else { return nil }
 
         let base64 = jsonData.base64EncodedString()
@@ -425,6 +434,23 @@ final class ConfigManager {
             .replacingOccurrences(of: "=", with: "")
 
         return "fish:\(base64)"
+    }
+
+    func encryptionPublicKeyHex() -> String? {
+        guard let seed = hexToData(privateKeyHex) else { return nil }
+        let xSeed = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: seed),
+            salt: Data(),
+            info: Data("fisherman/x25519/v1".utf8),
+            outputByteCount: 32
+        )
+        let xSeedData = xSeed.withUnsafeBytes { Data($0) }
+        guard let xPriv = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: xSeedData) else {
+            return nil
+        }
+        return xPriv.publicKey.rawRepresentation.map {
+            String(format: "%02x", $0)
+        }.joined()
     }
 
     /// Parse a `fish:<base64url>` friend code string.
@@ -442,18 +468,6 @@ final class ConfigManager {
 
         guard let data = Data(base64Encoded: base64) else { return nil }
         return try? JSONDecoder().decode(FriendCode.self, from: data)
-    }
-
-    /// Add a friend from a parsed code, optionally overriding the display name.
-    func addFriendFromCode(_ code: FriendCode, overrideName: String? = nil) {
-        guard code.g == nil else { return }
-        let name = overrideName?.isEmpty == false ? overrideName! : code.n
-        guard let host = code.h else { return }
-        let wsURL = "ws://\(host):\(code.w ?? 9999)"
-        let actPort = String(code.a ?? 9998)
-
-        addFriend(name: name, publicKey: code.k, serverURL: wsURL, activityPort: actPort)
-        registerFriendOnServer(pubkey: code.k)
     }
 
     /// POST friend pubkey to own server's /api/friends (owner auth).

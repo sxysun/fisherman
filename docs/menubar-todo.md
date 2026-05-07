@@ -27,8 +27,9 @@ of the same protocols.
 - Managed Fisherman Cloud ingest enrollment. The hosted TEE deployment,
   attestation verifier, and CI/CD pipeline exist, but the self-serve
   account/ingest enablement flow in the app is not wired yet.
-- Per-recipient status envelopes. The current friend-code protocol shares
-  one friends-group key, so revocation is not cryptographically complete.
+- Friend policy preview in Settings: run the current policy against a
+  small recent-context sample and show what that friend would see before
+  saving.
 - Daemon endpoint `/endpoints/mine` returning the relay's view of which
   endpoints are currently online for this user.
 - Daemon-side audit log for `publish-status` events so the menubar can

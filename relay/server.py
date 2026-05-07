@@ -1,19 +1,20 @@
 """fisherman-relay: e2ee pubsub for friend status events.
 
 This service holds zero secrets. Events arrive ed25519-signed by their
-author and AES-GCM-encrypted to a friends-group-key the relay never sees.
-The relay verifies signatures, appends to a per-author ring buffer, and
-serves them to anyone who asks. Substituting the relay (your own, ours,
-someone else's) changes nothing security-wise.
+author and AES-GCM-encrypted inside per-recipient X25519 envelopes. The
+relay verifies signatures, appends to a per-author ring buffer, and serves
+them to anyone who asks. Substituting the relay (your own, ours, someone
+else's) changes nothing security-wise.
 
 Wire format:
   POST /events
-    body: {author_pubkey, ts, ciphertext, sig}
-    sig is ed25519 over (pubkey_bytes || u64_be(ts) || ciphertext_bytes)
+    body: {author_pubkey, recipient_tag, ts, ciphertext, sig}
+    sig is ed25519 over
+      (pubkey_bytes || u64_be(ts) || recipient_tag_bytes || ciphertext_bytes)
     ciphertext is opaque to the relay
 
-  GET /events?pubkey=<hex>[&since=<unix>][&limit=<n>]
-    returns: [{author_pubkey, ts, ciphertext, sig, event_id}, ...]
+  GET /events?pubkey=<hex>[&recipient_tag=<hex>][&since=<unix>][&limit=<n>]
+    returns: [{author_pubkey, recipient_tag, ts, ciphertext, sig, event_id}, ...]
 
   GET /health → "ok"
 """
@@ -49,30 +50,44 @@ class EventStore:
     """In-memory event store for local development and tests."""
 
     def __init__(self, buffer_size: int = _DEFAULT_BUFFER_SIZE, ttl: int = _DEFAULT_TTL_SECONDS):
-        self._buffers: dict[str, deque[dict]] = {}
+        self._buffers: dict[tuple[str, str | None], deque[dict]] = {}
         self._buffer_size = buffer_size
         self._ttl = ttl
         self._next_id = 0
 
     def append(self, author_hex: str, event: dict) -> int:
-        buf = self._buffers.setdefault(author_hex, deque(maxlen=self._buffer_size))
+        key = (author_hex, event.get("recipient_tag"))
+        buf = self._buffers.setdefault(key, deque(maxlen=self._buffer_size))
         self._next_id += 1
         event["event_id"] = self._next_id
         buf.append(event)
         return self._next_id
 
-    def fetch(self, author_hex: str, since_ts: float | None, limit: int) -> list[dict]:
-        buf = self._buffers.get(author_hex)
-        if not buf:
-            return []
+    def fetch(
+        self,
+        author_hex: str,
+        since_ts: float | None,
+        limit: int,
+        recipient_tag: str | None = None,
+    ) -> list[dict]:
+        if recipient_tag is not None:
+            buffers = [self._buffers.get((author_hex, recipient_tag))]
+        else:
+            buffers = [
+                buf for (author, _tag), buf in self._buffers.items()
+                if author == author_hex
+            ]
         cutoff = time.time() - self._ttl
         out: list[dict] = []
-        for ev in buf:
-            if ev["ts"] < cutoff:
+        for buf in buffers:
+            if not buf:
                 continue
-            if since_ts is not None and ev["ts"] <= since_ts:
-                continue
-            out.append(ev)
+            for ev in buf:
+                if ev["ts"] < cutoff:
+                    continue
+                if since_ts is not None and ev["ts"] <= since_ts:
+                    continue
+                out.append(ev)
         # newest first; cap to limit
         out.sort(key=lambda e: e["ts"], reverse=True)
         return out[:limit]
@@ -80,12 +95,12 @@ class EventStore:
     def evict_expired(self) -> int:
         cutoff = time.time() - self._ttl
         removed = 0
-        for author, buf in list(self._buffers.items()):
+        for key, buf in list(self._buffers.items()):
             while buf and buf[0]["ts"] < cutoff:
                 buf.popleft()
                 removed += 1
             if not buf:
-                del self._buffers[author]
+                del self._buffers[key]
         return removed
 
 
@@ -116,43 +131,65 @@ class SQLiteEventStore:
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 author_pubkey TEXT NOT NULL,
                 ts REAL NOT NULL,
+                recipient_tag TEXT,
                 ciphertext TEXT NOT NULL,
                 sig TEXT NOT NULL
             )
         """)
+        self._ensure_recipient_tag_column()
         self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_events_author_ts
             ON events(author_pubkey, ts DESC, event_id DESC)
         """)
+        self._db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_events_author_recipient_ts
+            ON events(author_pubkey, recipient_tag, ts DESC, event_id DESC)
+        """)
+
+    def _ensure_recipient_tag_column(self) -> None:
+        rows = self._db.execute("PRAGMA table_info(events)").fetchall()
+        columns = {row["name"] for row in rows}
+        if "recipient_tag" not in columns:
+            self._db.execute("ALTER TABLE events ADD COLUMN recipient_tag TEXT")
 
     def append(self, author_hex: str, event: dict) -> int:
         cur = self._db.execute(
             """
-            INSERT INTO events(author_pubkey, ts, ciphertext, sig)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO events(author_pubkey, ts, recipient_tag, ciphertext, sig)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 author_hex,
                 float(event["ts"]),
+                event.get("recipient_tag"),
                 event["ciphertext"],
                 event["sig"],
             ),
         )
         event_id = int(cur.lastrowid)
-        self._trim_author(author_hex)
+        self._trim_author_recipient(author_hex, event.get("recipient_tag"))
         return event_id
 
-    def fetch(self, author_hex: str, since_ts: float | None, limit: int) -> list[dict]:
+    def fetch(
+        self,
+        author_hex: str,
+        since_ts: float | None,
+        limit: int,
+        recipient_tag: str | None = None,
+    ) -> list[dict]:
         cutoff = time.time() - self._ttl
         params: list[Any] = [author_hex, cutoff]
         where = "author_pubkey = ? AND ts >= ?"
+        if recipient_tag is not None:
+            where += " AND recipient_tag = ?"
+            params.append(recipient_tag)
         if since_ts is not None:
             where += " AND ts > ?"
             params.append(since_ts)
         params.append(limit)
         rows = self._db.execute(
             f"""
-            SELECT event_id, author_pubkey, ts, ciphertext, sig
+            SELECT event_id, author_pubkey, recipient_tag, ts, ciphertext, sig
             FROM events
             WHERE {where}
             ORDER BY ts DESC, event_id DESC
@@ -163,6 +200,7 @@ class SQLiteEventStore:
         return [
             {
                 "author_pubkey": row["author_pubkey"],
+                "recipient_tag": row["recipient_tag"],
                 "ts": float(row["ts"]),
                 "ciphertext": row["ciphertext"],
                 "sig": row["sig"],
@@ -176,33 +214,61 @@ class SQLiteEventStore:
         cur = self._db.execute("DELETE FROM events WHERE ts < ?", (cutoff,))
         return int(cur.rowcount or 0)
 
-    def _trim_author(self, author_hex: str) -> None:
+    def _trim_author_recipient(self, author_hex: str, recipient_tag: str | None) -> None:
+        if recipient_tag is None:
+            self._db.execute(
+                """
+                DELETE FROM events
+                WHERE author_pubkey = ?
+                  AND recipient_tag IS NULL
+                  AND event_id NOT IN (
+                    SELECT event_id FROM events
+                    WHERE author_pubkey = ?
+                      AND recipient_tag IS NULL
+                    ORDER BY ts DESC, event_id DESC
+                    LIMIT ?
+                  )
+                """,
+                (author_hex, author_hex, self._buffer_size),
+            )
+            return
         self._db.execute(
             """
             DELETE FROM events
             WHERE author_pubkey = ?
+              AND recipient_tag = ?
               AND event_id NOT IN (
                 SELECT event_id FROM events
                 WHERE author_pubkey = ?
+                  AND recipient_tag = ?
                 ORDER BY ts DESC, event_id DESC
                 LIMIT ?
               )
             """,
-            (author_hex, author_hex, self._buffer_size),
+            (author_hex, recipient_tag, author_hex, recipient_tag, self._buffer_size),
         )
 
     def close(self) -> None:
         self._db.close()
 
 
-def _verify_event(author_hex: str, ts: float, ciphertext: bytes, sig_hex: str) -> bool:
+def _verify_event(
+    author_hex: str,
+    recipient_tag: str,
+    ts: float,
+    ciphertext: bytes,
+    sig_hex: str,
+) -> bool:
     try:
         pubkey_bytes = bytes.fromhex(author_hex)
         if len(pubkey_bytes) != 32:
             return False
+        tag_bytes = bytes.fromhex(recipient_tag)
+        if len(tag_bytes) != 16:
+            return False
         pub = Ed25519PublicKey.from_public_bytes(pubkey_bytes)
         sig = bytes.fromhex(sig_hex)
-        msg = pubkey_bytes + struct.pack(">Q", int(ts)) + ciphertext
+        msg = pubkey_bytes + struct.pack(">Q", int(ts)) + tag_bytes + ciphertext
         pub.verify(sig, msg)
         return True
     except (ValueError, InvalidSignature):
@@ -216,12 +282,22 @@ async def post_events(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid json"}, status=400)
 
     author_hex = body.get("author_pubkey")
+    recipient_tag = body.get("recipient_tag")
     ts = body.get("ts")
     ciphertext_b64 = body.get("ciphertext")
     sig_hex = body.get("sig")
 
-    if not all(isinstance(x, str) for x in (author_hex, ciphertext_b64, sig_hex)) or not isinstance(ts, (int, float)):
+    if (
+        not all(isinstance(x, str) for x in (author_hex, recipient_tag, ciphertext_b64, sig_hex))
+        or not isinstance(ts, (int, float))
+    ):
         return web.json_response({"error": "missing or malformed fields"}, status=400)
+    try:
+        tag_bytes = bytes.fromhex(recipient_tag)
+    except ValueError:
+        return web.json_response({"error": "recipient_tag must be hex"}, status=400)
+    if len(tag_bytes) != 16:
+        return web.json_response({"error": "recipient_tag must be 16 bytes"}, status=400)
 
     try:
         ciphertext = base64.b64decode(ciphertext_b64)
@@ -237,13 +313,14 @@ async def post_events(request: web.Request) -> web.Response:
     if ts < now - _MAX_PAST_DRIFT:
         return web.json_response({"error": "ts too far in past"}, status=400)
 
-    if not _verify_event(author_hex, float(ts), ciphertext, sig_hex):
+    if not _verify_event(author_hex, recipient_tag, float(ts), ciphertext, sig_hex):
         log.warning("event_sig_invalid", author=author_hex[:16], remote=request.remote)
         return web.json_response({"error": "invalid signature"}, status=401)
 
     store: EventStore = request.app["store"]
     eid = store.append(author_hex, {
         "author_pubkey": author_hex,
+        "recipient_tag": recipient_tag,
         "ts": float(ts),
         "ciphertext": ciphertext_b64,
         "sig": sig_hex,
@@ -261,6 +338,15 @@ async def get_events(request: web.Request) -> web.Response:
     except ValueError:
         return web.json_response({"error": "pubkey not hex"}, status=400)
 
+    recipient_tag = request.query.get("recipient_tag")
+    if recipient_tag:
+        try:
+            tag_bytes = bytes.fromhex(recipient_tag)
+        except ValueError:
+            return web.json_response({"error": "recipient_tag must be hex"}, status=400)
+        if len(tag_bytes) != 16:
+            return web.json_response({"error": "recipient_tag must be 16 bytes"}, status=400)
+
     since_str = request.query.get("since")
     since_ts: float | None = None
     if since_str:
@@ -276,7 +362,7 @@ async def get_events(request: web.Request) -> web.Response:
     limit = max(1, min(500, limit))
 
     store: EventStore = request.app["store"]
-    events = store.fetch(pubkey, since_ts, limit)
+    events = store.fetch(pubkey, since_ts, limit, recipient_tag=recipient_tag)
     return web.json_response(events)
 
 

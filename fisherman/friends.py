@@ -4,22 +4,25 @@ Each friend record:
   {
     name:               str,
     pubkey_hex:         str (64 hex),
-    friends_group_key:  str (64 hex; *theirs*, used to decrypt their statuses),
+    encryption_pubkey:  str (64 hex X25519 public key),
     relay_url:          str | None,
+    audience:           str ("friends", "work", "close", or "custom"),
+    policy_prompt:      str | None,
     added_at:           float (unix),
   }
 
 Friend code wire format (`fish:<base64url(JSON)>`):
   {
+    "v": 2,
     "n": <name>,
-    "k": <pubkey_hex>,
-    "g": <friends_group_key_hex>,
+    "k": <signing_pubkey_hex>,
+    "x": <x25519_pubkey_hex>,
     "r": <relay_url or omitted>,
   }
 
-The `g` field is sensitive — it lets the holder decrypt all your status
-events. Codes must be exchanged via private channels (DM, AirDrop, QR
-shown in person), never posted publicly.
+Friend codes contain public identity material only. Status payloads are
+encrypted per recipient using X25519 ECDH and signed by the author's
+Ed25519 signing key, so the relay stores opaque ciphertext.
 """
 
 from __future__ import annotations
@@ -31,14 +34,39 @@ import time
 from typing import Any
 
 
-_DEFAULT_PATH = os.path.expanduser("~/.fisherman/friends.json")
+_DEFAULT_PATH = "~/.fisherman/friends.json"
+_AUDIENCES = {"friends", "work", "close", "custom"}
+_UNSET = object()
 
 
-def _read(path: str) -> list[dict[str, Any]]:
-    if not os.path.exists(path):
+def _validate_hex_32(label: str, value: str) -> str:
+    value = value.lower().strip()
+    if len(value) != 64:
+        raise ValueError(f"{label} must be 64 hex chars")
+    try:
+        bytes.fromhex(value)
+    except ValueError as e:
+        raise ValueError(f"{label} must be hex") from e
+    return value
+
+
+def normalize_audience(value: str | None) -> str:
+    audience = (value or "friends").strip().lower()
+    if audience not in _AUDIENCES:
+        raise ValueError(f"audience must be one of: {', '.join(sorted(_AUDIENCES))}")
+    return audience
+
+
+def _resolve_path(path: str | None) -> str:
+    return os.path.expanduser(path or _DEFAULT_PATH)
+
+
+def _read(path: str | None) -> list[dict[str, Any]]:
+    resolved = _resolve_path(path)
+    if not os.path.exists(resolved):
         return []
     try:
-        with open(path) as f:
+        with open(resolved) as f:
             data = json.load(f)
     except Exception:
         return []
@@ -47,31 +75,32 @@ def _read(path: str) -> list[dict[str, Any]]:
     return list(data.get("friends", []))
 
 
-def _write(path: str, friends: list[dict[str, Any]]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
+def _write(path: str | None, friends: list[dict[str, Any]]) -> None:
+    resolved = _resolve_path(path)
+    os.makedirs(os.path.dirname(resolved), exist_ok=True)
+    tmp = resolved + ".tmp"
     with open(tmp, "w") as f:
         json.dump(friends, f, indent=2)
-    os.replace(tmp, path)
+    os.replace(tmp, resolved)
 
 
-def list_friends(path: str = _DEFAULT_PATH) -> list[dict[str, Any]]:
+def list_friends(path: str | None = None) -> list[dict[str, Any]]:
     return _read(path)
 
 
 def add_friend(
     name: str,
     pubkey_hex: str,
-    friends_group_key_hex: str,
     relay_url: str | None,
-    path: str = _DEFAULT_PATH,
+    encryption_pubkey_hex: str,
+    audience: str = "friends",
+    policy_prompt: str | None = None,
+    path: str | None = None,
 ) -> dict[str, Any]:
-    pubkey_hex = pubkey_hex.lower().strip()
-    friends_group_key_hex = friends_group_key_hex.lower().strip()
-    if len(pubkey_hex) != 64:
-        raise ValueError("pubkey must be 64 hex chars")
-    if len(friends_group_key_hex) != 64:
-        raise ValueError("friends_group_key must be 64 hex chars (32 bytes)")
+    pubkey_hex = _validate_hex_32("pubkey", pubkey_hex)
+    encryption_pubkey_hex = _validate_hex_32("encryption_pubkey", encryption_pubkey_hex)
+    audience = normalize_audience(audience)
+    policy_prompt = (policy_prompt or "").strip() or None
 
     friends = _read(path)
     # Replace if pubkey already known
@@ -79,8 +108,10 @@ def add_friend(
     record = {
         "name": name.strip() or pubkey_hex[:12],
         "pubkey_hex": pubkey_hex,
-        "friends_group_key": friends_group_key_hex,
+        "encryption_pubkey": encryption_pubkey_hex,
         "relay_url": relay_url,
+        "audience": audience,
+        "policy_prompt": policy_prompt,
         "added_at": time.time(),
     }
     friends.append(record)
@@ -88,7 +119,7 @@ def add_friend(
     return record
 
 
-def remove_friend(name_or_pubkey: str, path: str = _DEFAULT_PATH) -> bool:
+def remove_friend(name_or_pubkey: str, path: str | None = None) -> bool:
     needle = name_or_pubkey.strip().lower()
     friends = _read(path)
     keep = [
@@ -101,7 +132,7 @@ def remove_friend(name_or_pubkey: str, path: str = _DEFAULT_PATH) -> bool:
     return True
 
 
-def find_friend(name_or_pubkey: str, path: str = _DEFAULT_PATH) -> dict[str, Any] | None:
+def find_friend(name_or_pubkey: str, path: str | None = None) -> dict[str, Any] | None:
     needle = name_or_pubkey.strip().lower()
     for f in _read(path):
         if f.get("name", "").lower() == needle or f.get("pubkey_hex", "") == needle:
@@ -109,10 +140,46 @@ def find_friend(name_or_pubkey: str, path: str = _DEFAULT_PATH) -> dict[str, Any
     return None
 
 
+def update_friend_policy(
+    name_or_pubkey: str,
+    *,
+    audience: str | None = None,
+    policy_prompt: Any = _UNSET,
+    path: str | None = None,
+) -> dict[str, Any] | None:
+    """Update a friend's sharing audience and/or custom prompt."""
+    needle = name_or_pubkey.strip().lower()
+    friends = _read(path)
+    updated: dict[str, Any] | None = None
+    for friend in friends:
+        if friend.get("name", "").lower() != needle and friend.get("pubkey_hex", "") != needle:
+            continue
+        if audience is not None:
+            friend["audience"] = normalize_audience(audience)
+        elif not friend.get("audience"):
+            friend["audience"] = "friends"
+        if policy_prompt is not _UNSET:
+            friend["policy_prompt"] = (str(policy_prompt or "").strip() or None)
+        updated = friend
+        break
+    if updated is None:
+        return None
+    _write(path, friends)
+    return updated
+
+
 def encode_code(
-    name: str, pubkey_hex: str, friends_group_key_hex: str, relay_url: str | None
+    name: str,
+    pubkey_hex: str,
+    encryption_pubkey_hex: str,
+    relay_url: str | None,
 ) -> str:
-    payload: dict[str, Any] = {"n": name, "k": pubkey_hex, "g": friends_group_key_hex}
+    payload: dict[str, Any] = {
+        "v": 2,
+        "n": name,
+        "k": _validate_hex_32("pubkey", pubkey_hex),
+        "x": _validate_hex_32("encryption_pubkey", encryption_pubkey_hex),
+    }
     if relay_url:
         payload["r"] = relay_url
     raw = json.dumps(payload, separators=(",", ":")).encode()
@@ -136,12 +203,14 @@ def decode_code(code: str) -> dict[str, Any]:
         payload = json.loads(raw.decode())
     except Exception as e:
         raise ValueError(f"invalid json: {e}") from e
-    for required in ("n", "k", "g"):
+    if payload.get("v") != 2:
+        raise ValueError("unsupported friend code version")
+    for required in ("n", "k", "x"):
         if required not in payload:
             raise ValueError(f"missing field {required!r}")
     return {
         "name": payload["n"],
-        "pubkey_hex": payload["k"],
-        "friends_group_key": payload["g"],
+        "pubkey_hex": _validate_hex_32("pubkey", payload["k"]),
+        "encryption_pubkey": _validate_hex_32("encryption_pubkey", payload["x"]),
         "relay_url": payload.get("r"),
     }

@@ -1265,7 +1265,8 @@ def _load_keys():
             )
 
     priv, pub = keys.signing_keypair(seed)
-    return priv, pub, keys.friends_group_key(seed)
+    x_priv, x_pub = keys.encryption_keypair(seed)
+    return priv, pub, x_priv, x_pub
 
 
 def _ledger_url() -> str:
@@ -1284,21 +1285,21 @@ def friend_group():
 def friend_code(name: str | None, as_text: bool):
     """Print your own friend code (share with people you trust)."""
     from fisherman.friends import encode_code
-    _priv, pub, group = _load_keys()
+    _priv, pub, _x_priv, x_pub = _load_keys()
     if not name:
         import socket
         name = socket.gethostname().split(".")[0]
-    code = encode_code(name, pub.hex(), group.hex(), _ledger_url())
+    code = encode_code(name, pub.hex(), x_pub.hex(), _ledger_url())
     if as_text:
         click.echo(f"name:       {name}")
-        click.echo(f"pubkey:     {pub.hex()}")
+        click.echo(f"signing:    {pub.hex()}")
+        click.echo(f"encrypt:    {x_pub.hex()}")
         click.echo(f"relay:      {_ledger_url()}")
         click.echo("")
         click.echo(code)
         click.echo("")
-        click.echo("Share this code with people you trust. The 'g' field is")
-        click.echo("a symmetric key — anyone holding the code can decrypt your")
-        click.echo("status events. Exchange via DM, AirDrop, or QR — never publicly.")
+        click.echo("Share this public friend code with people you want to add.")
+        click.echo("Both sides must add each other before per-recipient status works.")
     else:
         click.echo(code)
 
@@ -1306,7 +1307,19 @@ def friend_code(name: str | None, as_text: bool):
 @friend_group.command(name="add")
 @click.argument("code")
 @click.option("--name", default=None, help="Override the embedded display name")
-def friend_add(code: str, name: str | None):
+@click.option(
+    "--audience",
+    default="friends",
+    type=click.Choice(["friends", "work", "close", "custom"]),
+    show_default=True,
+    help="Default sharing audience for this friend.",
+)
+@click.option(
+    "--policy-prompt",
+    default=None,
+    help="Optional custom sharing instruction for this friend.",
+)
+def friend_add(code: str, name: str | None, audience: str, policy_prompt: str | None):
     """Add a friend from a fish: code."""
     from fisherman.friends import add_friend, decode_code
     try:
@@ -1317,8 +1330,10 @@ def friend_add(code: str, name: str | None):
     record = add_friend(
         name=name or parsed["name"],
         pubkey_hex=parsed["pubkey_hex"],
-        friends_group_key_hex=parsed["friends_group_key"],
         relay_url=parsed.get("relay_url"),
+        encryption_pubkey_hex=parsed["encryption_pubkey"],
+        audience=audience,
+        policy_prompt=policy_prompt,
     )
     click.echo(f"added: {record['name']} ({record['pubkey_hex'][:12]}…)")
 
@@ -1337,6 +1352,7 @@ def friend_list(as_text: bool):
         return
     for r in rows:
         click.echo(f"{r['name']:24}  {r['pubkey_hex'][:16]}…  "
+                   f"{r.get('audience', 'friends'):7}  "
                    f"{r.get('relay_url') or '(default relay)'}")
 
 
@@ -1350,6 +1366,65 @@ def friend_remove(name_or_pubkey: str):
     else:
         click.echo(f"not found: {name_or_pubkey}", err=True)
         sys.exit(1)
+
+
+@friend_group.command(name="policy")
+@click.argument("name_or_pubkey")
+@click.option(
+    "--audience",
+    default=None,
+    type=click.Choice(["friends", "work", "close", "custom"]),
+    help="Set the friend's sharing audience.",
+)
+@click.option("--policy-prompt", default=None, help="Set a custom sharing instruction.")
+@click.option("--clear-policy-prompt", is_flag=True, help="Clear the custom sharing instruction.")
+@click.option("--json", "as_json", is_flag=True, help="Print the resulting friend record as JSON.")
+def friend_policy(
+    name_or_pubkey: str,
+    audience: str | None,
+    policy_prompt: str | None,
+    clear_policy_prompt: bool,
+    as_json: bool,
+):
+    """Inspect or update a friend's sharing policy."""
+    from fisherman.friends import find_friend, update_friend_policy
+
+    if policy_prompt is not None and clear_policy_prompt:
+        click.echo("error: use either --policy-prompt or --clear-policy-prompt", err=True)
+        sys.exit(2)
+
+    if audience is None and policy_prompt is None and not clear_policy_prompt:
+        record = find_friend(name_or_pubkey)
+    else:
+        prompt_arg = ""
+        if clear_policy_prompt:
+            prompt_arg = ""
+        elif policy_prompt is not None:
+            prompt_arg = policy_prompt
+        else:
+            prompt_arg = None  # type: ignore[assignment]
+        if prompt_arg is None:
+            record = update_friend_policy(name_or_pubkey, audience=audience)
+        else:
+            record = update_friend_policy(
+                name_or_pubkey,
+                audience=audience,
+                policy_prompt=prompt_arg,
+            )
+
+    if record is None:
+        click.echo(f"not found: {name_or_pubkey}", err=True)
+        sys.exit(1)
+
+    if as_json:
+        click.echo(json.dumps(record, indent=2))
+        return
+
+    click.echo(f"name:      {record.get('name')}")
+    click.echo(f"pubkey:    {record.get('pubkey_hex')}")
+    click.echo(f"audience:  {record.get('audience') or 'friends'}")
+    prompt = record.get("policy_prompt") or ""
+    click.echo(f"prompt:    {prompt or '(none)'}")
 
 
 @friend_group.command(name="status")
@@ -1385,15 +1460,21 @@ def friend_status(name_or_pubkey: str | None, since: str | None, limit: int, as_
             import time as _t
             since_ts = _t.time() - delta
 
+    _priv, my_pub, my_x_priv, _my_x_pub = _load_keys()
     out: list[dict] = []
     for f in targets:
         relay = f.get("relay_url") or _ledger_url()
-        group_key = bytes.fromhex(f["friends_group_key"])
+        friend_x = f.get("encryption_pubkey")
+        if not friend_x:
+            click.echo(f"  [{f['name']}] error: friend is missing encryption_pubkey", err=True)
+            continue
         try:
             events = fetch_friend_status(
                 relay_url=relay,
                 friend_pubkey_hex=f["pubkey_hex"],
-                friends_group_key=group_key,
+                friend_x25519_pubkey_hex=friend_x,
+                recipient_pubkey_bytes=my_pub,
+                recipient_x25519_priv=my_x_priv,
                 since_ts=since_ts,
                 limit=limit,
             )
@@ -1447,14 +1528,21 @@ def _parse_since_to_ts(s: str | None) -> float | None:
 @click.option("--status", default=None)
 @click.option("--flow/--no-flow", default=False)
 @click.option("--from-stdin", is_flag=True, help="Read JSON digest from stdin")
-def publish_status(emoji, category, status, flow, from_stdin):
-    """Sign + encrypt + post a status event to the relay.
+@click.option(
+    "--to",
+    "recipients",
+    multiple=True,
+    help="Friend name or pubkey to publish to. Defaults to all friends.",
+)
+def publish_status(emoji, category, status, flow, from_stdin, recipients):
+    """Sign + encrypt + post per-recipient status events to the relay.
 
     Either pass --emoji/--category/--status or pipe JSON to stdin:
       echo '{"emoji":"🐟","category":"coding","status":"ws auth"}' \
         | fisherman publish-status --from-stdin
     """
     from fisherman.ledger import publish_status as _publish, LedgerError
+    from fisherman.friends import find_friend, list_friends
 
     if from_stdin:
         try:
@@ -1472,13 +1560,48 @@ def publish_status(emoji, category, status, flow, from_stdin):
             click.echo("nothing to publish: pass --emoji/--category/--status or --from-stdin", err=True)
             sys.exit(2)
 
-    priv, pub, group = _load_keys()
-    try:
-        eid = _publish(_ledger_url(), priv, pub, group, digest)
-    except LedgerError as e:
-        click.echo(f"error: {e}", err=True)
+    targets = []
+    if recipients:
+        for recipient in recipients:
+            friend = find_friend(recipient)
+            if not friend:
+                click.echo(f"error: friend not found: {recipient}", err=True)
+                sys.exit(1)
+            targets.append(friend)
+    else:
+        targets = list_friends()
+
+    if not targets:
+        click.echo("no friends to publish to — add a friend code first", err=True)
         sys.exit(1)
-    click.echo(f"published event_id={eid}")
+
+    priv, pub, x_priv, _x_pub = _load_keys()
+    published: list[tuple[str, int]] = []
+    for friend in targets:
+        friend_x = friend.get("encryption_pubkey")
+        if not friend_x:
+            click.echo(f"error: {friend.get('name', friend.get('pubkey_hex', 'friend'))} is missing encryption_pubkey", err=True)
+            sys.exit(1)
+        relay = friend.get("relay_url") or _ledger_url()
+        try:
+            eid = _publish(
+                relay_url=relay,
+                priv=priv,
+                pubkey_bytes=pub,
+                author_x25519_priv=x_priv,
+                recipient_pubkey_hex=friend["pubkey_hex"],
+                recipient_x25519_pubkey_hex=friend_x,
+                digest=digest,
+            )
+        except LedgerError as e:
+            click.echo(f"error: {friend.get('name', friend['pubkey_hex'][:12])}: {e}", err=True)
+            sys.exit(1)
+        published.append((friend.get("name") or friend["pubkey_hex"][:12], eid))
+
+    if len(published) == 1:
+        click.echo(f"published to {published[0][0]} event_id={published[0][1]}")
+    else:
+        click.echo(f"published to {len(published)} friends")
 
 
 @main.group(name="agent")
@@ -1782,7 +1905,7 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
     from fisherman import keys as _k
     import secrets as _s
 
-    priv, pub, _ = _load_keys()  # ensures FISH_PRIVATE_KEY is valid
+    priv, pub, _x_priv, _x_pub = _load_keys()  # ensures FISH_PRIVATE_KEY is valid
     user_seed = _k.load_seed()
     _, user_x_pub = _k.encryption_keypair(user_seed)
 
@@ -1914,7 +2037,7 @@ def mirror_pair_mint(storage_config: str | None):
     from fisherman import keys as _k
     from fisherman import storage_config as _sc
 
-    priv, pub, _ = _load_keys()
+    priv, pub, _x_priv, _x_pub = _load_keys()
     seed = _k.load_seed()
     x_priv, _x_pub = _k.encryption_keypair(seed)
     blob_key = _k.blob_at_rest_key(seed)

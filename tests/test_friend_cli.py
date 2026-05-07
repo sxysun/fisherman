@@ -1,13 +1,32 @@
 import contextlib
 import io
+import base64
 import json
 import os
 import tempfile
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
 from fisherman import cli
+from fisherman import friends
+from fisherman import keys
+from fisherman import ledger
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode()
 
 
 class FriendCliTests(unittest.TestCase):
@@ -38,6 +57,134 @@ class FriendCliTests(unittest.TestCase):
                     )
 
         self.assertEqual(json.loads(out.getvalue()), [])
+
+    def test_friend_code_v2_contains_public_encryption_key(self) -> None:
+        seed = bytes.fromhex("01" * 32)
+        _signing_priv, signing_pub = keys.signing_keypair(seed)
+        _x_priv, x_pub = keys.encryption_keypair(seed)
+
+        code = friends.encode_code(
+            "alice",
+            signing_pub.hex(),
+            x_pub.hex(),
+            "https://relay.example",
+        )
+        parsed = friends.decode_code(code)
+        raw = code.removeprefix("fish:")
+        raw += "=" * ((-len(raw)) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(raw.encode()))
+
+        self.assertEqual(payload["v"], 2)
+        self.assertEqual(parsed["pubkey_hex"], signing_pub.hex())
+        self.assertEqual(parsed["encryption_pubkey"], x_pub.hex())
+        self.assertNotIn("g", payload)
+
+    def test_friend_policy_updates_audience_and_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            friends_path = home / ".fisherman" / "friends.json"
+
+            with mock.patch("fisherman.friends._DEFAULT_PATH", str(friends_path)):
+                record = friends.add_friend(
+                    name="alice",
+                    pubkey_hex="aa" * 32,
+                    encryption_pubkey_hex="bb" * 32,
+                    relay_url="https://relay.example",
+                )
+                self.assertEqual(record["audience"], "friends")
+
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    cli.friend_policy.callback(
+                        name_or_pubkey="alice",
+                        audience="work",
+                        policy_prompt="Share project status only.",
+                        clear_policy_prompt=False,
+                        as_json=True,
+                    )
+                updated = json.loads(out.getvalue())
+                self.assertEqual(updated["audience"], "work")
+                self.assertEqual(updated["policy_prompt"], "Share project status only.")
+
+                with contextlib.redirect_stdout(io.StringIO()):
+                    cli.friend_policy.callback(
+                        name_or_pubkey="alice",
+                        audience=None,
+                        policy_prompt=None,
+                        clear_policy_prompt=True,
+                        as_json=False,
+                    )
+                stored = friends.find_friend("alice")
+                self.assertEqual(stored["audience"], "work")
+                self.assertIsNone(stored["policy_prompt"])
+
+    def test_pairwise_status_decrypts_only_for_recipient(self) -> None:
+        author_seed = bytes.fromhex("11" * 32)
+        recipient_seed = bytes.fromhex("22" * 32)
+        other_seed = bytes.fromhex("33" * 32)
+
+        author_priv, author_pub = keys.signing_keypair(author_seed)
+        author_x_priv, author_x_pub = keys.encryption_keypair(author_seed)
+        _recipient_priv, recipient_pub = keys.signing_keypair(recipient_seed)
+        recipient_x_priv, recipient_x_pub = keys.encryption_keypair(recipient_seed)
+        _other_priv, other_pub = keys.signing_keypair(other_seed)
+        other_x_priv, _other_x_pub = keys.encryption_keypair(other_seed)
+
+        stored = []
+
+        def fake_urlopen(req, timeout=0):
+            if isinstance(req, urllib.request.Request):
+                body = json.loads(req.data.decode())
+                stored.append(body)
+                return _FakeHTTPResponse({"ok": True, "event_id": 1})
+            return _FakeHTTPResponse([
+                {
+                    "event_id": i + 1,
+                    "author_pubkey": event["author_pubkey"],
+                    "recipient_tag": event["recipient_tag"],
+                    "ts": event["ts"],
+                    "ciphertext": event["ciphertext"],
+                    "sig": event["sig"],
+                }
+                for i, event in enumerate(stored)
+            ])
+
+        digest = {
+            "emoji": "F",
+            "category": "coding",
+            "status": "pairwise envelope",
+            "flow": True,
+        }
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            event_id = ledger.publish_status(
+                "https://relay.example",
+                author_priv,
+                author_pub,
+                author_x_priv,
+                recipient_pub.hex(),
+                recipient_x_pub.hex(),
+                digest,
+            )
+            recipient_events = ledger.fetch_friend_status(
+                "https://relay.example",
+                author_pub.hex(),
+                author_x_pub.hex(),
+                recipient_pub,
+                recipient_x_priv,
+            )
+            other_events = ledger.fetch_friend_status(
+                "https://relay.example",
+                author_pub.hex(),
+                author_x_pub.hex(),
+                other_pub,
+                other_x_priv,
+            )
+
+        self.assertEqual(event_id, 1)
+        self.assertEqual(recipient_events[0]["digest"], digest)
+        self.assertEqual(other_events, [])
+        self.assertNotIn("pairwise envelope", json.dumps(stored))
 
 
 if __name__ == "__main__":

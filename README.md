@@ -86,18 +86,18 @@ Friend status is shared through the relay protocol:
 ```bash
 fisherman friend code --text
 fisherman friend add <fish:...>
+fisherman friend policy alice --audience work --policy-prompt "Share project status only"
 fisherman publish-status --emoji "💻" --category coding --status "backend modes"
 fisherman friend status --text
 ```
 
 The relay stores opaque ciphertext and verifies Ed25519 signatures. It
-does not receive the status plaintext. Local, Cloud, and Self-Hosted
+does not receive the status plaintext or decryption keys. Friend codes
+contain public signing and X25519 encryption keys; each published status
+is encrypted to the intended recipient. Local, Cloud, and Self-Hosted
 users can interoperate when they use a reachable relay URL. The managed
 default is `https://relay.fisherman.teleport.computer`; self-hosted and
 local-dev users can override it with `FISH_STATUS_RELAY_URL`.
-
-The current friend-code format uses a shared friends-group key; the next
-protocol step is per-recipient status envelopes so revocation is real.
 
 ## Agent Access
 
@@ -181,7 +181,7 @@ fisherman version
   context when attestation passes and clients enforce it.
 - Self-Hosted: you trust your own server/operator.
 - Friend status relay: low-trust by design; payloads are encrypted
-  client-side and signed by the author.
+  client-side to each recipient and signed by the author.
 - Google Drive backup receives AES-GCM encrypted blobs.
 
 Do not claim "all streamed frames are encrypted before leaving the

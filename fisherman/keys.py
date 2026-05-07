@@ -2,8 +2,8 @@
 
 One root, many subkeys:
   - signing      : the ed25519 keypair (used for relay event signatures, deputy auth)
-  - friends_group: AES-256-GCM key shared with friends (you give it to them
-                   in your friend code; they use it to decrypt your status)
+  - x25519       : static encryption keypair for deputy RPC and per-recipient
+                   friend-status envelopes
   - blob_at_rest : AES-256-GCM key for at-rest blob encryption (future)
   - index_columns: AES-256-GCM key for encrypted DB columns (future)
 
@@ -26,7 +26,6 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 
-_INFO_FRIENDS_GROUP = b"fisherman/friends-group/v1"
 _INFO_BLOB_AT_REST = b"fisherman/blob-at-rest/v1"
 _INFO_INDEX_COLUMNS = b"fisherman/index-columns/v1"
 _INFO_X25519 = b"fisherman/x25519/v1"
@@ -63,11 +62,6 @@ def signing_keypair(seed: bytes) -> tuple[Ed25519PrivateKey, bytes]:
 
 def _derive(seed: bytes, info: bytes, length: int = 32) -> bytes:
     return HKDF(algorithm=hashes.SHA256(), length=length, salt=None, info=info).derive(seed)
-
-
-def friends_group_key(seed: bytes) -> bytes:
-    """32-byte AES-256-GCM key shared with all current friends."""
-    return _derive(seed, _INFO_FRIENDS_GROUP, 32)
 
 
 def blob_at_rest_key(seed: bytes) -> bytes:
