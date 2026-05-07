@@ -7,7 +7,8 @@ struct SettingsView: View {
 
     @State private var serverURL: String = ""
     @State private var backendMode: String = "local"
-    @State private var backendURL: String = ""
+    @State private var selfHostedURL: String = ""
+    @State private var cloudURL: String = ""
     @State private var statusRelayURL: String = ""
     @State private var controlPort: String = ""
     @State private var showAdvancedBackend = false
@@ -31,6 +32,7 @@ struct SettingsView: View {
     @State private var addFriendError: String?
 
     private let defaultCloudURL = "https://fisherman.teleport.computer"
+    private let defaultServerURL = "ws://localhost:9999/ingest"
 
     enum SettingsTab: String, CaseIterable {
         case server = "Backend"
@@ -106,16 +108,21 @@ struct SettingsView: View {
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
                 Button("Save") {
-                    let trimmedBackendURL = backendURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let trimmedServerURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedSelfHostedURL = selfHostedURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let trimmedCloudURL = cloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     config.backendMode = backendMode
                     if backendMode == "cloud" {
-                        config.backendURL = trimmedBackendURL.isEmpty ? defaultCloudURL : trimmedBackendURL
+                        let savedCloudURL = trimmedCloudURL.isEmpty ? defaultCloudURL : trimmedCloudURL
+                        config.backendURL = savedCloudURL
+                        config.serverURL = savedCloudURL.hasPrefix("ws://") || savedCloudURL.hasPrefix("wss://")
+                            ? ingestURL(from: savedCloudURL)
+                            : defaultServerURL
                     } else if backendMode == "self_hosted" {
-                        config.backendURL = trimmedBackendURL
-                        config.serverURL = trimmedServerURL.isEmpty ? trimmedBackendURL : trimmedServerURL
+                        config.backendURL = trimmedSelfHostedURL
+                        config.serverURL = ingestURL(from: trimmedSelfHostedURL)
                     } else {
                         config.backendURL = ""
+                        config.serverURL = defaultServerURL
                     }
                     config.statusRelayURL = statusRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     config.controlPort = controlPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "7892" : controlPort
@@ -131,7 +138,8 @@ struct SettingsView: View {
         .frame(width: 420, height: 480)
         .onAppear {
             backendMode = config.backendMode
-            backendURL = config.backendMode == "cloud" && config.backendURL.isEmpty ? defaultCloudURL : config.backendURL
+            cloudURL = config.backendMode == "cloud" && !config.backendURL.isEmpty ? config.backendURL : defaultCloudURL
+            selfHostedURL = config.backendMode == "self_hosted" ? config.backendURL : ""
             statusRelayURL = config.statusRelayURL
             serverURL = config.serverURL
             controlPort = config.controlPort
@@ -157,7 +165,7 @@ struct SettingsView: View {
                 hintText("Managed by Fisherman. Service endpoints and encrypted friend-status relay are configured automatically.")
                 hintText("Private context is only sent after the Fisherman Cloud TEE audit passes and Cloud ingest is enabled for your account.")
             } else if backendMode == "self_hosted" {
-                fieldRow("Self-hosted URL", placeholder: "wss://your-server:9999/ingest", text: $backendURL)
+                fieldRow("Self-hosted URL", placeholder: "wss://your-server:9999/ingest", text: $selfHostedURL)
                 hintText("Use this when you run your own Fisherman server. One URL is enough; Fisherman derives the activity and history endpoints automatically.")
             } else {
                 hintText("Raw context stays on this laptop. Friend status can still use the encrypted relay when configured.")
@@ -166,7 +174,7 @@ struct SettingsView: View {
             DisclosureGroup("Advanced endpoints", isExpanded: $showAdvancedBackend) {
                 VStack(alignment: .leading, spacing: 10) {
                     if backendMode == "cloud" {
-                        fieldRow("Fisherman Cloud URL", placeholder: defaultCloudURL, text: $backendURL)
+                        fieldRow("Fisherman Cloud URL", placeholder: defaultCloudURL, text: $cloudURL)
                     }
                     fieldRow("Status relay", placeholder: "https://relay.fisherman.teleport.computer", text: $statusRelayURL)
                     if backendMode != "cloud" {
@@ -630,5 +638,25 @@ struct SettingsView: View {
         newFriendServer = ""
         newFriendPort = "9998"
         addFriendError = nil
+    }
+
+    private func ingestURL(from raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme
+        else { return trimmed }
+
+        if scheme == "http" {
+            components.scheme = "ws"
+        } else if scheme == "https" {
+            components.scheme = "wss"
+        } else if scheme != "ws" && scheme != "wss" {
+            return trimmed
+        }
+
+        if components.path.isEmpty || components.path == "/" {
+            components.path = "/ingest"
+        }
+        return components.string ?? trimmed
     }
 }
