@@ -22,14 +22,6 @@ struct SettingsView: View {
     @State private var friendCodeOverrideName: String = ""
     @State private var friendCodeError: String?
 
-    // Manual add friend form (power user toggle)
-    @State private var newFriendName: String = ""
-    @State private var newFriendPubkey: String = ""
-    @State private var newFriendServer: String = ""
-    @State private var newFriendPort: String = "9998"
-    @State private var showAddFriend = false
-    @State private var showManualAdd = false
-    @State private var addFriendError: String?
     @State private var editingRelayFriendPubkey: String?
     @State private var editingFriendAudience: String = "friends"
     @State private var editingFriendPolicyPrompt: String = ""
@@ -343,7 +335,7 @@ struct SettingsView: View {
             Divider()
 
             // Existing friends list
-            if config.relayFriends.isEmpty && config.friends.isEmpty {
+            if config.relayFriends.isEmpty {
                 HStack {
                     Spacer()
                     VStack(spacing: 6) {
@@ -361,115 +353,11 @@ struct SettingsView: View {
                 ForEach(config.relayFriends, id: \.pubkeyHex) { friend in
                     relayFriendRow(friend)
                 }
-
-                ForEach(Array(config.friends.enumerated()), id: \.offset) { index, friend in
-                    friendRow(friend, index: index)
-                }
-            }
-
-            Divider()
-
-            // Manual add toggle for power users
-            if showManualAdd {
-                addFriendForm
-            } else {
-                Button {
-                    showManualAdd = true
-                } label: {
-                    Text("Or add manually...")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
             }
         }
-    }
-
-    // MARK: - Add friend form
-
-    private var addFriendForm: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Add Manually")
-                    .font(.system(size: 12, weight: .semibold))
-                Spacer()
-                Button("Cancel") {
-                    showManualAdd = false
-                    clearAddFriendForm()
-                }
-                .font(.system(size: 11))
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-            }
-
-            fieldRow("Name", placeholder: "alice", text: $newFriendName)
-            fieldRow("Public Key", placeholder: "64-char hex from their Identity tab", text: $newFriendPubkey)
-            fieldRow("Server URL", placeholder: "ws://their-server:9999", text: $newFriendServer)
-            fieldRow("Activity Port", placeholder: "9998", text: $newFriendPort)
-
-            if let error = addFriendError {
-                Text(error)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red)
-            }
-
-            Button("Add") {
-                addFriend()
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.small)
-            .disabled(newFriendName.isEmpty || newFriendPubkey.isEmpty || newFriendServer.isEmpty)
-        }
-        .padding(10)
-        .background(Color.secondary.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Reusable components
-
-    private func friendRow(_ friend: Friend, index: Int) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(friend.name)
-                    .font(.system(size: 12, weight: .medium))
-                Text("\(friend.serverURL) : \(friend.activityPort)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                Text(friend.publicKey.prefix(16) + "...")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-            }
-            Spacer()
-
-            // Sharing tier toggle
-            Button {
-                config.toggleFriendTier(name: friend.name)
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: friend.sharingTier == .high ? "eye" : "eye.slash")
-                        .font(.system(size: 11))
-                    Text(friend.sharingTier == .high ? "Full" : "Minimal")
-                        .font(.system(size: 10))
-                }
-                .foregroundStyle(friend.sharingTier == .high ? .primary : .secondary)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.mini)
-            .help(friend.sharingTier == .high
-                  ? "Showing full status detail — click for minimal"
-                  : "Showing emoji + category only — click for full detail")
-
-            Button {
-                config.removeFriend(at: index)
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.red.opacity(0.7))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.vertical, 4)
-    }
 
     private func relayFriendRow(_ friend: RelayFriend) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -724,10 +612,6 @@ struct SettingsView: View {
             friendCodeError = "Already added this friend"
             return
         }
-        if config.friends.contains(where: { $0.publicKey == code.k }) {
-            friendCodeError = "Already added this friend"
-            return
-        }
 
         let name = friendCodeOverrideName.trimmingCharacters(in: .whitespaces)
         var args = ["friend", "add", friendCodeInput]
@@ -746,38 +630,6 @@ struct SettingsView: View {
         parsedFriendCode = nil
         friendCodeOverrideName = ""
         friendCodeError = nil
-    }
-
-    private func addFriend() {
-        addFriendError = nil
-
-        let name = newFriendName.trimmingCharacters(in: .whitespaces)
-        let pubkey = newFriendPubkey.trimmingCharacters(in: .whitespaces)
-        let server = newFriendServer.trimmingCharacters(in: .whitespaces)
-        let port = newFriendPort.trimmingCharacters(in: .whitespaces)
-
-        guard !name.isEmpty else { addFriendError = "Name is required"; return }
-        guard pubkey.count == 64, pubkey.allSatisfy({ $0.isHexDigit }) else {
-            addFriendError = "Public key must be 64 hex characters"
-            return
-        }
-        guard server.hasPrefix("ws://") || server.hasPrefix("wss://") else {
-            addFriendError = "Server URL must start with ws:// or wss://"
-            return
-        }
-
-        config.addFriend(name: name, publicKey: pubkey, serverURL: server, activityPort: port.isEmpty ? "9998" : port)
-        config.registerFriendOnServer(pubkey: pubkey)
-        showManualAdd = false
-        clearAddFriendForm()
-    }
-
-    private func clearAddFriendForm() {
-        newFriendName = ""
-        newFriendPubkey = ""
-        newFriendServer = ""
-        newFriendPort = "9998"
-        addFriendError = nil
     }
 
     private func ingestURL(from raw: String) -> String {

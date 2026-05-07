@@ -111,8 +111,6 @@ INGEST_AUTH_TOKEN=${AUTH_TOKEN}
 # Ed25519 identity (auto-generated — used for FishKey auth and friend codes)
 FISH_PRIVATE_KEY=${FISH_PRIVATE_KEY}
 
-# Friends allow-list (managed via /api/friends — no need to edit manually)
-# FISH_FRIENDS=
 EOF
     echo "    Created .env with auto-generated keys"
 fi

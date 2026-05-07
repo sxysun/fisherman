@@ -42,19 +42,6 @@ CREATE INDEX IF NOT EXISTS idx_frames_user_activity_ts
     ON frames (user_pubkey, ts DESC)
     WHERE activity IS NOT NULL;
 
--- Pokes: lightweight nudges between friends
-CREATE TABLE IF NOT EXISTS pokes (
-    id          BIGSERIAL PRIMARY KEY,
-    to_pubkey   TEXT,
-    from_pubkey TEXT NOT NULL,
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
-
-ALTER TABLE pokes ADD COLUMN IF NOT EXISTS to_pubkey TEXT;
-
-CREATE INDEX IF NOT EXISTS idx_pokes_created ON pokes (created_at);
-CREATE INDEX IF NOT EXISTS idx_pokes_to_created ON pokes (to_pubkey, created_at DESC);
-
 -- Audio transcripts captured during meetings/calls. Daemon only forwards
 -- these while its meeting detector says the user is in a call.
 CREATE TABLE IF NOT EXISTS audio_transcripts (

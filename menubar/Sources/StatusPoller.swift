@@ -126,33 +126,9 @@ final class StatusPoller: @unchecked Sendable {
             group.leave()
         }
 
-        // Poll each friend's server
-        for friend in config.friends {
-            group.enter()
-            pollSingleActivity(
-                id: friend.name,
-                name: friend.name,
-                serverURL: friend.serverURL,
-                activityPort: friend.activityPort
-            ) { activity in
-                if let activity { collector.append(activity) }
-                group.leave()
-            }
-        }
-
         group.notify(queue: .main) { [weak self] in
             guard let self else { return }
             var activities = collector.sorted()
-
-            // Set sharing tier for each friend
-            activities = activities.map { user in
-                if user.id == "me" { return user }
-                var updated = user
-                if let friend = self.config.friends.first(where: { $0.name == user.name }) {
-                    updated.sharingTier = friend.sharingTier
-                }
-                return updated
-            }
 
             // Preserve history from previous state
             activities = activities.map { user in
@@ -165,11 +141,6 @@ final class StatusPoller: @unchecked Sendable {
             }
 
             self.commitActivities(activities, preservingRelay: true)
-
-            // Surface pokes from "me" entry
-            if let me = activities.first(where: { $0.id == "me" }), !me.pokes.isEmpty {
-                self.state.incomingPokes = me.pokes
-            }
         }
     }
 
@@ -300,21 +271,6 @@ final class StatusPoller: @unchecked Sendable {
             let stale = json["stale"] as? Bool ?? false
             let inFlow = json["flow"] as? Bool ?? false
 
-            // Parse pokes
-            var pokes: [Poke] = []
-            if let rawPokes = json["pokes"] as? [[String: Any]] {
-                let fmt = ISO8601DateFormatter()
-                fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                let fmt2 = ISO8601DateFormatter()
-                fmt2.formatOptions = [.withInternetDateTime]
-                pokes = rawPokes.compactMap { p in
-                    guard let from = p["from"] as? String,
-                          let atStr = p["at"] as? String else { return nil }
-                    let at = fmt.date(from: atStr) ?? fmt2.date(from: atStr) ?? Date()
-                    return Poke(fromShort: from, at: at)
-                }
-            }
-
             var activity = UserActivity(
                 id: id,
                 name: name,
@@ -324,7 +280,6 @@ final class StatusPoller: @unchecked Sendable {
                 stale: stale
             )
             activity.inFlow = inFlow
-            activity.pokes = pokes
             completion(activity)
         }.resume()
     }
@@ -377,66 +332,6 @@ final class StatusPoller: @unchecked Sendable {
         }
     }
 
-    // MARK: - Poke
-
-    func sendPoke(to friend: Friend) {
-        guard let wsURL = URL(string: friend.serverURL),
-              let host = wsURL.host else { return }
-        let scheme = friend.serverURL.hasPrefix("wss://") ? "https" : "http"
-        let httpURL = "\(scheme)://\(host):\(friend.activityPort)/api/poke"
-        guard let url = URL(string: httpURL) else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5.0
-        if let authValue = config.signRequest() {
-            request.setValue(authValue, forHTTPHeaderField: "Authorization")
-        }
-
-        session.dataTask(with: request) { _, response, error in
-            if let error {
-                NSLog("poke_failed to \(friend.name): \(error.localizedDescription)")
-                return
-            }
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 200 {
-                    NSLog("poke_sent to \(friend.name)")
-                } else {
-                    NSLog("poke_failed to \(friend.name): HTTP \(http.statusCode)")
-                }
-            }
-        }.resume()
-    }
-
-    func clearMyPokes() {
-        clearMyPokes(bases: config.ownHTTPBaseURLCandidates(), index: 0)
-    }
-
-    private func clearMyPokes(bases: [String], index: Int) {
-        guard index < bases.count else { return }
-        let httpURL = "\(bases[index])/api/pokes"
-        guard let url = URL(string: httpURL) else { return }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "DELETE"
-        request.timeoutInterval = 5.0
-        if let authValue = config.signRequest() {
-            request.setValue(authValue, forHTTPHeaderField: "Authorization")
-        }
-
-        session.dataTask(with: request) { [weak self] _, response, error in
-            if error != nil || !(((response as? HTTPURLResponse)?.statusCode ?? 0) >= 200
-                && ((response as? HTTPURLResponse)?.statusCode ?? 0) < 300)
-            {
-                self?.clearMyPokes(bases: bases, index: index + 1)
-                return
-            }
-            DispatchQueue.main.async {
-                self?.state.incomingPokes = []
-            }
-        }.resume()
-    }
-
     // MARK: - History polling
 
     private func pollAllHistory() {
@@ -450,19 +345,6 @@ final class StatusPoller: @unchecked Sendable {
         ) { id, entries in
             historyCollector.set(id: id, entries: entries)
             group.leave()
-        }
-
-        // Poll each friend's server
-        for friend in config.friends {
-            group.enter()
-            pollSingleHistory(
-                id: friend.name,
-                serverURL: friend.serverURL,
-                activityPort: friend.activityPort
-            ) { id, entries in
-                historyCollector.set(id: id, entries: entries)
-                group.leave()
-            }
         }
 
         group.notify(queue: .main) { [weak self] in

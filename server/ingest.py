@@ -38,9 +38,8 @@ except ImportError:
 from crypto import encrypt_json, encrypt_text, decrypt_text, decrypt_json
 from storage import R2Storage, create_storage
 from auth import (
-    load_signing_key, load_friends,
+    load_signing_key,
     auth_context, is_multi_tenant_enabled,
-    add_friend, remove_friend, get_friends_hex,
     AuthContext,
 )
 
@@ -144,21 +143,12 @@ async def _backfill_single_tenant_owner(db: asyncpg.Pool, owner_pubkey: bytes) -
             "UPDATE audio_transcripts SET device_pubkey = $1 WHERE device_pubkey IS NULL",
             owner_hex,
         )
-        await conn.execute(
-            "UPDATE pokes SET to_pubkey = $1 WHERE to_pubkey IS NULL",
-            owner_hex,
-        )
     log.info("unscoped_rows_scoped_to_owner", owner=owner_hex[:16])
 
 
-def _require_http_context(
-    request: "web.Request",
-    *,
-    allow_friend: bool = False,
-    owner_only: bool = False,
-) -> AuthContext | None:
+def _require_http_context(request: "web.Request") -> AuthContext | None:
     auth_header = request.headers.get("Authorization", "")
-    return auth_context(auth_header, allow_friend=allow_friend, owner_only=owner_only)
+    return auth_context(auth_header)
 
 
 async def _init_db(pool: asyncpg.Pool) -> None:
@@ -418,9 +408,9 @@ When in doubt about privacy, use a generic topic descriptor.
 async def _http_current_activity(request: "web.Request") -> "web.Response":
     """HTTP endpoint: GET /api/current_activity - returns latest activity.
 
-    Auth: FishKey ed25519 signature (owner or friend).
+    Auth: FishKey ed25519 signature (self-hosted owner or Cloud tenant).
     """
-    ctx = _require_http_context(request, allow_friend=True)
+    ctx = _require_http_context(request)
     if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
@@ -428,23 +418,6 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
     db: asyncpg.Pool = request.app["db"]
     loop = asyncio.get_running_loop()
     user_hex = ctx.user_hex
-
-    async def _fetch_pokes() -> list[dict]:
-        try:
-            async with db.acquire() as conn:
-                poke_rows = await conn.fetch(
-                    f"""
-                    SELECT from_pubkey, created_at
-                    FROM pokes
-                    WHERE {_tenant_predicate("to_pubkey")}
-                    ORDER BY created_at DESC
-                    LIMIT 10
-                    """,
-                    user_hex,
-                )
-            return [{"from": r["from_pubkey"][:16], "at": r["created_at"].isoformat()} for r in poke_rows]
-        except Exception:
-            return []
 
     try:
         async with db.acquire() as conn:
@@ -463,7 +436,6 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
             return web.json_response({
                 "activity": None,
                 "message": "No activity yet",
-                "pokes": await _fetch_pokes(),
             })
 
         ts = row["ts"]
@@ -476,7 +448,6 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
                 "updated_at": ts.isoformat(),
                 "stale": True,
                 "flow": False,
-                "pokes": await _fetch_pokes(),
             })
 
         activity = await loop.run_in_executor(_pool, decrypt_json, row["activity"])
@@ -525,7 +496,6 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
             "updated_at": ts.isoformat(),
             "stale": False,
             "flow": flow,
-            "pokes": await _fetch_pokes(),
         })
 
     except Exception:
@@ -536,10 +506,10 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
 async def _http_activity_history(request: "web.Request") -> "web.Response":
     """HTTP endpoint: GET /api/activity_history - returns recent activity entries.
 
-    Auth: FishKey ed25519 signature (owner or friend).
+    Auth: FishKey ed25519 signature (self-hosted owner or Cloud tenant).
     Query params: limit (default 10, max 50)
     """
-    ctx = _require_http_context(request, allow_friend=True)
+    ctx = _require_http_context(request)
     if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
@@ -580,119 +550,6 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
 
     except Exception:
         log.error("http_activity_history_error", exc_info=True)
-        return web.json_response({"error": "Internal server error"}, status=500)
-
-
-async def _http_get_friends(request: "web.Request") -> "web.Response":
-    """GET /api/friends - list all friend pubkeys (owner only)."""
-    if is_multi_tenant_enabled():
-        return web.json_response(
-            {"error": "Friends are managed by the relay in multi-tenant Cloud"},
-            status=501,
-        )
-
-    ctx = _require_http_context(request, owner_only=True)
-    if ctx is None:
-        return web.json_response({"error": "Unauthorized"}, status=401)
-
-    friends = get_friends_hex()
-    return web.json_response({"friends": friends, "count": len(friends)})
-
-
-async def _http_add_friend(request: "web.Request") -> "web.Response":
-    """POST /api/friends - add a friend pubkey (owner only)."""
-    if is_multi_tenant_enabled():
-        return web.json_response(
-            {"error": "Friends are managed by the relay in multi-tenant Cloud"},
-            status=501,
-        )
-
-    ctx = _require_http_context(request, owner_only=True)
-    if ctx is None:
-        return web.json_response({"error": "Unauthorized"}, status=401)
-
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
-
-    pk = body.get("pubkey", "").strip()
-    if not pk or len(pk) != 64:
-        return web.json_response({"error": "pubkey must be 64 hex chars"}, status=400)
-
-    if add_friend(pk):
-        log.info("friend_added_via_api", pubkey=pk[:16])
-        return web.json_response({"ok": True, "pubkey": pk})
-    return web.json_response({"error": "Invalid pubkey hex"}, status=400)
-
-
-async def _http_delete_friend(request: "web.Request") -> "web.Response":
-    """DELETE /api/friends - remove a friend pubkey (owner only)."""
-    if is_multi_tenant_enabled():
-        return web.json_response(
-            {"error": "Friends are managed by the relay in multi-tenant Cloud"},
-            status=501,
-        )
-
-    ctx = _require_http_context(request, owner_only=True)
-    if ctx is None:
-        return web.json_response({"error": "Unauthorized"}, status=401)
-
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"error": "Invalid JSON"}, status=400)
-
-    pk = body.get("pubkey", "").strip()
-    if not pk:
-        return web.json_response({"error": "pubkey is required"}, status=400)
-
-    remove_friend(pk)
-    log.info("friend_removed_via_api", pubkey=pk[:16])
-    return web.json_response({"ok": True, "pubkey": pk})
-
-
-async def _http_send_poke(request: "web.Request") -> "web.Response":
-    """POST /api/poke — send a nudge. Auth: friend or owner."""
-    ctx = _require_http_context(request, allow_friend=True)
-    if ctx is None:
-        return web.json_response({"error": "Unauthorized"}, status=401)
-
-    db: asyncpg.Pool = request.app["db"]
-    try:
-        async with db.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO pokes (to_pubkey, from_pubkey) VALUES ($1, $2)",
-                ctx.user_hex,
-                ctx.actor_hex,
-            )
-        log.info(
-            "poke_received",
-            to_pubkey=ctx.user_hex[:16],
-            from_pubkey=ctx.actor_hex[:16],
-        )
-        return web.json_response({"ok": True})
-    except Exception:
-        log.error("poke_error", exc_info=True)
-        return web.json_response({"error": "Internal server error"}, status=500)
-
-
-async def _http_clear_pokes(request: "web.Request") -> "web.Response":
-    """DELETE /api/pokes — clear all pokes (owner only, after reading them)."""
-    ctx = _require_http_context(request, owner_only=True)
-    if ctx is None:
-        return web.json_response({"error": "Unauthorized"}, status=401)
-
-    db: asyncpg.Pool = request.app["db"]
-    try:
-        async with db.acquire() as conn:
-            await conn.execute(
-                f"DELETE FROM pokes WHERE {_tenant_predicate('to_pubkey')}",
-                ctx.user_hex,
-            )
-        return web.json_response({"ok": True})
-    except Exception:
-        log.error("clear_pokes_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
@@ -818,9 +675,8 @@ async def _handle_connection(
 
 
 async def _run(host: str, port: int) -> None:
-    # Load ed25519 signing key and friends list
+    # Load ed25519 signing key
     _priv, owner_pubkey = load_signing_key()
-    load_friends()
 
     database_url = os.environ["DATABASE_URL"]
     db = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
@@ -845,11 +701,6 @@ async def _run(host: str, port: int) -> None:
         app["db"] = db
         app.router.add_get("/api/current_activity", _http_current_activity)
         app.router.add_get("/api/activity_history", _http_activity_history)
-        app.router.add_get("/api/friends", _http_get_friends)
-        app.router.add_post("/api/friends", _http_add_friend)
-        app.router.add_delete("/api/friends", _http_delete_friend)
-        app.router.add_post("/api/poke", _http_send_poke)
-        app.router.add_delete("/api/pokes", _http_clear_pokes)
         http_runner = web.AppRunner(app)
         await http_runner.setup()
         http_port = int(os.environ.get("HTTP_API_PORT", "9998"))

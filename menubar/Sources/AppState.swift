@@ -48,14 +48,8 @@ enum ActivityCategory: String {
     }
 }
 
-struct Poke: Identifiable {
-    let id = UUID()
-    let fromShort: String   // first 16 chars of pubkey
-    let at: Date
-}
-
 struct UserActivity: Identifiable {
-    let id: String          // "me" or friend name
+    let id: String          // "me" or "relay:<pubkey>"
     let name: String
     let emoji: String
     let category: String
@@ -64,8 +58,6 @@ struct UserActivity: Identifiable {
     var history: [ActivityEntry] = []
     var sessionStart: Date?
     var inFlow: Bool = false
-    var pokes: [Poke] = []
-    var sharingTier: SharingTier = .high
 
     var sessionDuration: TimeInterval {
         guard let start = sessionStart else { return 0 }
@@ -106,7 +98,6 @@ final class AppState {
 
     // Hangout suggestion
     var hangoutSuggestion: String?   // e.g. "You and 2 friends are winding down"
-    var incomingPokes: [Poke] = []   // pokes received on "me"
 
     var statusColor: NSColor {
         switch status {

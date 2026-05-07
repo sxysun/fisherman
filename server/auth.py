@@ -1,7 +1,6 @@
-"""Ed25519 key-based authentication for P2P fisherman servers."""
+"""Ed25519 key-based authentication for Fisherman ingest servers."""
 
 from dataclasses import dataclass
-import json
 import os
 import time
 
@@ -18,10 +17,8 @@ log = structlog.get_logger()
 # Module-level state (initialized at startup)
 _private_key: Ed25519PrivateKey | None = None
 _public_key_bytes: bytes = b""
-_friends: set[bytes] = set()
 
 MAX_TIMESTAMP_DRIFT = 60  # seconds
-FRIENDS_FILE = os.path.join(os.path.dirname(__file__), "friends.json")
 
 
 @dataclass(frozen=True)
@@ -48,7 +45,7 @@ def _env_truthy(name: str) -> bool:
 def is_multi_tenant_enabled() -> bool:
     """Return whether this process is running as Fisherman Cloud ingest.
 
-    Self-hosted servers keep the original owner/friend trust model. Cloud ingest
+    Self-hosted servers accept only the server owner's FishKey. Cloud ingest
     accepts any valid FishKey as that user's tenant identity; paid enrollment and
     attestation policy can be layered above this without changing table scope.
     """
@@ -79,76 +76,6 @@ def load_signing_key() -> tuple[Ed25519PrivateKey, bytes]:
 
     log.info("signing_key_loaded", pubkey=_public_key_bytes.hex())
     return _private_key, _public_key_bytes
-
-
-def load_friends() -> set[bytes]:
-    """Load allowed friend public keys.
-
-    Reads from friends.json first; falls back to FISH_FRIENDS env var.
-    """
-    global _friends
-    _friends = set()
-
-    # Try friends.json first
-    if os.path.exists(FRIENDS_FILE):
-        try:
-            with open(FRIENDS_FILE) as f:
-                data = json.load(f)
-            for hex_key in data.get("friends", []):
-                hex_key = hex_key.strip()
-                if hex_key:
-                    _friends.add(bytes.fromhex(hex_key))
-            log.info("friends_loaded", source="friends.json", count=len(_friends))
-            return _friends
-        except Exception:
-            log.warning("friends_json_load_failed", exc_info=True)
-
-    # Fall back to env var
-    friends_str = os.environ.get("FISH_FRIENDS", "")
-    if friends_str:
-        for hex_key in friends_str.split(","):
-            hex_key = hex_key.strip()
-            if hex_key:
-                try:
-                    _friends.add(bytes.fromhex(hex_key))
-                except ValueError:
-                    log.warning("invalid_friend_key", key=hex_key)
-
-    log.info("friends_loaded", source="env", count=len(_friends))
-    return _friends
-
-
-def _persist_friends() -> None:
-    """Write current friends set to friends.json."""
-    data = {"friends": sorted(f.hex() for f in _friends)}
-    with open(FRIENDS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-    log.info("friends_persisted", count=len(_friends))
-
-
-def add_friend(pubkey_hex: str) -> bool:
-    """Add a friend pubkey (hex) to the allow-list and persist."""
-    try:
-        _friends.add(bytes.fromhex(pubkey_hex))
-    except ValueError:
-        return False
-    _persist_friends()
-    return True
-
-
-def remove_friend(pubkey_hex: str) -> bool:
-    """Remove a friend pubkey (hex) from the allow-list and persist."""
-    try:
-        _friends.discard(bytes.fromhex(pubkey_hex))
-    except ValueError:
-        return False
-    _persist_friends()
-    return True
-
-
-def get_friends_hex() -> list[str]:
-    """Return all friend pubkeys as hex strings."""
-    return sorted(f.hex() for f in _friends)
 
 
 def verify_request(auth_header: str) -> tuple[bool, bytes]:
@@ -195,22 +122,7 @@ def is_owner(pubkey_bytes: bytes) -> bool:
     return pubkey_bytes == _public_key_bytes and len(pubkey_bytes) > 0
 
 
-def is_friend(pubkey_bytes: bytes) -> bool:
-    """Check if pubkey is in the friends allow-list."""
-    return pubkey_bytes in _friends
-
-
-def is_authorized(pubkey_bytes: bytes) -> bool:
-    """Check if pubkey is owner or friend."""
-    return is_owner(pubkey_bytes) or is_friend(pubkey_bytes)
-
-
-def auth_context(
-    auth_header: str,
-    *,
-    allow_friend: bool = False,
-    owner_only: bool = False,
-) -> AuthContext | None:
+def auth_context(auth_header: str) -> AuthContext | None:
     """Verify auth and return the tenant namespace the caller can access."""
     valid, pubkey = verify_request(auth_header)
     if not valid:
@@ -221,9 +133,6 @@ def auth_context(
 
     if is_owner(pubkey):
         return AuthContext(actor_pubkey=pubkey, user_pubkey=_public_key_bytes, role="owner")
-
-    if allow_friend and not owner_only and is_friend(pubkey) and _public_key_bytes:
-        return AuthContext(actor_pubkey=pubkey, user_pubkey=_public_key_bytes, role="friend")
 
     return None
 

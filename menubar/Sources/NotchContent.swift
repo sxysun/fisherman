@@ -19,13 +19,6 @@ struct CompactTrailing: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            // Poke indicator
-            if !state.incomingPokes.isEmpty {
-                Text("👋")
-                    .font(.system(size: 11))
-                    .opacity(0.9)
-            }
-
             // Emoji + flow badge only — duration/timeline live in expanded view
             // to keep the compact strip narrow and the menu bar visible.
             ForEach(state.allActivity.prefix(5)) { user in
@@ -86,11 +79,8 @@ struct ExpandedContent: View {
     let onViewFrames: () -> Void
     let onSettings: () -> Void
     let onQuit: () -> Void
-    var onPoke: ((String) -> Void)?       // friend name -> send poke
-    var onClearPokes: (() -> Void)?
 
     @State private var hoveredUserId: String?
-    @State private var pokedUsers: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -111,25 +101,6 @@ struct ExpandedContent: View {
             processRow(name: "fisherman", ok: state.fishermanHealthy)
 
             Divider()
-
-            // Incoming pokes
-            if !state.incomingPokes.isEmpty {
-                HStack(spacing: 6) {
-                    Text("👋")
-                        .font(.system(size: 14))
-                    Text("\(state.incomingPokes.count) poke\(state.incomingPokes.count == 1 ? "" : "s")")
-                        .font(.system(size: 12, weight: .medium))
-                    Spacer()
-                    Button("Clear") {
-                        onClearPokes?()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                }
-                .padding(6)
-                .background(Color(nsColor: .systemYellow).opacity(0.15))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
 
             // Hangout suggestion
             if let suggestion = state.hangoutSuggestion {
@@ -175,23 +146,6 @@ struct ExpandedContent: View {
 
                             Spacer()
 
-                            // Poke button (for friends, not "me")
-                            if user.id != "me" {
-                                Button(action: {
-                                    pokedUsers.insert(user.id)
-                                    onPoke?(user.name)
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                                        pokedUsers.remove(user.id)
-                                    }
-                                }) {
-                                    Text(pokedUsers.contains(user.id) ? "✓" : "👋")
-                                        .font(.system(size: 10))
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.mini)
-                                .disabled(pokedUsers.contains(user.id))
-                            }
-
                             // Timeline bar in expanded view
                             if !user.history.isEmpty {
                                 TimelineBar(history: user.history)
@@ -199,8 +153,8 @@ struct ExpandedContent: View {
                             }
                         }
 
-                        // Status line (only for high-tier or "me")
-                        if !user.status.isEmpty && (user.id == "me" || user.sharingTier == .high) {
+                        // Status line
+                        if !user.status.isEmpty {
                             Text(user.status)
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
@@ -208,9 +162,8 @@ struct ExpandedContent: View {
                                 .padding(.leading, 20)
                         }
 
-                        // Hover history expansion (only for high-tier or "me")
-                        if hoveredUserId == user.id, !user.history.isEmpty,
-                           (user.id == "me" || user.sharingTier == .high) {
+                        // Hover history expansion
+                        if hoveredUserId == user.id, !user.history.isEmpty {
                             VStack(alignment: .leading, spacing: 3) {
                                 ForEach(user.history.prefix(5)) { entry in
                                     HStack(spacing: 4) {

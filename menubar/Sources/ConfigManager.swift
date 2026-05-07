@@ -2,19 +2,6 @@ import CryptoKit
 import Foundation
 import Observation
 
-enum SharingTier: String, Sendable {
-    case low = "low"    // emoji + category only (is this person free?)
-    case high = "high"  // full status + history (what are they working on?)
-}
-
-struct Friend: Sendable {
-    let name: String
-    let publicKey: String      // hex
-    let serverURL: String      // e.g. "ws://1.2.3.4:9999"
-    let activityPort: String   // e.g. "9998"
-    var sharingTier: SharingTier = .high
-}
-
 struct RelayFriend: Sendable {
     let name: String
     let pubkeyHex: String
@@ -51,8 +38,7 @@ final class ConfigManager {
     // Display name for friend codes
     var displayName: String = NSFullUserName().components(separatedBy: " ").first ?? NSUserName()
 
-    // P2P friends
-    var friends: [Friend] = []
+    // Relay/E2EE friends
     var relayFriends: [RelayFriend] = []
 
     /// Lines from .env that we don't manage (comments, unknown keys)
@@ -193,13 +179,6 @@ final class ConfigManager {
                     loadedAnyManagedValue = true
                 }
                 if trackLines { knownKeyLines["FISH_DISPLAY_NAME", default: []].append(i) }
-            } else if let value = extractValue(trimmed, key: "FISH_FRIENDS") {
-                if shouldLoad("FISH_FRIENDS", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
-                    friends = parseFriends(value)
-                    loadedKeys.insert("FISH_FRIENDS")
-                    loadedAnyManagedValue = true
-                }
-                if trackLines { knownKeyLines["FISH_FRIENDS", default: []].append(i) }
             } else {
                 if trackLines {
                     passthroughLines.append((index: i, line: line))
@@ -228,9 +207,6 @@ final class ConfigManager {
         var outputLines = existingLines
         var keysWritten = Set<String>()
 
-        let friendsStr = friends.map { "\($0.name)|\($0.publicKey)|\($0.serverURL)|\($0.activityPort)|\($0.sharingTier.rawValue)" }
-            .joined(separator: ",")
-
         let updates: [(String, String)] = [
             ("FISH_BACKEND_MODE", backendMode),
             ("FISH_BACKEND_URL", backendURL),
@@ -238,7 +214,6 @@ final class ConfigManager {
             ("FISH_CONTROL_PORT", controlPort),
             ("FISH_PRIVATE_KEY", privateKeyHex),
             ("FISH_DISPLAY_NAME", displayName),
-            ("FISH_FRIENDS", friendsStr),
         ]
 
         // Track which line indices to delete (duplicates of any tracked key)
@@ -271,7 +246,6 @@ final class ConfigManager {
         }
 
         for (key, value) in updates where !keysWritten.contains(key) {
-            if key == "FISH_FRIENDS" && value.isEmpty { continue }
             outputLines.append("\(key)=\(value)")
         }
 
@@ -314,14 +288,6 @@ final class ConfigManager {
         return ports
     }
 
-    func ownHTTPBaseURLCandidates() -> [String] {
-        guard let url = URL(string: effectiveOwnServerURL), let host = url.host else {
-            return ["http://localhost:9998"]
-        }
-        let scheme = effectiveOwnServerURL.hasPrefix("wss://") ? "https" : "http"
-        return ownActivityPortCandidates().map { "\(scheme)://\(host):\($0)" }
-    }
-
     // MARK: - Ed25519 signing
 
     /// Create FishKey auth header value for HTTP requests.
@@ -338,30 +304,6 @@ final class ConfigManager {
             Data($0).map { String(format: "%02x", $0) }.joined()
         }
         return "FishKey \(publicKeyHex):\(timestamp):\(sigHex)"
-    }
-
-    // MARK: - Friend management
-
-    func addFriend(name: String, publicKey: String, serverURL: String, activityPort: String) {
-        let friend = Friend(name: name, publicKey: publicKey, serverURL: serverURL, activityPort: activityPort)
-        friends.append(friend)
-        save()
-    }
-
-    func toggleFriendTier(name: String) {
-        guard let idx = friends.firstIndex(where: { $0.name == name }) else { return }
-        let current = friends[idx].sharingTier
-        friends[idx].sharingTier = (current == .high) ? .low : .high
-        save()
-    }
-
-    func removeFriend(at index: Int) {
-        guard index >= 0, index < friends.count else { return }
-        let friend = friends[index]
-        friends.remove(at: index)
-        save()
-        // Also remove from server allow-list
-        deregisterFriendOnServer(pubkey: friend.publicKey)
     }
 
     func refreshRelayFriends() {
@@ -470,78 +412,6 @@ final class ConfigManager {
         return try? JSONDecoder().decode(FriendCode.self, from: data)
     }
 
-    /// POST friend pubkey to own server's /api/friends (owner auth).
-    func registerFriendOnServer(pubkey: String) {
-        guard let authValue = signRequest() else { return }
-        Self.mutateFriendOnServer(
-            method: "POST",
-            pubkey: pubkey,
-            authValue: authValue,
-            bases: ownHTTPBaseURLCandidates(),
-            index: 0
-        )
-    }
-
-    /// DELETE friend pubkey from own server's /api/friends.
-    private func deregisterFriendOnServer(pubkey: String) {
-        guard let authValue = signRequest() else { return }
-        Self.mutateFriendOnServer(
-            method: "DELETE",
-            pubkey: pubkey,
-            authValue: authValue,
-            bases: ownHTTPBaseURLCandidates(),
-            index: 0
-        )
-    }
-
-    private static func mutateFriendOnServer(
-        method: String,
-        pubkey: String,
-        authValue: String,
-        bases: [String],
-        index: Int
-    ) {
-        guard index < bases.count,
-              let url = URL(string: "\(bases[index])/api/friends")
-        else {
-            NSLog("[Fisherman] \(method) friend failed on all activity endpoints")
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(authValue, forHTTPHeaderField: "Authorization")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["pubkey": pubkey])
-
-        URLSession.shared.dataTask(with: request) { _, response, error in
-            if let error {
-                NSLog("[Fisherman] \(method) friend failed at \(bases[index]): \(error)")
-                Self.mutateFriendOnServer(
-                    method: method,
-                    pubkey: pubkey,
-                    authValue: authValue,
-                    bases: bases,
-                    index: index + 1
-                )
-                return
-            }
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if (200..<300).contains(status) {
-                NSLog("[Fisherman] \(method) friend response: \(status) at \(bases[index])")
-            } else {
-                NSLog("[Fisherman] \(method) friend response: \(status) at \(bases[index])")
-                Self.mutateFriendOnServer(
-                    method: method,
-                    pubkey: pubkey,
-                    authValue: authValue,
-                    bases: bases,
-                    index: index + 1
-                )
-            }
-        }.resume()
-    }
-
     // MARK: - Private helpers
 
     private func normalizeBackendURLs(loadedKeys: Set<String>, needsSave: inout Bool) {
@@ -599,22 +469,6 @@ final class ConfigManager {
         privateKeyHex = key.rawRepresentation.map { String(format: "%02x", $0) }.joined()
         publicKeyHex = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
         NSLog("[Fisherman] generated new ed25519 key pair, pubkey: \(publicKeyHex)")
-    }
-
-    private func parseFriends(_ value: String) -> [Friend] {
-        guard !value.isEmpty else { return [] }
-        return value.split(separator: ",").compactMap { entry in
-            let parts = entry.split(separator: "|", maxSplits: 4)
-            guard parts.count >= 4 else { return nil }
-            let tier = parts.count >= 5 ? (SharingTier(rawValue: String(parts[4])) ?? .high) : .high
-            return Friend(
-                name: String(parts[0]),
-                publicKey: String(parts[1]),
-                serverURL: String(parts[2]),
-                activityPort: String(parts[3]),
-                sharingTier: tier
-            )
-        }
     }
 
     private func extractValue(_ line: String, key: String) -> String? {
