@@ -52,7 +52,7 @@ jobs:
           from fisherman.attestation import keccak256, function_selector, parse_tdx_quote, replay_event_log
           from fisherman.blob_store import MemoryBlobStore, LocalFSBlobStore, S3CompatibleBlobStore, WebDAVBlobStore, GoogleDriveBlobStore, from_config
           from fisherman.sync import MirrorSync, decrypt_uploaded
-          from fisherman.keys import friends_group_key, signing_keypair, encryption_keypair
+          from fisherman.keys import signing_keypair, encryption_keypair
           from fisherman.rpc import build_request, parse_request, encrypt_response, decrypt_response
           from fisherman.friends import encode_code, decode_code
           from fisherman.deputy import encode_setup_token, decode_setup_token
