@@ -4,6 +4,8 @@ Receives frames from the daemon, encrypts sensitive fields,
 uploads images to R2, and stores metadata in Postgres.
 """
 
+from __future__ import annotations
+
 import asyncio
 import base64
 import json
@@ -12,6 +14,7 @@ import re
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from http import HTTPStatus
 
 from dotenv import load_dotenv
@@ -21,6 +24,7 @@ import asyncpg
 import structlog
 import websockets
 from websockets.datastructures import Headers
+from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Response
 
 log = structlog.get_logger()
@@ -32,11 +36,12 @@ except ImportError:
     log.warning("aiohttp_not_installed", msg="Install aiohttp for HTTP API endpoint")
 
 from crypto import encrypt_json, encrypt_text, decrypt_text, decrypt_json
-from storage import R2Storage, LocalStorage, create_storage
+from storage import R2Storage, create_storage
 from auth import (
-    load_signing_key, load_friends, verify_request,
-    is_owner, is_authorized,
+    load_signing_key, load_friends,
+    auth_context, is_multi_tenant_enabled,
     add_friend, remove_friend, get_friends_hex,
+    AuthContext,
 )
 
 try:
@@ -54,17 +59,100 @@ log = structlog.get_logger()
 _pool = ThreadPoolExecutor(max_workers=4)
 
 
+def serve(*args, **kwargs):
+    return websockets.serve(*args, **kwargs)
+
+
 def _auth_check(connection, request):
-    """Reject WebSocket connections without valid FishKey auth (owner only)."""
+    """Reject WebSocket connections without valid FishKey auth."""
     auth = request.headers.get("Authorization", "")
 
-    if auth.startswith("FishKey "):
-        valid, pubkey = verify_request(auth)
-        if valid and is_owner(pubkey):
-            return  # owner authenticated
+    ctx = auth_context(auth)
+    if ctx is not None and ctx.role in {"owner", "tenant"}:
+        return
 
     log.warning("ws_auth_rejected", remote=connection.remote_address)
     return Response(HTTPStatus.UNAUTHORIZED, "Unauthorized", Headers())
+
+
+def _tenant_predicate(column: str = "user_pubkey") -> str:
+    if is_multi_tenant_enabled():
+        return f"{column} = $1"
+    return f"({column} = $1 OR {column} IS NULL)"
+
+
+def _auth_header_from_ws(ws: websockets.WebSocketServerProtocol) -> str:
+    request = getattr(ws, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        return headers.get("Authorization", "")
+    headers = getattr(ws, "request_headers", None)
+    if headers is not None:
+        return headers.get("Authorization", "")
+    return ""
+
+
+async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> None:
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO users (user_pubkey)
+            VALUES ($1)
+            ON CONFLICT (user_pubkey) DO NOTHING
+            """,
+            ctx.user_hex,
+        )
+        await conn.execute(
+            """
+            INSERT INTO devices (user_pubkey, device_pubkey)
+            VALUES ($1, $2)
+            ON CONFLICT (user_pubkey, device_pubkey) DO NOTHING
+            """,
+            ctx.user_hex,
+            ctx.actor_hex,
+        )
+
+
+async def _backfill_single_tenant_owner(db: asyncpg.Pool, owner_pubkey: bytes) -> None:
+    """Assign existing unscoped rows to the self-hosted server owner."""
+    if not owner_pubkey or is_multi_tenant_enabled():
+        return
+
+    owner_hex = owner_pubkey.hex()
+    ctx = AuthContext(actor_pubkey=owner_pubkey, user_pubkey=owner_pubkey, role="owner")
+    await _ensure_tenant(db, ctx)
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE frames SET user_pubkey = $1 WHERE user_pubkey IS NULL",
+            owner_hex,
+        )
+        await conn.execute(
+            "UPDATE frames SET device_pubkey = $1 WHERE device_pubkey IS NULL",
+            owner_hex,
+        )
+        await conn.execute(
+            "UPDATE audio_transcripts SET user_pubkey = $1 WHERE user_pubkey IS NULL",
+            owner_hex,
+        )
+        await conn.execute(
+            "UPDATE audio_transcripts SET device_pubkey = $1 WHERE device_pubkey IS NULL",
+            owner_hex,
+        )
+        await conn.execute(
+            "UPDATE pokes SET to_pubkey = $1 WHERE to_pubkey IS NULL",
+            owner_hex,
+        )
+    log.info("unscoped_rows_scoped_to_owner", owner=owner_hex[:16])
+
+
+def _require_http_context(
+    request: "web.Request",
+    *,
+    allow_friend: bool = False,
+    owner_only: bool = False,
+) -> AuthContext | None:
+    auth_header = request.headers.get("Authorization", "")
+    return auth_context(auth_header, allow_friend=allow_friend, owner_only=owner_only)
 
 
 async def _init_db(pool: asyncpg.Pool) -> None:
@@ -82,6 +170,7 @@ async def _handle_frame(
     db: asyncpg.Pool,
     r2: R2Storage,
     loop: asyncio.AbstractEventLoop,
+    ctx: AuthContext,
 ) -> None:
     """Process a single frame: encrypt sensitive fields, upload image, store to Postgres."""
     ts = msg["ts"]
@@ -102,7 +191,10 @@ async def _handle_frame(
     image_b64 = msg.get("image")
     if image_b64:
         jpeg_data = base64.b64decode(image_b64)
-        image_key = await loop.run_in_executor(_pool, r2.upload, jpeg_data, ts)
+        image_key = await loop.run_in_executor(
+            _pool,
+            partial(r2.upload, jpeg_data, ts, user_pubkey=ctx.user_hex),
+        )
 
     # Extract routing
     routing = None
@@ -115,10 +207,14 @@ async def _handle_frame(
     async with db.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO frames (ts, app, bundle_id, "window", ocr_text, urls,
+            INSERT INTO frames (user_pubkey, device_pubkey, ts, app, bundle_id,
+                                "window", ocr_text, urls,
                                 image_key, width, height, tier_hint, routing)
-            VALUES (to_timestamp($1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+            VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8,
+                    $9, $10, $11, $12, $13::jsonb)
             """,
+            ctx.user_hex,
+            ctx.actor_hex,
             ts,
             msg.get("app"),
             msg.get("bundle"),
@@ -132,13 +228,21 @@ async def _handle_frame(
             routing,
         )
 
-    log.info("frame_stored", ts=ts, image_key=image_key, app=msg.get("app"))
+    log.info(
+        "frame_stored",
+        ts=ts,
+        image_key=image_key,
+        app=msg.get("app"),
+        user=ctx.user_hex[:16],
+        actor=ctx.actor_hex[:16],
+    )
 
 
 async def _handle_audio(
     msg: dict,
     db: asyncpg.Pool,
     loop: asyncio.AbstractEventLoop,
+    ctx: AuthContext,
 ) -> None:
     """Store a meeting audio transcript (encrypted)."""
     ts = msg["ts"]
@@ -152,9 +256,12 @@ async def _handle_audio(
         await conn.execute(
             """
             INSERT INTO audio_transcripts
-                (ts, meeting_app, device_name, is_input_device, transcript)
-            VALUES (to_timestamp($1), $2, $3, $4, $5)
+                (user_pubkey, device_pubkey, ts, meeting_app, device_name,
+                 is_input_device, transcript)
+            VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7)
             """,
+            ctx.user_hex,
+            ctx.actor_hex,
             ts,
             msg.get("meeting_app"),
             msg.get("device_name"),
@@ -166,6 +273,7 @@ async def _handle_audio(
         "audio_stored",
         ts=ts,
         app=msg.get("meeting_app"),
+        user=ctx.user_hex[:16],
         chars=len(transcript),
         input=msg.get("is_input_device"),
     )
@@ -306,20 +414,27 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
 
     Auth: FishKey ed25519 signature (owner or friend).
     """
-    auth_header = request.headers.get("Authorization", "")
-    valid, pubkey = verify_request(auth_header)
-    if not valid or not is_authorized(pubkey):
+    ctx = _require_http_context(request, allow_friend=True)
+    if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     db: asyncpg.Pool = request.app["db"]
     loop = asyncio.get_running_loop()
+    user_hex = ctx.user_hex
 
     async def _fetch_pokes() -> list[dict]:
         try:
             async with db.acquire() as conn:
                 poke_rows = await conn.fetch(
-                    "SELECT from_pubkey, created_at FROM pokes ORDER BY created_at DESC LIMIT 10"
+                    f"""
+                    SELECT from_pubkey, created_at
+                    FROM pokes
+                    WHERE {_tenant_predicate("to_pubkey")}
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                    """,
+                    user_hex,
                 )
             return [{"from": r["from_pubkey"][:16], "at": r["created_at"].isoformat()} for r in poke_rows]
         except Exception:
@@ -328,13 +443,14 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
     try:
         async with db.acquire() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT ts, activity
                 FROM frames
-                WHERE activity IS NOT NULL
+                WHERE {_tenant_predicate()} AND activity IS NOT NULL
                 ORDER BY ts DESC
                 LIMIT 1
-                """
+                """,
+                user_hex,
             )
 
         if not row:
@@ -366,11 +482,14 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
         try:
             async with db.acquire() as conn:
                 flow_rows = await conn.fetch(
-                    """
+                    f"""
                     SELECT ts, activity FROM frames
-                    WHERE activity IS NOT NULL AND ts > now() - interval '45 minutes'
+                    WHERE {_tenant_predicate()}
+                      AND activity IS NOT NULL
+                      AND ts > now() - interval '45 minutes'
                     ORDER BY ts DESC LIMIT 30
                     """,
+                    user_hex,
                 )
             if len(flow_rows) >= 2:
                 current_cat = activity.get("category", "idle")
@@ -414,9 +533,8 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
     Auth: FishKey ed25519 signature (owner or friend).
     Query params: limit (default 10, max 50)
     """
-    auth_header = request.headers.get("Authorization", "")
-    valid, pubkey = verify_request(auth_header)
-    if not valid or not is_authorized(pubkey):
+    ctx = _require_http_context(request, allow_friend=True)
+    if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
 
@@ -428,13 +546,14 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
     try:
         async with db.acquire() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT ts, activity
                 FROM frames
-                WHERE activity IS NOT NULL
+                WHERE {_tenant_predicate()} AND activity IS NOT NULL
                 ORDER BY ts DESC
-                LIMIT $1
+                LIMIT $2
                 """,
+                ctx.user_hex,
                 limit,
             )
 
@@ -460,9 +579,14 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
 
 async def _http_get_friends(request: "web.Request") -> "web.Response":
     """GET /api/friends - list all friend pubkeys (owner only)."""
-    auth_header = request.headers.get("Authorization", "")
-    valid, pubkey = verify_request(auth_header)
-    if not valid or not is_owner(pubkey):
+    if is_multi_tenant_enabled():
+        return web.json_response(
+            {"error": "Friends are managed by the relay in multi-tenant Cloud"},
+            status=501,
+        )
+
+    ctx = _require_http_context(request, owner_only=True)
+    if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     friends = get_friends_hex()
@@ -471,9 +595,14 @@ async def _http_get_friends(request: "web.Request") -> "web.Response":
 
 async def _http_add_friend(request: "web.Request") -> "web.Response":
     """POST /api/friends - add a friend pubkey (owner only)."""
-    auth_header = request.headers.get("Authorization", "")
-    valid, pubkey = verify_request(auth_header)
-    if not valid or not is_owner(pubkey):
+    if is_multi_tenant_enabled():
+        return web.json_response(
+            {"error": "Friends are managed by the relay in multi-tenant Cloud"},
+            status=501,
+        )
+
+    ctx = _require_http_context(request, owner_only=True)
+    if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     try:
@@ -493,9 +622,14 @@ async def _http_add_friend(request: "web.Request") -> "web.Response":
 
 async def _http_delete_friend(request: "web.Request") -> "web.Response":
     """DELETE /api/friends - remove a friend pubkey (owner only)."""
-    auth_header = request.headers.get("Authorization", "")
-    valid, pubkey = verify_request(auth_header)
-    if not valid or not is_owner(pubkey):
+    if is_multi_tenant_enabled():
+        return web.json_response(
+            {"error": "Friends are managed by the relay in multi-tenant Cloud"},
+            status=501,
+        )
+
+    ctx = _require_http_context(request, owner_only=True)
+    if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     try:
@@ -514,19 +648,23 @@ async def _http_delete_friend(request: "web.Request") -> "web.Response":
 
 async def _http_send_poke(request: "web.Request") -> "web.Response":
     """POST /api/poke — send a nudge. Auth: friend or owner."""
-    auth_header = request.headers.get("Authorization", "")
-    valid, pubkey = verify_request(auth_header)
-    if not valid or not is_authorized(pubkey):
+    ctx = _require_http_context(request, allow_friend=True)
+    if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
 
-    pubkey_hex = pubkey.hex()
     db: asyncpg.Pool = request.app["db"]
     try:
         async with db.acquire() as conn:
             await conn.execute(
-                "INSERT INTO pokes (from_pubkey) VALUES ($1)", pubkey_hex
+                "INSERT INTO pokes (to_pubkey, from_pubkey) VALUES ($1, $2)",
+                ctx.user_hex,
+                ctx.actor_hex,
             )
-        log.info("poke_received", from_pubkey=pubkey_hex[:16])
+        log.info(
+            "poke_received",
+            to_pubkey=ctx.user_hex[:16],
+            from_pubkey=ctx.actor_hex[:16],
+        )
         return web.json_response({"ok": True})
     except Exception:
         log.error("poke_error", exc_info=True)
@@ -535,15 +673,17 @@ async def _http_send_poke(request: "web.Request") -> "web.Response":
 
 async def _http_clear_pokes(request: "web.Request") -> "web.Response":
     """DELETE /api/pokes — clear all pokes (owner only, after reading them)."""
-    auth_header = request.headers.get("Authorization", "")
-    valid, pubkey = verify_request(auth_header)
-    if not valid or not is_owner(pubkey):
+    ctx = _require_http_context(request, owner_only=True)
+    if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     db: asyncpg.Pool = request.app["db"]
     try:
         async with db.acquire() as conn:
-            await conn.execute("DELETE FROM pokes")
+            await conn.execute(
+                f"DELETE FROM pokes WHERE {_tenant_predicate('to_pubkey')}",
+                ctx.user_hex,
+            )
         return web.json_response({"ok": True})
     except Exception:
         log.error("clear_pokes_error", exc_info=True)
@@ -553,64 +693,78 @@ async def _http_clear_pokes(request: "web.Request") -> "web.Response":
 async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
     """Background task that categorizes activity every 60s."""
     loop = asyncio.get_running_loop()
-    last_activity = None
+    last_activity_by_user: dict[str, dict] = {}
 
     while True:
         try:
             await asyncio.sleep(60)
 
-            # Read last 5 frames from DB
+            # Categorize the newest uncategorized frame per tenant.
             async with db.acquire() as conn:
                 rows = await conn.fetch(
                     """
-                    SELECT ts, app, "window", ocr_text
-                    FROM frames
+                    WITH newest AS (
+                        SELECT DISTINCT ON (COALESCE(user_pubkey, 'unscoped'))
+                               id, user_pubkey, ts, app, "window", ocr_text
+                        FROM frames
+                        WHERE activity IS NULL
+                        ORDER BY COALESCE(user_pubkey, 'unscoped'), ts DESC
+                    )
+                    SELECT id, user_pubkey, ts, app, "window", ocr_text
+                    FROM newest
                     ORDER BY ts DESC
-                    LIMIT 5
+                    LIMIT 25
                     """
                 )
 
             if not rows:
                 continue
 
-            # Decrypt most recent frame
-            latest = rows[0]
-            window = await loop.run_in_executor(_pool, decrypt_text, latest["window"]) if latest["window"] else ""
-            ocr_text = await loop.run_in_executor(_pool, decrypt_text, latest["ocr_text"]) if latest["ocr_text"] else ""
+            for latest in rows:
+                user_key = latest["user_pubkey"] or "unscoped"
+                window = await loop.run_in_executor(_pool, decrypt_text, latest["window"]) if latest["window"] else ""
+                ocr_text = await loop.run_in_executor(_pool, decrypt_text, latest["ocr_text"]) if latest["ocr_text"] else ""
 
-            # Categorize
-            activity = await _categorize_activity(latest["app"], window, ocr_text)
+                activity = await _categorize_activity(latest["app"], window, ocr_text)
 
-            if activity:
-                # Encrypt and store
-                enc_activity = await loop.run_in_executor(_pool, encrypt_json, activity)
-                async with db.acquire() as conn:
-                    await conn.execute(
-                        """
-                        UPDATE frames
-                        SET activity = $1
-                        WHERE ts = $2
-                        """,
-                        enc_activity,
-                        latest["ts"],
-                    )
-                last_activity = activity
-                log.info("activity_categorized", category=activity["category"], status=activity["status"])
-            else:
-                # Use last known activity if OpenAI failed
-                if last_activity:
-                    enc_activity = await loop.run_in_executor(_pool, encrypt_json, last_activity)
+                if activity:
+                    enc_activity = await loop.run_in_executor(_pool, encrypt_json, activity)
                     async with db.acquire() as conn:
                         await conn.execute(
                             """
                             UPDATE frames
                             SET activity = $1
-                            WHERE ts = $2
+                            WHERE id = $2
                             """,
                             enc_activity,
-                            latest["ts"],
+                            latest["id"],
                         )
-                    log.info("activity_fallback", category=last_activity["category"])
+                    last_activity_by_user[user_key] = activity
+                    log.info(
+                        "activity_categorized",
+                        user=str(user_key)[:16],
+                        category=activity["category"],
+                        status=activity["status"],
+                    )
+                else:
+                    last_activity = last_activity_by_user.get(user_key)
+                    if last_activity:
+                        enc_activity = await loop.run_in_executor(_pool, encrypt_json, last_activity)
+                        async with db.acquire() as conn:
+                            await conn.execute(
+                                """
+                                UPDATE frames
+                                SET activity = $1
+                                WHERE id = $2
+                                """,
+                                enc_activity,
+                                latest["id"],
+                            )
+                        log.info(
+                            "activity_fallback",
+                            user=str(user_key)[:16],
+                            category=last_activity["category"],
+                        )
 
         except Exception:
             log.error("activity_categorizer_error", exc_info=True)
@@ -626,32 +780,46 @@ async def _handle_connection(
     """Handle a single WebSocket connection from a daemon."""
     loop = asyncio.get_running_loop()
     remote = ws.remote_address
-    log.info("client_connected", remote=remote)
+    ctx = auth_context(_auth_header_from_ws(ws))
+    if ctx is None or ctx.role not in {"owner", "tenant"}:
+        log.warning("ws_auth_context_missing", remote=remote)
+        await ws.close(code=1008, reason="Unauthorized")
+        return
+
+    await _ensure_tenant(db, ctx)
+    log.info(
+        "client_connected",
+        remote=remote,
+        user=ctx.user_hex[:16],
+        actor=ctx.actor_hex[:16],
+        role=ctx.role,
+    )
 
     try:
         async for raw in ws:
             try:
                 msg = json.loads(raw)
                 if msg.get("type") == "frame":
-                    await _handle_frame(msg, db, r2, loop)
+                    await _handle_frame(msg, db, r2, loop, ctx)
                 elif msg.get("type") == "audio":
-                    await _handle_audio(msg, db, loop)
+                    await _handle_audio(msg, db, loop, ctx)
             except Exception:
                 log.warning("frame_processing_failed", exc_info=True)
-    except websockets.ConnectionClosed:
+    except ConnectionClosed:
         pass
     finally:
-        log.info("client_disconnected", remote=remote)
+        log.info("client_disconnected", remote=remote, user=ctx.user_hex[:16])
 
 
 async def _run(host: str, port: int) -> None:
     # Load ed25519 signing key and friends list
-    load_signing_key()
+    _priv, owner_pubkey = load_signing_key()
     load_friends()
 
     database_url = os.environ["DATABASE_URL"]
     db = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     await _init_db(db)
+    await _backfill_single_tenant_owner(db, owner_pubkey)
 
     r2 = create_storage()
     log.info("storage_initialized", backend=type(r2).__name__)
@@ -683,7 +851,7 @@ async def _run(host: str, port: int) -> None:
         await http_site.start()
         log.info("http_api_started", host=host, port=http_port)
 
-    async with websockets.serve(
+    async with serve(
         lambda ws: _handle_connection(ws, db, r2),
         host,
         port,

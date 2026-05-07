@@ -165,17 +165,19 @@ class FakeConn:
         if normalized.startswith("INSERT INTO frames"):
             self._pool.frame_rows.append(
                 {
-                    "ts": args[0],
-                    "app": args[1],
-                    "bundle_id": args[2],
-                    "window": args[3],
-                    "ocr_text": args[4],
-                    "urls": args[5],
-                    "image_key": args[6],
-                    "width": args[7],
-                    "height": args[8],
-                    "tier_hint": args[9],
-                    "routing": args[10],
+                    "user_pubkey": args[0],
+                    "device_pubkey": args[1],
+                    "ts": args[2],
+                    "app": args[3],
+                    "bundle_id": args[4],
+                    "window": args[5],
+                    "ocr_text": args[6],
+                    "urls": args[7],
+                    "image_key": args[8],
+                    "width": args[9],
+                    "height": args[10],
+                    "tier_hint": args[11],
+                    "routing": args[12],
                 }
             )
             return "INSERT 0 1"
@@ -209,10 +211,16 @@ class FakeR2Storage:
     def __init__(self):
         self.uploads: list[dict] = []
 
-    def upload(self, jpeg_data: bytes, timestamp: float) -> str:
-        key = f"frames/{int(timestamp * 1000)}.jpg.enc"
+    def upload(self, jpeg_data: bytes, timestamp: float, *, user_pubkey: str | None = None) -> str:
+        prefix = f"users/{user_pubkey}/" if user_pubkey else ""
+        key = f"{prefix}frames/{int(timestamp * 1000)}.jpg.enc"
         self.uploads.append(
-            {"timestamp": timestamp, "jpeg_data": jpeg_data, "key": key}
+            {
+                "timestamp": timestamp,
+                "jpeg_data": jpeg_data,
+                "key": key,
+                "user_pubkey": user_pubkey,
+            }
         )
         return key
 
@@ -225,6 +233,7 @@ def load_ingest_module():
     sys.modules.pop("storage", None)
     storage_stub = types.ModuleType("storage")
     storage_stub.R2Storage = FakeR2Storage
+    storage_stub.create_storage = FakeR2Storage
     sys.modules["storage"] = storage_stub
 
     module_name = "fisherman_server_ingest"
@@ -290,13 +299,15 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
 
         os.environ["INGEST_AUTH_TOKEN"] = self.auth_token
         os.environ["ENCRYPTION_KEY"] = self.encryption_key
+        os.environ["FISH_PRIVATE_KEY"] = "11" * 32
 
         self.ingest = load_ingest_module()
+        self.ingest.load_signing_key()
         self.crypto = importlib.import_module("crypto")
         self.fake_db = FakePool()
         self.fake_r2 = FakeR2Storage()
         await self.ingest._init_db(self.fake_db)
-        self.ws_server = await self.ingest.websockets.serve(
+        self.ws_server = await self.ingest.serve(
             lambda ws: self.ingest._handle_connection(ws, self.fake_db, self.fake_r2),
             "127.0.0.1",
             self.ingest_port,
@@ -331,7 +342,7 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.http_server.server_close()
         self.http_thread.join(timeout=2)
         self.tempdir.cleanup()
-        for key in ["INGEST_AUTH_TOKEN", "ENCRYPTION_KEY"]:
+        for key in ["INGEST_AUTH_TOKEN", "ENCRYPTION_KEY", "FISH_PRIVATE_KEY"]:
             os.environ.pop(key, None)
 
     async def wait_until(self, predicate, timeout: float = 8.0) -> None:

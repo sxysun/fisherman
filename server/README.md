@@ -1,8 +1,8 @@
-# Fisherman Self-Hosted Ingest Server
+# Fisherman Ingest Server
 
 This directory is the ingest implementation for Fisherman's
-**Self-Hosted Backend** mode. It is not a mandatory setup step for every
-user.
+**Self-Hosted Backend** mode and the raw-context ingest component used by
+Fisherman Cloud. It is not a mandatory setup step for every user.
 
 Use Local Only for laptop-only storage:
 
@@ -19,8 +19,9 @@ fisherman backend configure self-hosted --url wss://your-host:9999/ingest
 The server receives frames from the daemon, encrypts sensitive fields at
 rest, uploads images to R2 or local disk, and stores metadata in Postgres.
 Transport privacy depends on the configured WebSocket/TLS endpoint.
-Managed operator-untrusted hosting belongs in Fisherman Cloud, not this
-plain server process.
+For self-hosting, the server runs under the user's trust model. For
+Fisherman Cloud, the same ingest code runs inside the managed attested
+TEE/CVM path with multi-tenant mode enabled.
 
 ## Quick Start
 
@@ -84,6 +85,7 @@ Auth model:
 | `INGEST_HOST` | No | `0.0.0.0` | Listen address |
 | `INGEST_PORT` | No | `9999` | WebSocket listen port |
 | `HTTP_API_PORT` | No | `9998` | HTTP API listen port (activity + friends endpoints) |
+| `FISH_MULTI_TENANT` | No | unset | Enable Cloud tenant mode. Each valid FishKey pubkey becomes its own user namespace |
 
 ### Storage Backends
 
@@ -92,7 +94,15 @@ Auth model:
 
 ## Auth
 
-**FishKey (primary):** The client signs each request with an ed25519 key. The server verifies the signature against the owner's public key (derived from `FISH_PRIVATE_KEY`) or the friends allow-list.
+**FishKey (primary):** The client signs each request with an ed25519 key.
+
+In self-hosted mode, WebSocket ingest accepts the server owner's key
+derived from `FISH_PRIVATE_KEY`. Activity reads may also allow keys in
+the friends allow-list.
+
+In Cloud multi-tenant mode (`FISH_MULTI_TENANT=1`), each valid FishKey
+pubkey maps to its own tenant namespace. Frames, audio transcripts,
+activity rows, image keys, and pokes are scoped by that pubkey.
 
 Header format: `Authorization: FishKey <pubkey_hex>:<timestamp>:<signature_hex>`
 
@@ -101,7 +111,8 @@ should be used for new deployments.
 
 ## Friends API
 
-Three HTTP endpoints on `HTTP_API_PORT` (default 9998), all owner-only:
+Three self-hosted HTTP endpoints on `HTTP_API_PORT` (default 9998), all
+owner-only:
 
 | Method | Path | Body | Description |
 |---|---|---|---|
@@ -113,6 +124,8 @@ Friends are persisted to `friends.json` in the server directory. On first API mu
 
 The current menubar uses relay/E2EE friend codes by default. These
 server allow-list endpoints are for manual server-direct sharing.
+They are disabled in Cloud multi-tenant mode so tenants cannot share a
+process-global allow-list.
 
 ## Activity API
 
@@ -124,9 +137,25 @@ This is the server-direct friend-status path. New friend status should
 use the relay/E2EE model so Local, Cloud, and Self-Hosted users can
 interoperate.
 
+## Tenant Scope
+
+The schema has first-class `users` and `devices` tables. Captured
+`frames`, `audio_transcripts`, and `pokes` carry tenant columns so Cloud
+queries cannot cross users. Existing self-hosted rows without tenant
+columns are assigned to the server owner on startup after the migration
+runs.
+
+Object storage keys are also tenant-prefixed in scoped mode:
+
+```text
+users/<user_pubkey>/frames/YYYY-MM-DD/<timestamp>.jpg.enc
+```
+
 ## Schema
 
-The server auto-creates the `frames` table on startup. Sensitive columns (window title, OCR text, URLs, VLM descriptions) are Fernet-encrypted at rest. Images are encrypted before storage.
+The server auto-creates and migrates the Postgres schema on startup.
+Sensitive columns (window title, OCR text, URLs, VLM descriptions) are
+Fernet-encrypted at rest. Images are encrypted before storage.
 
 ## CLI — Query & Decrypt
 

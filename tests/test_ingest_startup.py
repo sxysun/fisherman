@@ -47,7 +47,7 @@ class FakeR2Storage:
     def __init__(self):
         type(self).created += 1
 
-    def upload(self, jpeg_data: bytes, timestamp: float) -> str:
+    def upload(self, jpeg_data: bytes, timestamp: float, *, user_pubkey: str | None = None) -> str:
         return f"mock://{timestamp}"
 
 
@@ -75,6 +75,7 @@ def load_ingest_module():
     sys.modules.pop("storage", None)
     storage_stub = types.ModuleType("storage")
     storage_stub.R2Storage = FakeR2Storage
+    storage_stub.create_storage = FakeR2Storage
     sys.modules["storage"] = storage_stub
 
     module_name = "fisherman_server_ingest_startup"
@@ -130,7 +131,7 @@ class IngestStartupTests(unittest.IsolatedAsyncioTestCase):
             "create_pool",
             new=mock.AsyncMock(return_value=fake_pool),
         ) as create_pool_mock, mock.patch.object(
-            self.ingest.websockets,
+            self.ingest,
             "serve",
             side_effect=fake_serve,
         ), mock.patch.object(

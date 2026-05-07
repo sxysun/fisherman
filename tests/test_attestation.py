@@ -155,7 +155,7 @@ class ComposeBindingTests(unittest.TestCase):
         )
 
     def test_event_log_replay_handles_both_field_names(self):
-        # dstack canonical key is `event_payload`; legacy fisherman bundles
+        # dstack canonical key is `event_payload`; older fisherman bundles
         # used `payload`. Both must work in a mixed log.
         events = [
             {"event": "compose-hash", "event_payload": "00" * 32},

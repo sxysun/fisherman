@@ -3,12 +3,29 @@
 import datetime
 import os
 import pathlib
+import re
 
 import boto3
 import structlog
 from cryptography.fernet import Fernet
 
 log = structlog.get_logger()
+
+
+_PUBKEY_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def frame_object_key(timestamp: float, user_pubkey: str | None = None) -> str:
+    dt = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
+    date_str = dt.strftime("%Y-%m-%d")
+    ts_millis = int(timestamp * 1000)
+    key = f"frames/{date_str}/{ts_millis}.jpg.enc"
+    if user_pubkey:
+        user_pubkey = user_pubkey.lower()
+        if not _PUBKEY_HEX_RE.fullmatch(user_pubkey):
+            raise ValueError("user_pubkey must be a 64-character lowercase hex string")
+        return f"users/{user_pubkey}/{key}"
+    return key
 
 
 class R2Storage:
@@ -24,13 +41,16 @@ class R2Storage:
             region_name="auto",
         )
 
-    def upload(self, jpeg_data: bytes, timestamp: float) -> str:
+    def upload(
+        self,
+        jpeg_data: bytes,
+        timestamp: float,
+        *,
+        user_pubkey: str | None = None,
+    ) -> str:
         """Fernet-encrypt jpeg_data and upload to R2. Returns the object key."""
         encrypted = self._fernet.encrypt(jpeg_data)
-        dt = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
-        date_str = dt.strftime("%Y-%m-%d")
-        ts_millis = int(timestamp * 1000)
-        key = f"frames/{date_str}/{ts_millis}.jpg.enc"
+        key = frame_object_key(timestamp, user_pubkey)
         self._s3.put_object(Bucket=self._bucket, Key=key, Body=encrypted)
         log.debug("r2_uploaded", key=key, size=len(encrypted))
         return key
@@ -54,24 +74,31 @@ class LocalStorage:
         self._base = pathlib.Path(base_dir).expanduser().resolve()
         self._base.mkdir(parents=True, exist_ok=True)
 
-    def upload(self, jpeg_data: bytes, timestamp: float) -> str:
+    def upload(
+        self,
+        jpeg_data: bytes,
+        timestamp: float,
+        *,
+        user_pubkey: str | None = None,
+    ) -> str:
         encrypted = self._fernet.encrypt(jpeg_data)
-        dt = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone.utc)
-        date_str = dt.strftime("%Y-%m-%d")
-        ts_millis = int(timestamp * 1000)
-        key = f"frames/{date_str}/{ts_millis}.jpg.enc"
-        path = self._base / date_str
-        path.mkdir(parents=True, exist_ok=True)
-        (path / f"{ts_millis}.jpg.enc").write_bytes(encrypted)
+        key = frame_object_key(timestamp, user_pubkey)
+        path = self._path_for_key(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(encrypted)
         log.debug("local_stored", key=key, size=len(encrypted))
         return key
 
     def download(self, key: str) -> bytes:
-        # key format: frames/YYYY-MM-DD/ts.jpg.enc
-        parts = key.split("/", 1)
-        path = self._base / parts[1] if len(parts) > 1 else self._base / key
+        path = self._path_for_key(key)
         encrypted = path.read_bytes()
         return self._fernet.decrypt(encrypted)
+
+    def _path_for_key(self, key: str) -> pathlib.Path:
+        # Existing local keys omit the top-level "frames/" directory on disk.
+        if key.startswith("frames/"):
+            return self._base / key.split("/", 1)[1]
+        return self._base / key
 
 
 def create_storage():

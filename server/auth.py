@@ -1,5 +1,6 @@
 """Ed25519 key-based authentication for P2P fisherman servers."""
 
+from dataclasses import dataclass
 import json
 import os
 import time
@@ -21,6 +22,41 @@ _friends: set[bytes] = set()
 
 MAX_TIMESTAMP_DRIFT = 60  # seconds
 FRIENDS_FILE = os.path.join(os.path.dirname(__file__), "friends.json")
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    """Authenticated actor plus the user namespace that actor can access."""
+
+    actor_pubkey: bytes
+    user_pubkey: bytes
+    role: str
+
+    @property
+    def actor_hex(self) -> str:
+        return self.actor_pubkey.hex()
+
+    @property
+    def user_hex(self) -> str:
+        return self.user_pubkey.hex()
+
+
+def _env_truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_multi_tenant_enabled() -> bool:
+    """Return whether this process is running as Fisherman Cloud ingest.
+
+    Self-hosted servers keep the original owner/friend trust model. Cloud ingest
+    accepts any valid FishKey as that user's tenant identity; paid enrollment and
+    attestation policy can be layered above this without changing table scope.
+    """
+    return (
+        _env_truthy("FISH_MULTI_TENANT")
+        or _env_truthy("FISHERMAN_MULTI_TENANT")
+        or _env_truthy("FISHERMAN_CLOUD_MULTI_TENANT")
+    )
 
 
 def load_signing_key() -> tuple[Ed25519PrivateKey, bytes]:
@@ -167,6 +203,29 @@ def is_friend(pubkey_bytes: bytes) -> bool:
 def is_authorized(pubkey_bytes: bytes) -> bool:
     """Check if pubkey is owner or friend."""
     return is_owner(pubkey_bytes) or is_friend(pubkey_bytes)
+
+
+def auth_context(
+    auth_header: str,
+    *,
+    allow_friend: bool = False,
+    owner_only: bool = False,
+) -> AuthContext | None:
+    """Verify auth and return the tenant namespace the caller can access."""
+    valid, pubkey = verify_request(auth_header)
+    if not valid:
+        return None
+
+    if is_multi_tenant_enabled():
+        return AuthContext(actor_pubkey=pubkey, user_pubkey=pubkey, role="tenant")
+
+    if is_owner(pubkey):
+        return AuthContext(actor_pubkey=pubkey, user_pubkey=_public_key_bytes, role="owner")
+
+    if allow_friend and not owner_only and is_friend(pubkey) and _public_key_bytes:
+        return AuthContext(actor_pubkey=pubkey, user_pubkey=_public_key_bytes, role="friend")
+
+    return None
 
 
 def sign_timestamp(private_key: Ed25519PrivateKey = None) -> str:
