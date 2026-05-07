@@ -741,17 +741,22 @@ def daemon_status(port: int = DEFAULT_CONTROL_PORT,
 
 
 def relay_health(relay_url: str, *, daemon: Optional[dict] = None,
-                 timeout: float = 1.0) -> tuple[bool, str]:
+                 timeout: float = 5.0) -> tuple[bool, str]:
     relay_url = (relay_url or "").rstrip("/")
     if not relay_url:
         return False, "no relay URL configured"
     health_url = relay_url + "/health"
+    relay_ws = bool(daemon and daemon.get("relay_connected"))
     try:
         with urllib.request.urlopen(health_url, timeout=timeout) as r:
             ok = r.status == 200
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError) as e:
+        if relay_ws:
+            return True, (
+                f"{relay_url} health probe flaky: {e}; "
+                "daemon RPC mailbox connected"
+            )
         return False, f"{relay_url} not reachable: {e}"
-    relay_ws = bool(daemon and daemon.get("relay_connected"))
     detail = f"{relay_url} reachable"
     if daemon is not None:
         detail += "; daemon RPC mailbox " + ("connected" if relay_ws else "not connected yet")
