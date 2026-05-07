@@ -15,6 +15,7 @@ on:
       - "fisherman/**"
       - "mirror/**"
       - "relay/**"
+      - "server/**"
       - "pyproject.toml"
       - ".github/workflows/docker-publish.yml"
   workflow_dispatch:

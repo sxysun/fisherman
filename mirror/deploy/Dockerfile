@@ -41,10 +41,12 @@ RUN apt-get update \
 COPY mirror/deploy/requirements.lock ./requirements.lock
 RUN pip install --require-hashes -r requirements.lock
 
-# The Cloud image runs mirror plus the low-trust relay.
+# The Cloud image runs mirror, the low-trust relay, and the managed
+# ingest server.
 COPY fisherman/ ./fisherman/
 COPY mirror/    ./mirror/
 COPY relay/     ./relay/
+COPY server/    ./server/
 # Stub package metadata so `python -m mirror.cli` can resolve the
 # `fisherman-mirror` console script when installed via pip later.
 COPY pyproject.toml ./
@@ -65,7 +67,7 @@ RUN useradd --system --uid 1000 --home-dir /home/fisherman --create-home fisherm
  && chown -R fisherman:fisherman /data /app
 USER fisherman
 
-EXPOSE 5001 5003 9100
+EXPOSE 5001 5003 9100 9999 9998
 
 # In TDX deployments dstack-KMS provisions secrets to /etc/secrets/* and
 # the mirror reads them at startup. Locally `docker compose up` provides

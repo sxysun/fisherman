@@ -1,0 +1,20 @@
+.git
+.venv
+**/.venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.DS_Store
+
+# Runtime data and local secrets must never enter the Cloud image build context.
+.env
+**/.env
+server/frames
+server/ingest.log
+server/ingest-watchdog.log
+mirror-data
+relay-data
+*.sqlite
+*.sqlite3

@@ -86,7 +86,7 @@ jobs:
           # Use the last commit that would have triggered docker-publish
           # (matches its `paths:` filter), so the tag is guaranteed to
           # exist on ghcr — workflow-only commits don't get an image.
-          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay pyproject.toml)
+          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay server pyproject.toml)
           if [[ -z "$IMAGE_TAG" ]]; then
             echo "::error::no commit touching image-relevant paths found"
             exit 1

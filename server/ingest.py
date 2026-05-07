@@ -46,10 +46,16 @@ from auth import (
 
 try:
     from openai import AsyncOpenAI
-    _openai_client = AsyncOpenAI(
-        api_key=os.environ.get("OPENAI_API_KEY"),
-        base_url=os.environ.get("OPENAI_BASE_URL"),
-    )
+    _openai_api_key = os.environ.get("OPENAI_API_KEY")
+    _openai_base_url = os.environ.get("OPENAI_BASE_URL")
+    if _openai_api_key or _openai_base_url:
+        _openai_client = AsyncOpenAI(
+            api_key=_openai_api_key or "not-needed",
+            base_url=_openai_base_url,
+        )
+    else:
+        _openai_client = None
+        log.warning("openai_not_configured", msg="Set OPENAI_API_KEY for activity categorization")
 except ImportError:
     _openai_client = None
     log.warning("openai_not_installed", msg="Install openai package for activity categorization")
