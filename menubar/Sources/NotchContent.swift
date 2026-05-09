@@ -44,7 +44,7 @@ struct CompactTrailing: View {
             }
 
             if state.allActivity.isEmpty {
-                Text("\(state.framesSent)")
+                Text("\(state.primaryFrameCount)")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -98,7 +98,12 @@ struct ExpandedContent: View {
 
             // Process rows
             processRow(name: "screenpipe", ok: state.screenpipeHealthy)
-            processRow(name: "fisherman", ok: state.fishermanHealthy)
+            statusRow(
+                name: "fisherman",
+                iconName: state.fishermanServiceIcon,
+                color: Color(nsColor: state.fishermanServiceColor),
+                label: state.fishermanServiceLabel
+            )
 
             Divider()
 
@@ -206,8 +211,8 @@ struct ExpandedContent: View {
 
             // Frame stats
             HStack(spacing: 16) {
-                statLabel("Sent", value: "\(state.framesSent)")
-                statLabel("Dropped", value: "\(state.framesDropped)")
+                statLabel(state.primaryFrameLabel, value: "\(state.primaryFrameCount)")
+                statLabel(state.secondaryFrameLabel, value: "\(state.secondaryFrameCount)")
             }
 
             Divider()
@@ -247,14 +252,23 @@ struct ExpandedContent: View {
     }
 
     private func processRow(name: String, ok: Bool) -> some View {
+        statusRow(
+            name: name,
+            iconName: ok ? "checkmark.circle.fill" : "xmark.circle.fill",
+            color: ok ? .green : .red,
+            label: ok ? "healthy" : "down"
+        )
+    }
+
+    private func statusRow(name: String, iconName: String, color: Color, label: String) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                .foregroundStyle(ok ? .green : .red)
+            Image(systemName: iconName)
+                .foregroundStyle(color)
                 .font(.system(size: 12))
             Text(name)
                 .font(.system(size: 12, design: .monospaced))
             Spacer()
-            Text(ok ? "healthy" : "down")
+            Text(label)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }

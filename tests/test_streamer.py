@@ -1,9 +1,12 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 from fisherman.capture import ScreenFrame
 from fisherman.streamer import Streamer
+from fisherman.upload_queue import UploadQueue
 
 
 class StreamerTests(unittest.IsolatedAsyncioTestCase):
@@ -40,6 +43,45 @@ class StreamerTests(unittest.IsolatedAsyncioTestCase):
             send_task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await send_task
+
+    async def test_durable_queue_drains_after_connection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            queue = UploadQueue(str(Path(td) / "upload.sqlite"), max_items=10)
+            streamer = Streamer("ws://127.0.0.1:9", "", upload_queue=queue)
+            streamer._ws = AsyncMock()
+            streamer._connected = False
+            streamer._connected_event.clear()
+
+            send_task = asyncio.create_task(streamer._durable_send_loop())
+            try:
+                frame = ScreenFrame(
+                    jpeg_data=b"jpeg-bytes",
+                    width=16,
+                    height=16,
+                    app_name="TestApp",
+                    bundle_id=None,
+                    window_title="Durable Frame",
+                    timestamp=2.0,
+                )
+                await streamer.send(frame, "queued text", [])
+                self.assertEqual(queue.count(), 1)
+                await asyncio.sleep(0.05)
+                streamer._ws.send.assert_not_awaited()
+
+                streamer._connected = True
+                streamer._connected_event.set()
+                streamer._queue_wakeup.set()
+                await asyncio.sleep(0.05)
+
+                streamer._ws.send.assert_awaited_once()
+                self.assertEqual(streamer.frames_sent, 1)
+                self.assertEqual(queue.count(), 0)
+                self.assertEqual(streamer.last_uploaded_ts, 2.0)
+            finally:
+                send_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await send_task
+                queue.close()
 
 
 if __name__ == "__main__":

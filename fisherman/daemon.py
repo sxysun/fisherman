@@ -23,8 +23,13 @@ from fisherman.privacy import PrivacyFilter
 from fisherman.relay_client import RelayClient
 from fisherman.router import TierRouter
 from fisherman.screenpipe_capture import ScreenpipeCaptureClient, ScreenpipeCaptureError
-from fisherman.streamer import Streamer
+from fisherman.streamer import (
+    Streamer,
+    build_audio_payload,
+    build_frame_payload,
+)
 from fisherman.sync import MirrorSync
+from fisherman.upload_queue import UploadQueue
 
 log = structlog.get_logger()
 
@@ -40,8 +45,13 @@ class FishermanDaemon:
         self._differ = FrameDiffer(threshold=config.diff_threshold)
         self._privacy = PrivacyFilter(config)
         self._router = TierRouter(config)
+        self._upload_queue: UploadQueue | None = (
+            UploadQueue(config.upload_queue_path, config.upload_queue_max)
+            if config.upload_queue_enabled and config.backend_mode in {"cloud", "self_hosted"}
+            else None
+        )
         self._streamer: Streamer | None = (
-            Streamer(config.server_url, config.private_key)
+            Streamer(config.server_url, config.private_key, upload_queue=self._upload_queue)
             if config.streaming_enabled else None
         )
         self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
@@ -228,6 +238,8 @@ class FishermanDaemon:
                 await self._mirror_sync.stop()
             if self._streamer is not None:
                 await self._streamer.stop()
+            if self._upload_queue is not None:
+                self._upload_queue.close()
             await control.stop()
             self._pool.shutdown(wait=False)
             log.info("fisherman_stopped")
@@ -435,6 +447,9 @@ class FishermanDaemon:
             "frames_sent": self._streamer.frames_sent if self._streamer else self._frames_sent,
             "frames_streamed": self._streamer.frames_sent if self._streamer else 0,
             "frames_dropped": self._streamer.frames_dropped if self._streamer else 0,
+            "upload_queue_pending": (
+                self._upload_queue.count() if self._upload_queue is not None else 0
+            ),
             "connected": self._streamer.connected if self._streamer else False,
             "on_battery": on_battery(),
             "capture_interval": self._get_interval(),
@@ -722,6 +737,15 @@ class FishermanDaemon:
                                 device_name=ap.device_name,
                                 is_input_device=ap.is_input_device,
                             )
+                        elif self._upload_queue is not None:
+                            payload, frame_ts = build_audio_payload(
+                                ts=ap.timestamp,
+                                transcript=ap.transcription,
+                                meeting_app=self._call_app,
+                                device_name=ap.device_name,
+                                is_input_device=ap.is_input_device,
+                            )
+                            self._upload_queue.append("audio", payload, frame_ts)
                         self._audio_sent += 1
 
             except asyncio.CancelledError:
@@ -751,4 +775,7 @@ class FishermanDaemon:
         )
         if self._streamer is not None:
             await self._streamer.send(frame, ocr_text, urls, routing=routing)
+        elif self._upload_queue is not None:
+            payload, frame_ts = build_frame_payload(frame, ocr_text, urls, routing)
+            self._upload_queue.append("frame", payload, frame_ts)
         self._frames_sent += 1

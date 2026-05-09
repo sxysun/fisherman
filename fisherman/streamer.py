@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import serialization
 
 from fisherman.capture import ScreenFrame
 from fisherman.router import RoutingDecision
+from fisherman.upload_queue import UploadQueue
 
 log = structlog.get_logger()
 
@@ -41,6 +42,47 @@ def _sign_fishkey(priv: Ed25519PrivateKey, pub_hex: str) -> str:
     return f"FishKey {pub_hex}:{ts}:{sig.hex()}"
 
 
+def build_frame_payload(
+    frame: ScreenFrame,
+    ocr_text: str,
+    urls: list[str],
+    routing: RoutingDecision | None = None,
+) -> tuple[str, float]:
+    msg = {
+        "type": "frame",
+        "ts": frame.timestamp,
+        "app": frame.app_name,
+        "bundle": frame.bundle_id,
+        "window": frame.window_title,
+        "ocr_text": ocr_text,
+        "urls": urls,
+        "image": base64.b64encode(frame.jpeg_data).decode("ascii"),
+        "w": frame.width,
+        "h": frame.height,
+    }
+    if routing is not None:
+        msg.update(routing.to_wire())
+    return json.dumps(msg), frame.timestamp
+
+
+def build_audio_payload(
+    *,
+    ts: float,
+    transcript: str,
+    meeting_app: str | None,
+    device_name: str | None,
+    is_input_device: bool,
+) -> tuple[str, None]:
+    return json.dumps({
+        "type": "audio",
+        "ts": ts,
+        "transcript": transcript,
+        "meeting_app": meeting_app,
+        "device_name": device_name,
+        "is_input_device": is_input_device,
+    }), None
+
+
 class Streamer:
     """
     Persistent WebSocket connection to server.
@@ -48,7 +90,12 @@ class Streamer:
     Non-blocking send: drops oldest frames if server is slow.
     """
 
-    def __init__(self, url: str, private_key_hex: str):
+    def __init__(
+        self,
+        url: str,
+        private_key_hex: str,
+        upload_queue: UploadQueue | None = None,
+    ):
         self._url = url
         self._priv_key, self._pub_hex = _load_signing_key(private_key_hex)
         self._ws: websockets.WebSocketClientProtocol | None = None
@@ -63,6 +110,8 @@ class Streamer:
         self._frames_sent = 0
         self._frames_dropped = 0
         self._last_uploaded_ts: float | None = None
+        self._upload_queue = upload_queue
+        self._queue_wakeup = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
 
     @property
@@ -84,10 +133,19 @@ class Streamer:
         local rows with timestamp ≤ this can be safely deleted."""
         return self._last_uploaded_ts
 
+    @property
+    def upload_queue_pending(self) -> int:
+        if self._upload_queue is not None:
+            return self._upload_queue.count()
+        return self._queue.qsize()
+
     async def start(self) -> None:
         self._tasks = [
             asyncio.create_task(self._reconnect_loop()),
-            asyncio.create_task(self._send_loop()),
+            asyncio.create_task(
+                self._durable_send_loop()
+                if self._upload_queue is not None else self._send_loop()
+            ),
         ]
 
     async def stop(self) -> None:
@@ -105,21 +163,11 @@ class Streamer:
         urls: list[str],
         routing: RoutingDecision | None = None,
     ) -> None:
-        msg = {
-            "type": "frame",
-            "ts": frame.timestamp,
-            "app": frame.app_name,
-            "bundle": frame.bundle_id,
-            "window": frame.window_title,
-            "ocr_text": ocr_text,
-            "urls": urls,
-            "image": base64.b64encode(frame.jpeg_data).decode("ascii"),
-            "w": frame.width,
-            "h": frame.height,
-        }
-        if routing is not None:
-            msg.update(routing.to_wire())
-        payload = json.dumps(msg)
+        payload, frame_ts = build_frame_payload(frame, ocr_text, urls, routing)
+        if self._upload_queue is not None:
+            self._upload_queue.append("frame", payload, frame_ts)
+            self._queue_wakeup.set()
+            return
         if self._queue.full():
             # Drop oldest
             try:
@@ -128,7 +176,7 @@ class Streamer:
                 log.warning("queue_full_dropping_frame")
             except asyncio.QueueEmpty:
                 pass
-        await self._queue.put((payload, frame.timestamp))
+        await self._queue.put((payload, frame_ts))
 
     async def send_audio(
         self,
@@ -139,14 +187,17 @@ class Streamer:
         is_input_device: bool,
     ) -> None:
         """Send a meeting audio transcript to the server."""
-        msg = json.dumps({
-            "type": "audio",
-            "ts": ts,
-            "transcript": transcript,
-            "meeting_app": meeting_app,
-            "device_name": device_name,
-            "is_input_device": is_input_device,
-        })
+        msg, frame_ts = build_audio_payload(
+            ts=ts,
+            transcript=transcript,
+            meeting_app=meeting_app,
+            device_name=device_name,
+            is_input_device=is_input_device,
+        )
+        if self._upload_queue is not None:
+            self._upload_queue.append("audio", msg, frame_ts)
+            self._queue_wakeup.set()
+            return
         if self._queue.full():
             try:
                 self._queue.get_nowait()
@@ -156,7 +207,7 @@ class Streamer:
                 pass
         # Audio messages don't gate cleanup (we cleanup screen frames,
         # not audio rows in screenpipe), so pass None for the ts.
-        await self._queue.put((msg, None))
+        await self._queue.put((msg, frame_ts))
 
     async def _send_loop(self) -> None:
         while True:
@@ -184,6 +235,46 @@ class Streamer:
                     self._connected = False
                     self._connected_event.clear()
                 except Exception:
+                    log.warning("send_failed", exc_info=True)
+                    self._connected = False
+                    self._connected_event.clear()
+
+    async def _durable_send_loop(self) -> None:
+        assert self._upload_queue is not None
+        while True:
+            await self._connected_event.wait()
+            items = self._upload_queue.peek(1)
+            if not items:
+                self._queue_wakeup.clear()
+                try:
+                    await asyncio.wait_for(self._queue_wakeup.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                continue
+
+            item = items[0]
+            while True:
+                await self._connected_event.wait()
+                try:
+                    ws = self._ws
+                    if ws is None:
+                        self._connected_event.clear()
+                        continue
+                    await asyncio.wait_for(ws.send(item.payload), timeout=30)
+                    self._upload_queue.delete(item.id)
+                    self._frames_sent += 1
+                    if item.frame_ts is not None:
+                        if (self._last_uploaded_ts is None
+                                or item.frame_ts > self._last_uploaded_ts):
+                            self._last_uploaded_ts = item.frame_ts
+                    break
+                except asyncio.TimeoutError:
+                    self._upload_queue.mark_failed(item.id, "send_timeout")
+                    log.warning("send_timeout")
+                    self._connected = False
+                    self._connected_event.clear()
+                except Exception as e:
+                    self._upload_queue.mark_failed(item.id, str(e))
                     log.warning("send_failed", exc_info=True)
                     self._connected = False
                     self._connected_event.clear()

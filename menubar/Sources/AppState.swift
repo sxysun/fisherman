@@ -85,7 +85,9 @@ final class AppState {
     var backendMode: String = "local"
     var streamingEnabled = false
     var framesSent: Int = 0
+    var framesStreamed: Int = 0
     var framesDropped: Int = 0
+    var uploadQueuePending: Int = 0
 
     // Pause
     var isPaused = false
@@ -113,11 +115,88 @@ final class AppState {
         if let detail = errorDetail {
             return detail
         }
+        if let backendDetail = backendStatusDetail, status == .degraded {
+            return backendDetail
+        }
         return status.rawValue
     }
 
+    var ingestExpected: Bool {
+        backendMode == "cloud" || backendMode == "self_hosted"
+    }
+
     var fishermanHealthy: Bool {
-        fishermanRunning && (!streamingEnabled || fishermanConnected)
+        guard fishermanRunning else { return false }
+        if streamingEnabled {
+            return fishermanConnected
+        }
+        return !ingestExpected
+    }
+
+    var fishermanServiceLabel: String {
+        if !fishermanRunning {
+            return "down"
+        }
+        if streamingEnabled {
+            return fishermanConnected ? "uploading" : "ingest down"
+        }
+        if backendMode == "cloud" {
+            return "cloud ingest off"
+        }
+        if backendMode == "self_hosted" {
+            return "ingest disabled"
+        }
+        return "local only"
+    }
+
+    var fishermanServiceIcon: String {
+        if fishermanHealthy {
+            return "checkmark.circle.fill"
+        }
+        if fishermanRunning {
+            return "exclamationmark.circle.fill"
+        }
+        return "xmark.circle.fill"
+    }
+
+    var fishermanServiceColor: NSColor {
+        if fishermanHealthy {
+            return .systemGreen
+        }
+        if fishermanRunning {
+            return .systemOrange
+        }
+        return .systemRed
+    }
+
+    var primaryFrameLabel: String {
+        streamingEnabled ? "Uploaded" : "Captured"
+    }
+
+    var primaryFrameCount: Int {
+        streamingEnabled ? framesStreamed : framesSent
+    }
+
+    var secondaryFrameLabel: String {
+        ingestExpected ? "Queued" : "Dropped"
+    }
+
+    var secondaryFrameCount: Int {
+        ingestExpected ? uploadQueuePending : framesDropped
+    }
+
+    private var backendStatusDetail: String? {
+        guard fishermanRunning else { return nil }
+        if streamingEnabled && !fishermanConnected {
+            return "Ingest disconnected"
+        }
+        if !streamingEnabled && backendMode == "cloud" {
+            return "Cloud ingest off"
+        }
+        if !streamingEnabled && backendMode == "self_hosted" {
+            return "Ingest disabled"
+        }
+        return nil
     }
 
     func update(screenpipeOK: Bool, fishermanStatus: [String: Any]?) {
@@ -129,12 +208,16 @@ final class AppState {
             streamingEnabled = s["streaming_enabled"] as? Bool ?? true
             fishermanConnected = s["connected"] as? Bool ?? false
             framesSent = s["frames_sent"] as? Int ?? 0
+            framesStreamed = s["frames_streamed"] as? Int ?? (streamingEnabled ? framesSent : 0)
             framesDropped = s["frames_dropped"] as? Int ?? 0
+            uploadQueuePending = s["upload_queue_pending"] as? Int ?? 0
             isPaused = s["paused"] as? Bool ?? false
             errorDetail = s["error"] as? String
         } else {
             fishermanRunning = false
             fishermanConnected = false
+            framesStreamed = 0
+            uploadQueuePending = 0
         }
 
         // Derive overall status

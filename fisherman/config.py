@@ -273,6 +273,13 @@ class FishermanConfig(BaseSettings):
     # cleanup deleted a lot. 0 disables.
     screenpipe_cleanup_vacuum_threshold: int = 50_000
 
+    # Durable raw-ingest outbox. When enabled, Cloud/self-hosted modes write
+    # upload payloads to disk before sending so short outages and Cloud-ingest
+    # provisioning gaps do not silently drop recent context.
+    upload_queue_enabled: bool = True
+    upload_queue_path: str = "~/.fisherman/upload-outbox.sqlite"
+    upload_queue_max: int = 1000
+
     # Ambient audio (meeting transcripts). Only forwarded while the meeting
     # detector says the user is in a call. Requires screenpipe to have audio
     # capture enabled (i.e. menubar launched it without --disable-audio).
