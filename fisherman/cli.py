@@ -615,9 +615,14 @@ def _audit_print_table(res, *, mirror_url: str, live_tls_fp: str | None,
 
 def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
     meas = res.measurements
+    bundle = res.bundle or {}
     return {
         "mirror_url": mirror_url,
         "all_required_ok": res.all_required_ok,
+        "app": {
+            "app_id": bundle.get("app_id"),
+            "instance_id": bundle.get("instance_id"),
+        },
         "release": {
             "git_commit": res.git_commit,
             "image_digest": res.image_digest,

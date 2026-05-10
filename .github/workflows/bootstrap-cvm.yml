@@ -55,6 +55,8 @@ jobs:
       NODE_ID:      ${{ vars.PHALA_NODE_ID }}
       GATEWAY:      ${{ vars.PHALA_GATEWAY }}
       COMPOSE_FILE: mirror/deploy/docker-compose.phala.yaml
+      PHALA_EXPECTED_USER: ${{ vars.PHALA_EXPECTED_USER || 'sxysun' }}
+      PHALA_EXPECTED_WORKSPACE_SLUG: ${{ vars.PHALA_EXPECTED_WORKSPACE_SLUG || 'sxysuns-projects' }}
       MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
       RELAY_DOMAIN:  ${{ vars.RELAY_DOMAIN || 'relay.fisherman.teleport.computer' }}
 
@@ -86,6 +88,30 @@ jobs:
           npm install -g phala
           sudo apt-get update -qq
           sudo apt-get install -y -qq jq curl
+
+      - name: Assert Phala account
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          set -euo pipefail
+          ME_JSON="$(mktemp)"
+          curl -fsS "https://cloud-api.phala.com/api/v1/users/me" \
+            -H "X-API-Key: $PHALA_CLOUD_API_KEY" > "$ME_JSON"
+
+          if [[ -n "${PHALA_EXPECTED_USER:-}" ]]; then
+            if ! jq -e --arg user "$PHALA_EXPECTED_USER" \
+              'tostring | contains($user)' "$ME_JSON" >/dev/null; then
+              echo "::error::Phala token is not for expected user '$PHALA_EXPECTED_USER'."
+              exit 1
+            fi
+          fi
+          if [[ -n "${PHALA_EXPECTED_WORKSPACE_SLUG:-}" ]]; then
+            if ! jq -e --arg slug "$PHALA_EXPECTED_WORKSPACE_SLUG" \
+              'tostring | contains($slug)' "$ME_JSON" >/dev/null; then
+              echo "::warning::Phala user response did not expose workspace slug '$PHALA_EXPECTED_WORKSPACE_SLUG'. Bootstrap will still create the CVM under the token's active workspace."
+            fi
+          fi
+          echo "Phala token passed expected-account guard"
 
       - uses: foundry-rs/foundry-toolchain@v1.8.0
         with:

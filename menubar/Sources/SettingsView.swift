@@ -1,5 +1,19 @@
 import SwiftUI
 
+private struct CloudReleaseReview {
+    let url: String
+    let composeHash: String
+    let gitCommit: String
+    let imageDigest: String
+    let appID: String
+    let liveTLSFingerprint: String
+    let attestedTLSFingerprint: String
+    let cloudRequiredOK: Bool
+    let failures: [String]
+    let approvalTitle: String
+    let approvalDetail: String
+}
+
 struct SettingsView: View {
     var config: ConfigManager
     var onSave: () -> Void
@@ -16,6 +30,8 @@ struct SettingsView: View {
     @State private var selectedTab: SettingsTab = .server
     @State private var cloudApprovalStatus: String?
     @State private var cloudTrustSummary: String?
+    @State private var cloudReview: CloudReleaseReview?
+    @State private var reviewingCloud = false
     @State private var approvingCloud = false
 
     @State private var displayName: String = ""
@@ -175,32 +191,7 @@ struct SettingsView: View {
                 hintText("New context is stored and processed by Fisherman Cloud. Changing homes affects new uploads only; history is not copied automatically.")
                 hintText("Raw context is processed inside the approved Cloud CVM. Cloud stores ciphertext under your client-held tenant key; after a deploy or restart, the runtime cannot decrypt history again until an approved device reconnects.")
                 hintText("Friend status uses separate end-to-end encryption to each friend; the relay does not receive plaintext status.")
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Button(approvingCloud ? "Reviewing Cloud..." : "Review Cloud Attestation") {
-                            approveCloud()
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(approvingCloud)
-                        Text(cloudApprovalBadge)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(cloudTrustSummary == nil ? .orange : .green)
-                    }
-                    hintText("Approval verifies the live TEE quote, allowed compose hash, release git identity, image digest, and TLS binding. If any of those change later, raw Cloud uploads queue locally until you approve the new release.")
-                    if let cloudTrustSummary {
-                        Text(cloudTrustSummary)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                            .lineLimit(4)
-                    }
-                    if let cloudApprovalStatus {
-                        Text(cloudApprovalStatus)
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(5)
-                    }
-                }
+                cloudApprovalPanel
             } else if backendMode == "self_hosted" {
                 fieldRow("Self-hosted URL", placeholder: "wss://your-server:9999/ingest", text: $selfHostedURL)
                 hintText("New context is written to the server you operate. One URL is enough; Fisherman derives activity, history, and agent endpoints automatically.")
@@ -234,6 +225,108 @@ struct SettingsView: View {
             .font(.system(size: 12, weight: .medium))
 
             hintText("Agent access and activity status use whichever context home is active. Switching homes affects new uploads only; it does not sync old history between homes.")
+        }
+    }
+
+    private var cloudApprovalPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Cloud release approval")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(cloudApprovalBadge)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(cloudApprovalColor)
+                }
+                Spacer()
+                Button(reviewingCloud ? "Reviewing..." : "Review Release") {
+                    reviewCloud()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(reviewingCloud || approvingCloud)
+            }
+
+            hintText("Review fetches the live TEE quote and compares compose hash, release git, image digest, app identity, and TLS binding against this Mac's approved record.")
+
+            if let cloudReview {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(cloudReview.approvalTitle)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(cloudReview.cloudRequiredOK ? Color.primary : Color.red)
+                        Spacer()
+                        Text(cloudReview.cloudRequiredOK ? "Audit passed" : "Audit failed")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(cloudReview.cloudRequiredOK ? .green : .red)
+                    }
+
+                    Text(cloudReview.approvalDetail)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        cloudReviewRow("URL", cloudReview.url)
+                        cloudReviewRow("Compose", shortHash(cloudReview.composeHash, prefix: "0x"))
+                        cloudReviewRow("Git", shortHash(cloudReview.gitCommit))
+                        cloudReviewRow("Image", shortImageDigest(cloudReview.imageDigest))
+                        cloudReviewRow("App", shortHash(cloudReview.appID))
+                        cloudReviewRow("TLS", shortHash(cloudReview.liveTLSFingerprint))
+                    }
+
+                    if !cloudReview.failures.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(cloudReview.failures.prefix(4)), id: \.self) { failure in
+                                Text("• \(failure)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.red)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button(approvingCloud ? "Approving..." : "Approve & Use This Release") {
+                            approveCloud()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(!cloudReview.cloudRequiredOK || approvingCloud || reviewingCloud)
+                    }
+                }
+                .padding(10)
+                .background(Color.secondary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            } else if let cloudTrustSummary {
+                Text(cloudTrustSummary)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(4)
+            }
+
+            if let cloudApprovalStatus {
+                Text(cloudApprovalStatus)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func cloudReviewRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .frame(width: 48, alignment: .leading)
+            Text(value.isEmpty ? "unknown" : value)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 
@@ -720,12 +813,37 @@ struct SettingsView: View {
         friendCodeError = nil
     }
 
+    private func reviewCloud() {
+        let savedCloudURL = currentCloudURL()
+        reviewingCloud = true
+        cloudApprovalStatus = "Reviewing live Cloud release. No private context is uploaded during review."
+        cloudReview = nil
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = CliBridge.run(
+                ["cloud", "audit", savedCloudURL, "--json", "--timeout", "15"],
+                timeout: 75
+            )
+            DispatchQueue.main.async {
+                reviewingCloud = false
+                if let review = parseCloudReview(stdout: result.stdout, fallbackURL: savedCloudURL) {
+                    cloudReview = review
+                    cloudApprovalStatus = result.exitCode == 0
+                        ? "Review complete. Approve only if the release identity is the one you expect."
+                        : "Review found problems. Raw Cloud uploads will stay blocked in strict mode."
+                } else {
+                    let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    cloudApprovalStatus = detail.isEmpty ? "Could not parse Cloud audit output" : detail
+                }
+            }
+        }
+    }
+
     private func approveCloud() {
-        let trimmedCloud = cloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let savedCloudURL = trimmedCloud.isEmpty ? defaultCloudURL : trimmedCloud
+        let savedCloudURL = currentCloudURL()
         let relayURL = statusRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
         approvingCloud = true
-        cloudApprovalStatus = "Auditing Cloud..."
+        cloudApprovalStatus = "Approving this release. Fisherman will pin its compose hash, git commit, image digest, app identity, and TLS-bound attestation."
         DispatchQueue.global(qos: .userInitiated).async {
             var args = ["backend", "configure", "cloud", "--url", savedCloudURL]
             if !relayURL.isEmpty {
@@ -743,6 +861,7 @@ struct SettingsView: View {
                     statusRelayURL = config.statusRelayURL
                     serverURL = config.serverURL
                     loadCloudTrustSummary()
+                    cloudReview = nil
                     cloudApprovalStatus = "Approved. Raw Cloud uploads are allowed for this release; restart the daemon if it was already running."
                 } else {
                     let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -752,9 +871,136 @@ struct SettingsView: View {
         }
     }
 
+    private func currentCloudURL() -> String {
+        let trimmedCloud = cloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedCloud.isEmpty ? defaultCloudURL : trimmedCloud
+    }
+
+    private func parseCloudReview(stdout: String, fallbackURL: String) -> CloudReleaseReview? {
+        guard let data = stdout.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        let release = raw["release"] as? [String: Any] ?? [:]
+        let app = raw["app"] as? [String: Any] ?? [:]
+        let failures = raw["cloud_required_failures"] as? [String]
+            ?? raw["errors"] as? [String]
+            ?? []
+        let cloudRequiredOK = raw["cloud_required_ok"] as? Bool
+            ?? (raw["all_required_ok"] as? Bool ?? false)
+
+        let url = raw["mirror_url"] as? String ?? fallbackURL
+        let compose = raw["compose_hash"] as? String ?? ""
+        let git = release["git_commit"] as? String ?? ""
+        let image = release["image_digest"] as? String ?? ""
+        let appID = app["app_id"] as? String ?? ""
+        let liveTLS = raw["live_tls_fingerprint_hex"] as? String ?? ""
+        let attestedTLS = raw["attested_tls_fingerprint_hex"] as? String ?? ""
+
+        let trust = loadCloudTrustRecord()
+        let comparison = compareCloudReview(
+            url: url,
+            compose: compose,
+            git: git,
+            image: image,
+            appID: appID,
+            trust: trust
+        )
+
+        return CloudReleaseReview(
+            url: url,
+            composeHash: compose,
+            gitCommit: git,
+            imageDigest: image,
+            appID: appID,
+            liveTLSFingerprint: liveTLS,
+            attestedTLSFingerprint: attestedTLS,
+            cloudRequiredOK: cloudRequiredOK,
+            failures: failures,
+            approvalTitle: comparison.title,
+            approvalDetail: comparison.detail
+        )
+    }
+
+    private func compareCloudReview(
+        url: String,
+        compose: String,
+        git: String,
+        image: String,
+        appID: String,
+        trust: [String: Any]?
+    ) -> (title: String, detail: String) {
+        guard let trust else {
+            return (
+                "No Cloud release approved on this Mac",
+                "Approve this release only if the audit passed and this is the Fisherman Cloud endpoint you intend to use."
+            )
+        }
+
+        var changed: [String] = []
+        if normalizeCloudURL(trust["cloud_url"] as? String ?? "") != normalizeCloudURL(url) {
+            changed.append("URL")
+        }
+        if (trust["compose_hash"] as? String ?? "") != compose {
+            changed.append("compose")
+        }
+        if (trust["git_commit"] as? String ?? "") != git {
+            changed.append("git")
+        }
+        if (trust["image_digest"] as? String ?? "") != image {
+            changed.append("image")
+        }
+        let approvedAppID = trust["app_id"] as? String ?? ""
+        if !approvedAppID.isEmpty && !appID.isEmpty && approvedAppID != appID {
+            changed.append("app")
+        }
+
+        if changed.isEmpty {
+            return (
+                "Matches the approved Cloud release",
+                "Strict mode can upload raw context to this release because it matches the pinned trust record on this Mac."
+            )
+        }
+        return (
+            "New Cloud release requires approval",
+            "Changed: \(changed.joined(separator: ", ")). Until approved, strict mode keeps capturing locally and queues uploads instead of sending raw context."
+        )
+    }
+
+    private func loadCloudTrustRecord() -> [String: Any]? {
+        let trustURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".fisherman/cloud-trust.json")
+        guard let data = try? Data(contentsOf: trustURL) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    private func normalizeCloudURL(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed) else {
+            return trimmed
+        }
+        if components.scheme == "ws" {
+            components.scheme = "http"
+        } else if components.scheme == "wss" {
+            components.scheme = "https"
+        }
+        if components.path == "/ingest" {
+            components.path = ""
+        }
+        components.query = nil
+        components.fragment = nil
+        return (components.string ?? trimmed).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
     private var cloudApprovalBadge: String {
         if approvingCloud {
-            return "Checking attestation"
+            return "Approving"
+        }
+        if reviewingCloud {
+            return "Reviewing"
+        }
+        if let cloudReview {
+            return cloudReview.cloudRequiredOK ? "Ready to approve" : "Audit failed"
         }
         if cloudTrustSummary != nil {
             return "Approved"
@@ -762,12 +1008,18 @@ struct SettingsView: View {
         return "Not approved"
     }
 
+    private var cloudApprovalColor: Color {
+        if let cloudReview {
+            return cloudReview.cloudRequiredOK ? .orange : .red
+        }
+        if reviewingCloud || approvingCloud {
+            return .orange
+        }
+        return cloudTrustSummary == nil ? .orange : .green
+    }
+
     private func loadCloudTrustSummary() {
-        let trustURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".fisherman/cloud-trust.json")
-        guard let data = try? Data(contentsOf: trustURL),
-              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
+        guard let raw = loadCloudTrustRecord() else {
             cloudTrustSummary = nil
             return
         }

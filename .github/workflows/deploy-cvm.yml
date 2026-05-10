@@ -38,6 +38,7 @@ jobs:
       COMPOSE_FILE:  mirror/deploy/docker-compose.phala.yaml
       MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
       RELAY_DOMAIN:  ${{ vars.RELAY_DOMAIN || 'relay.fisherman.teleport.computer' }}
+      PHALA_EXPECTED_WORKSPACE_SLUG: ${{ vars.PHALA_EXPECTED_WORKSPACE_SLUG || 'sxysuns-projects' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -67,6 +68,30 @@ jobs:
           npm install -g phala
           sudo apt-get update -qq
           sudo apt-get install -y -qq jq curl
+
+      - name: Assert Phala token controls target CVM
+        env:
+          PHALA_CLOUD_API_KEY: ${{ secrets.PHALA_CLOUD_API_KEY }}
+        run: |
+          set -euo pipefail
+          CVMS_JSON="$(mktemp)"
+          curl -fsS "https://cloud-api.phala.com/api/v1/cvms" \
+            -H "X-API-Key: $PHALA_CLOUD_API_KEY" > "$CVMS_JSON"
+
+          if ! jq -e --arg id "${{ vars.CVM_VM_UUID }}" \
+            'type == "array" and any(.[]; .vm_uuid == $id)' "$CVMS_JSON" >/dev/null; then
+            echo "::error::CVM_VM_UUID=${{ vars.CVM_VM_UUID }} is not visible to this Phala token."
+            echo "::error::To move Cloud to sxysuns-projects, set PHALA_CLOUD_API_KEY from that workspace and bootstrap or select a sxysun-owned CVM, then update CVM_VM_UUID."
+            exit 1
+          fi
+
+          if [[ -n "${PHALA_EXPECTED_WORKSPACE_SLUG:-}" ]]; then
+            if ! jq -e --arg slug "$PHALA_EXPECTED_WORKSPACE_SLUG" \
+              'tostring | contains($slug)' "$CVMS_JSON" >/dev/null; then
+              echo "::warning::Phala CVM list did not expose expected workspace slug '$PHALA_EXPECTED_WORKSPACE_SLUG'; continuing because target CVM is visible to the token."
+            fi
+          fi
+          echo "Phala token can see target CVM ${{ vars.CVM_VM_UUID }}"
 
       - uses: foundry-rs/foundry-toolchain@v1.8.0
         with:
