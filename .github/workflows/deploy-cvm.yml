@@ -75,8 +75,14 @@ jobs:
         run: |
           set -euo pipefail
           CVMS_JSON="$(mktemp)"
-          curl -fsS "https://cloud-api.phala.com/api/v1/cvms" \
-            -H "X-API-Key: $PHALA_CLOUD_API_KEY" > "$CVMS_JSON"
+          HTTP_CODE=$(curl -sS -w "%{http_code}" -o "$CVMS_JSON" \
+            "https://cloud-api.phala.com/api/v1/cvms" \
+            -H "X-API-Key: $PHALA_CLOUD_API_KEY")
+          if [[ "$HTTP_CODE" != "200" ]]; then
+            echo "::error::Phala API rejected PHALA_CLOUD_API_KEY with HTTP $HTTP_CODE."
+            echo "::error::Create a fresh API key in sxysuns-projects, update the GitHub secret, then rerun this workflow."
+            exit 1
+          fi
 
           if ! jq -e --arg id "${{ vars.CVM_VM_UUID }}" \
             'type == "array" and any(.[]; .vm_uuid == $id)' "$CVMS_JSON" >/dev/null; then
