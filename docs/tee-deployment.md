@@ -76,7 +76,7 @@ byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.
 
 ### 2. dstack compose
 
-`docker-compose.phala.yaml` declares five services:
+`docker-compose.phala.yaml` declares six services:
 
 - **ingress** (`dstacktee/dstack-ingress:<digest>`) — TLS termination
   for the Cloud backend and relay hostnames, LE certs via CF DNS-01
@@ -84,10 +84,14 @@ byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.
 - **cloud** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — public gateway.
   `/health` returns capability state; `/.well-known/attestation` is
   proxied to mirror; `/ingest` and `/api/*` are proxied to Cloud ingest.
+- **postgres** (`postgres:16-alpine@<digest>`) — local persistent Postgres
+  for managed Cloud ingest, stored on the CVM volume and not exposed through
+  ingress.
 - **cloud-ingest** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
-  `server/cloud_ingest.py`. Until `DATABASE_URL`, `ENCRYPTION_KEY`, and
-  R2 credentials are injected, it serves structured `not_configured`
-  health and does not accept raw context.
+  `server/cloud_ingest.py`. By default it uses the local Postgres service,
+  generates/persists its Fernet key under `/data/secrets/`, and stores
+  encrypted frame blobs under `/data/frames`. R2 and externally injected
+  database/key env vars remain supported for a later production profile.
 - **mirror** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
   `python -m mirror.server`, reads its config from KMS-derived secrets.
 - **relay** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs

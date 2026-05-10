@@ -24,9 +24,10 @@ Fisherman Cloud, the same ingest code runs inside the managed attested
 TEE/CVM path with multi-tenant mode enabled.
 
 In the Cloud compose, `cloud_ingest.py` is the entrypoint. It serves
-structured `/health` with `ingest_ready=false` until managed Postgres,
-`ENCRYPTION_KEY`, and R2 credentials are provisioned, then delegates to
-`ingest.py`.
+structured `/health`; the default CVM profile uses a local persistent
+Postgres service, generates/persists a Fernet key under `/data/secrets/`,
+and stores encrypted frame blobs on the CVM volume. External Postgres,
+injected `ENCRYPTION_KEY`, and R2 credentials remain supported overrides.
 
 ## Quick Start
 
@@ -91,9 +92,10 @@ Auth model:
 | `HTTP_API_PORT` | No | `9998` | HTTP API listen port (owner activity endpoints) |
 | `FISH_MULTI_TENANT` | No | unset | Enable Cloud tenant mode. Each valid FishKey pubkey becomes its own user namespace |
 
-Cloud production treats `DATABASE_URL`, `ENCRYPTION_KEY`, all three R2
-credentials, and `FISH_MULTI_TENANT=1` as readiness requirements. Local
-self-hosting can still use local disk instead of R2.
+Cloud production requires `DATABASE_URL` and `FISH_MULTI_TENANT=1`.
+`ENCRYPTION_KEY` may be injected or generated once into the persistent CVM
+volume. R2 credentials are optional; when absent, encrypted frame blobs are
+stored on local CVM disk.
 
 ### Storage Backends
 

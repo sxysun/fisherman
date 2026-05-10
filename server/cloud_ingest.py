@@ -1,19 +1,22 @@
 """Cloud ingest entrypoint with explicit readiness gating.
 
-The production Cloud compose should be able to boot before tenant storage
-secrets are provisioned. In that state this process serves /health with
-structured "not_configured" details instead of crash-looping the CVM.
-Once the required env exists, it delegates to ingest.py.
+The production Cloud compose should be able to run self-contained inside
+the attested CVM. DATABASE_URL is provided by the local Postgres service;
+ENCRYPTION_KEY can either be injected through encrypted env or generated
+once into the persistent /data volume. R2 is optional: when absent,
+storage.py uses encrypted local disk under /data/frames.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 import signal
 from typing import Any
 
 from aiohttp import web
+from cryptography.fernet import Fernet
 import structlog
 
 
@@ -21,19 +24,65 @@ log = structlog.get_logger()
 
 _REQUIRED_ENV = (
     "DATABASE_URL",
-    "ENCRYPTION_KEY",
-    "R2_ACCOUNT_ID",
-    "R2_ACCESS_KEY_ID",
-    "R2_SECRET_ACCESS_KEY",
 )
+_DEFAULT_KEY_FILE = "/data/secrets/encryption.key"
 
 
 def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def missing_required_env() -> list[str]:
+def _ensure_encryption_key() -> str | None:
+    """Load or create the Fernet key used by storage.py.
+
+    Returns the key source ("env", "file", or "generated_file") when the
+    process has a usable key. Returns None if the key cannot be provisioned.
+    """
+    existing = os.environ.get("ENCRYPTION_KEY", "").strip()
+    if existing:
+        return "env"
+
+    key_path = Path(os.environ.get("FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE", _DEFAULT_KEY_FILE))
+    try:
+        if key_path.exists():
+            key = key_path.read_text().strip()
+            if key:
+                os.environ["ENCRYPTION_KEY"] = key
+                return "file"
+
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key = Fernet.generate_key().decode()
+        tmp = key_path.with_suffix(".tmp")
+        tmp.write_text(key + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, key_path)
+        try:
+            os.chmod(key_path, 0o600)
+        except OSError:
+            pass
+        os.environ["ENCRYPTION_KEY"] = key
+        return "generated_file"
+    except Exception:
+        log.warning("cloud_ingest_key_provision_failed", path=str(key_path), exc_info=True)
+        return None
+
+
+def _storage_backend() -> str:
+    if (
+        os.environ.get("R2_ACCOUNT_ID")
+        and os.environ.get("R2_ACCESS_KEY_ID")
+        and os.environ.get("R2_SECRET_ACCESS_KEY")
+    ):
+        return "r2"
+    return "local"
+
+
+def missing_required_env(key_source: str | None = None) -> list[str]:
+    if key_source is None:
+        key_source = _ensure_encryption_key()
     missing = [name for name in _REQUIRED_ENV if not os.environ.get(name)]
+    if key_source is None:
+        missing.append("ENCRYPTION_KEY")
     if not (
         _truthy("FISH_MULTI_TENANT")
         or _truthy("FISHERMAN_MULTI_TENANT")
@@ -44,14 +93,16 @@ def missing_required_env() -> list[str]:
 
 
 def readiness_payload() -> dict[str, Any]:
-    missing = missing_required_env()
+    key_source = _ensure_encryption_key()
+    missing = missing_required_env(key_source)
     ready = not missing
     return {
         "status": "ok" if ready else "not_configured",
         "configured": ready,
         "ingest_ready": ready,
         "multi_tenant": True,
-        "storage": "r2" if ready else None,
+        "storage": _storage_backend() if ready else None,
+        "encryption_key_source": key_source,
         "missing": missing,
     }
 

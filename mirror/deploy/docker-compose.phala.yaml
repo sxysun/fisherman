@@ -1,6 +1,6 @@
 # fisherman-mirror — Phala TDX CVM compose.
 #
-# Five services:
+# Six services:
 #   - ingress: dstack-ingress 2.2 — TLS termination + LE certs via CF
 #              DNS-01 inside the CVM. Reads CLOUDFLARE_API_TOKEN over
 #              the encrypted env channel (`phala deploy -e CF_API_TOKEN=...`).
@@ -17,9 +17,12 @@
 #   - relay:   fisherman-relay — official low-trust relay for friend
 #              status and deputy RPC routing. It persists only signed
 #              ciphertext, never raw context or plaintext status.
-#   - cloud-ingest: multi-tenant raw-context ingest. It serves structured
-#              not_configured health until DATABASE_URL, ENCRYPTION_KEY,
-#              and R2 credentials are injected through encrypted env.
+#   - postgres: local persistent Postgres for managed Cloud ingest. This
+#              keeps the alpha Cloud self-contained inside the attested CVM.
+#   - cloud-ingest: multi-tenant raw-context ingest. It uses local Postgres
+#              by default, generates/persists its Fernet key under /data if
+#              no encrypted env key is injected, and stores encrypted frames
+#              on the CVM volume unless R2 credentials are supplied.
 #
 # IMPORTANT: every literal in this file enters the compose_hash that
 # we publish on-chain via FishermanAppAuth.addComposeHash(). Cosmetic
@@ -88,6 +91,27 @@ services:
       cloud-ingest:
         condition: service_started
 
+  postgres:
+    image: postgres:16-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=fisherman
+      - POSTGRES_USER=fisherman
+      # Internal-only database on the CVM Docker network. No ingress route
+      # exposes 5432. For production billing/accounting we can swap this for
+      # an injected password or managed database without changing clients.
+      - POSTGRES_HOST_AUTH_METHOD=trust
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - cloud-postgres-data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fisherman -d fisherman"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   mirror:
     # Pinned to a per-commit tag (substituted at deploy time via
     # `phala deploy -e MIRROR_IMAGE_TAG=<sha>`) so each rollout forces
@@ -131,7 +155,8 @@ services:
       - HTTP_API_PORT=9998
       - FISH_MULTI_TENANT=1
       - FISHERMAN_FRAMES_DIR=/data/frames
-      - DATABASE_URL=${FISHERMAN_CLOUD_DATABASE_URL:-}
+      - FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE=/data/secrets/encryption.key
+      - DATABASE_URL=${FISHERMAN_CLOUD_DATABASE_URL:-postgresql://fisherman@postgres:5432/fisherman}
       - ENCRYPTION_KEY=${FISHERMAN_CLOUD_ENCRYPTION_KEY:-}
       - R2_ACCOUNT_ID=${FISHERMAN_CLOUD_R2_ACCOUNT_ID:-}
       - R2_ACCESS_KEY_ID=${FISHERMAN_CLOUD_R2_ACCESS_KEY_ID:-}
@@ -145,6 +170,9 @@ services:
     expose:
       - "9998"
       - "9999"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   relay:
     image: ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}
@@ -170,6 +198,7 @@ services:
 volumes:
   mirror-data:
   cloud-ingest-data:
+  cloud-postgres-data:
   relay-data:
   fisherman_ingress_letsencrypt:
   fisherman_ingress_evidences:

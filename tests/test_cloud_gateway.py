@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -73,23 +74,29 @@ class CloudGatewayTests(unittest.TestCase):
 class CloudIngestReadinessTests(unittest.TestCase):
     def setUp(self):
         self._old_env = os.environ.copy()
+        self._tmp = tempfile.TemporaryDirectory()
         for key in [
             "DATABASE_URL",
             "ENCRYPTION_KEY",
             "R2_ACCOUNT_ID",
             "R2_ACCESS_KEY_ID",
             "R2_SECRET_ACCESS_KEY",
+            "FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE",
             "FISH_MULTI_TENANT",
             "FISHERMAN_MULTI_TENANT",
             "FISHERMAN_CLOUD_MULTI_TENANT",
         ]:
             os.environ.pop(key, None)
+        os.environ["FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE"] = str(
+            Path(self._tmp.name) / "encryption.key"
+        )
 
     def tearDown(self):
         os.environ.clear()
         os.environ.update(self._old_env)
+        self._tmp.cleanup()
 
-    def test_cloud_ingest_is_not_ready_until_required_managed_env_exists(self):
+    def test_cloud_ingest_is_not_ready_until_database_and_multitenant_exist(self):
         cloud_ingest = _load_cloud_ingest_module()
 
         payload = cloud_ingest.readiness_payload()
@@ -97,14 +104,31 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertEqual(payload["status"], "not_configured")
         self.assertFalse(payload["ingest_ready"])
         self.assertIn("DATABASE_URL", payload["missing"])
-        self.assertIn("R2_SECRET_ACCESS_KEY", payload["missing"])
+        self.assertNotIn("ENCRYPTION_KEY", payload["missing"])
+        self.assertNotIn("R2_SECRET_ACCESS_KEY", payload["missing"])
         self.assertIn("FISH_MULTI_TENANT", payload["missing"])
+        self.assertEqual(payload["encryption_key_source"], "generated_file")
 
-    def test_cloud_ingest_ready_requires_multitenant_and_r2(self):
+    def test_cloud_ingest_ready_with_local_storage(self):
         os.environ.update(
             {
                 "DATABASE_URL": "postgresql://example",
-                "ENCRYPTION_KEY": "key",
+                "FISH_MULTI_TENANT": "1",
+            }
+        )
+        cloud_ingest = _load_cloud_ingest_module()
+
+        payload = cloud_ingest.readiness_payload()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["ingest_ready"])
+        self.assertEqual(payload["storage"], "local")
+        self.assertEqual(payload["missing"], [])
+
+    def test_cloud_ingest_reports_r2_when_credentials_exist(self):
+        os.environ.update(
+            {
+                "DATABASE_URL": "postgresql://example",
                 "R2_ACCOUNT_ID": "acct",
                 "R2_ACCESS_KEY_ID": "access",
                 "R2_SECRET_ACCESS_KEY": "secret",
@@ -116,9 +140,7 @@ class CloudIngestReadinessTests(unittest.TestCase):
         payload = cloud_ingest.readiness_payload()
 
         self.assertEqual(payload["status"], "ok")
-        self.assertTrue(payload["ingest_ready"])
         self.assertEqual(payload["storage"], "r2")
-        self.assertEqual(payload["missing"], [])
 
 
 if __name__ == "__main__":
