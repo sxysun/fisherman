@@ -119,7 +119,7 @@ jobs:
 
       - uses: foundry-rs/foundry-toolchain@v1.8.0
         with:
-          version: stable
+          version: v1.7.1
 
       # ---------------------------------------------------------------
       # Pre-flight: bail out if a CVM with our name already exists.
