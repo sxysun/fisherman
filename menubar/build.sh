@@ -41,6 +41,25 @@ if [ -d "$FISH_DIR/fisherman" ] && [ -d "../fisherman" ]; then
     echo "Synced daemon code to $FISH_DIR/fisherman/"
 fi
 
+# Keep `fisherman version` honest for local dogfood builds. The upgrade
+# command writes the same stamp after syncing code; this dev build path
+# needs to do it too, otherwise the menubar can be running current code
+# while the CLI reports an older install.
+if command -v python3 &>/dev/null; then
+    python3 - "$FISH_DIR" "$(cd .. && pwd)" <<'PY'
+import sys
+from pathlib import Path
+
+source_dir = Path(sys.argv[2])
+sys.path.insert(0, str(source_dir))
+
+from fisherman.upgrade import detect_source_local, write_version_stamp
+
+write_version_stamp(Path(sys.argv[1]), detect_source_local(source_dir))
+PY
+    echo "Stamped install version in $FISH_DIR/.fisherman-version"
+fi
+
 # Pre-sync the uv venv so the daemon can be launched directly via
 # .venv/bin/python — never via `uv run` at launch time. Launching via uv
 # re-resolves/installs on every start, and we've hit cases where that
