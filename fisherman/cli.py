@@ -1382,7 +1382,7 @@ def _backend_context_export_archive(
     side. Metadata-only exports keep the single-request path.
     """
     limit = max(1, int(limit))
-    image_batch = max(1, int(os.environ.get("FISH_CONTEXT_IMAGE_EXPORT_BATCH", "10") or "10"))
+    image_batch = max(1, int(os.environ.get("FISH_CONTEXT_IMAGE_EXPORT_BATCH", "5") or "5"))
     if not include_images or limit <= image_batch:
         return _backend_context_request(
             cfg,
