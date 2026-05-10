@@ -13,7 +13,7 @@ import click
 import structlog
 from dotenv import load_dotenv
 
-from crypto import decrypt_json, decrypt_text
+from crypto import decrypt_json, decrypt_text, unwrap_data_key
 from storage import create_storage
 
 load_dotenv()
@@ -44,20 +44,38 @@ async def _get_pool() -> asyncpg.Pool:
     return await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=4)
 
 
-def _decrypt_row(row: asyncpg.Record) -> dict:
+def _decrypt_text_with_fallback(raw: bytes, data_key: str | None) -> str:
+    try:
+        return decrypt_text(raw, data_key)
+    except Exception:
+        if data_key is None:
+            raise
+        return decrypt_text(raw)
+
+
+def _decrypt_json_with_fallback(raw: bytes, data_key: str | None) -> object:
+    try:
+        return decrypt_json(raw, data_key)
+    except Exception:
+        if data_key is None:
+            raise
+        return decrypt_json(raw)
+
+
+def _decrypt_row(row: asyncpg.Record, data_key: str | None = None) -> dict:
     """Decrypt a frames row into a plain dict."""
     d = dict(row)
     for field in ("ocr_text", "window"):
         raw = d.get(field)
         if raw:
             try:
-                d[field] = decrypt_text(bytes(raw))
+                d[field] = _decrypt_text_with_fallback(bytes(raw), data_key)
             except Exception:
                 d[field] = None
     urls_raw = d.get("urls")
     if urls_raw:
         try:
-            d["urls"] = decrypt_json(bytes(urls_raw))
+            d["urls"] = _decrypt_json_with_fallback(bytes(urls_raw), data_key)
         except Exception:
             d["urls"] = None
     # Make timestamps JSON-serializable
@@ -100,7 +118,32 @@ async def _query_frames(
         async with pool.acquire() as conn:
             rows = await conn.fetch(sql, *params)
 
-        results = [_decrypt_row(r) for r in rows]
+        user_pubkeys = sorted({
+            dict(r).get("user_pubkey")
+            for r in rows
+            if dict(r).get("user_pubkey")
+        })
+        key_by_user: dict[str, str | None] = {}
+        if user_pubkeys:
+            async with pool.acquire() as conn:
+                key_rows = await conn.fetch(
+                    """
+                    SELECT user_pubkey, wrapped_data_key
+                    FROM users
+                    WHERE user_pubkey = ANY($1::text[])
+                    """,
+                    user_pubkeys,
+                )
+            for key_row in key_rows:
+                wrapped = key_row["wrapped_data_key"]
+                key_by_user[key_row["user_pubkey"]] = (
+                    unwrap_data_key(bytes(wrapped)) if wrapped else None
+                )
+
+        results = [
+            _decrypt_row(r, key_by_user.get(dict(r).get("user_pubkey")))
+            for r in rows
+        ]
 
         # Client-side text search (OCR is encrypted so can't search in SQL)
         if search:
@@ -119,7 +162,22 @@ async def _query_frames(
 async def _download_image(image_key: str, output: str | None) -> str:
     """Download and decrypt an image. Returns the output path."""
     storage = create_storage()
-    jpeg_data = storage.download(image_key)
+    data_key = None
+    parts = image_key.split("/")
+    if len(parts) > 2 and parts[0] == "users":
+        user_pubkey = parts[1]
+        pool = await _get_pool()
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
+                    user_pubkey,
+                )
+            wrapped = row["wrapped_data_key"] if row else None
+            data_key = unwrap_data_key(bytes(wrapped)) if wrapped else None
+        finally:
+            await pool.close()
+    jpeg_data = storage.download(image_key, data_key=data_key)
 
     if output:
         out_path = output

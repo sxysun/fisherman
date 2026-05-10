@@ -77,6 +77,11 @@ def _storage_backend() -> str:
     return "local"
 
 
+def _enrollment_mode() -> str:
+    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "open").strip().lower()
+    return mode if mode in {"open", "allowlist", "closed"} else "closed"
+
+
 def missing_required_env(key_source: str | None = None) -> list[str]:
     if key_source is None:
         key_source = _ensure_encryption_key()
@@ -101,6 +106,7 @@ def readiness_payload() -> dict[str, Any]:
         "configured": ready,
         "ingest_ready": ready,
         "multi_tenant": True,
+        "enrollment_mode": _enrollment_mode(),
         "storage": _storage_backend() if ready else None,
         "encryption_key_source": key_source,
         "missing": missing,

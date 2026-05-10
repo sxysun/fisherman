@@ -36,7 +36,15 @@ except ImportError:
     web = None
     log.warning("aiohttp_not_installed", msg="Install aiohttp for HTTP API endpoint")
 
-from crypto import encrypt_json, encrypt_text, decrypt_text, decrypt_json
+from crypto import (
+    decrypt_json,
+    decrypt_text,
+    encrypt_json,
+    encrypt_text,
+    generate_data_key,
+    unwrap_data_key,
+    wrap_data_key,
+)
 from storage import R2Storage, create_storage
 from auth import (
     load_signing_key,
@@ -87,6 +95,58 @@ def _tenant_predicate(column: str = "user_pubkey") -> str:
     return f"({column} = $1 OR {column} IS NULL)"
 
 
+class TenantEnrollmentError(RuntimeError):
+    """Raised when a Cloud tenant is not enrolled or is disabled."""
+
+
+class TenantQuotaError(RuntimeError):
+    """Raised when a Cloud tenant exceeds a configured quota."""
+
+
+class DeputyRateLimitError(RuntimeError):
+    """Raised when a deputy exceeds its configured request rate."""
+
+
+def _env_int(name: str, default: int | None = None) -> int | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _cloud_enrollment_mode() -> str:
+    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "open").strip().lower()
+    return mode if mode in {"open", "allowlist", "closed"} else "closed"
+
+
+def _allowed_tenant_pubkeys() -> set[str]:
+    raw = os.environ.get("FISH_CLOUD_ALLOWED_PUBKEYS", "")
+    return {
+        item.strip().lower()
+        for item in re.split(r"[\s,]+", raw)
+        if _valid_pubkey_hex(item.strip().lower())
+    }
+
+
+def _default_max_frames_per_hour() -> int | None:
+    limit = _env_int("FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR", None)
+    return limit if limit and limit > 0 else None
+
+
+def _can_auto_enroll(user_hex: str) -> bool:
+    if not is_multi_tenant_enabled():
+        return True
+    mode = _cloud_enrollment_mode()
+    if mode == "open":
+        return True
+    if mode == "allowlist":
+        return user_hex in _allowed_tenant_pubkeys()
+    return False
+
+
 def _auth_header_from_ws(ws: websockets.WebSocketServerProtocol) -> str:
     request = getattr(ws, "request", None)
     headers = getattr(request, "headers", None)
@@ -98,16 +158,76 @@ def _auth_header_from_ws(ws: websockets.WebSocketServerProtocol) -> str:
     return ""
 
 
-async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> None:
+async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
+    """Ensure a user/device row exists and return the tenant data key.
+
+    In Cloud mode this is the tenant enrollment gate. New tenants can be
+    auto-created only when enrollment mode allows it. Existing tenants must
+    remain active. The returned data key is used for new encrypted columns;
+    reads still fall back to the legacy master key for pre-migration rows.
+    """
     async with db.acquire() as conn:
-        await conn.execute(
+        row = await conn.fetchrow(
             """
-            INSERT INTO users (user_pubkey)
-            VALUES ($1)
-            ON CONFLICT (user_pubkey) DO NOTHING
+            SELECT disabled_at, enrollment_state, wrapped_data_key
+            FROM users
+            WHERE user_pubkey = $1
             """,
             ctx.user_hex,
         )
+
+        if row is None:
+            if not _can_auto_enroll(ctx.user_hex):
+                raise TenantEnrollmentError("tenant is not enrolled")
+            tenant_key = generate_data_key()
+            await conn.execute(
+                """
+                INSERT INTO users
+                    (user_pubkey, enrollment_state, max_frames_per_hour,
+                     wrapped_data_key, data_key_created_at)
+                VALUES ($1, 'active', $2, $3, now())
+                ON CONFLICT (user_pubkey) DO NOTHING
+                """,
+                ctx.user_hex,
+                _default_max_frames_per_hour(),
+                wrap_data_key(tenant_key),
+            )
+            stored = await conn.fetchrow(
+                "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
+                ctx.user_hex,
+            )
+            stored_wrapped = _row_get(stored, "wrapped_data_key")
+            if stored_wrapped:
+                tenant_key = unwrap_data_key(bytes(stored_wrapped))
+        else:
+            if _row_get(row, "disabled_at") is not None:
+                raise TenantEnrollmentError("tenant is disabled")
+            if (_row_get(row, "enrollment_state") or "active") != "active":
+                raise TenantEnrollmentError("tenant is not active")
+            wrapped = _row_get(row, "wrapped_data_key")
+            if wrapped:
+                tenant_key = unwrap_data_key(bytes(wrapped))
+            else:
+                tenant_key = generate_data_key()
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET wrapped_data_key = $2,
+                        data_key_created_at = COALESCE(data_key_created_at, now())
+                    WHERE user_pubkey = $1
+                      AND wrapped_data_key IS NULL
+                    """,
+                    ctx.user_hex,
+                    wrap_data_key(tenant_key),
+                )
+                stored = await conn.fetchrow(
+                    "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
+                    ctx.user_hex,
+                )
+                stored_wrapped = _row_get(stored, "wrapped_data_key")
+                if stored_wrapped:
+                    tenant_key = unwrap_data_key(bytes(stored_wrapped))
+
         await conn.execute(
             """
             INSERT INTO devices (user_pubkey, device_pubkey)
@@ -117,6 +237,65 @@ async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> None:
             ctx.user_hex,
             ctx.actor_hex,
         )
+    return tenant_key
+
+
+async def _tenant_data_key(db: asyncpg.Pool, user_hex: str | None) -> str | None:
+    if not user_hex:
+        return None
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
+            user_hex,
+        )
+    wrapped = _row_get(row, "wrapped_data_key")
+    return unwrap_data_key(bytes(wrapped)) if wrapped else None
+
+
+def _decrypt_text_for_user(ciphertext: bytes, data_key: str | None) -> str:
+    try:
+        return decrypt_text(ciphertext, data_key)
+    except Exception:
+        if data_key is None:
+            raise
+        return decrypt_text(ciphertext)
+
+
+def _decrypt_json_for_user(ciphertext: bytes, data_key: str | None) -> object:
+    try:
+        return decrypt_json(ciphertext, data_key)
+    except Exception:
+        if data_key is None:
+            raise
+        return decrypt_json(ciphertext)
+
+
+async def _check_frame_quota(db: asyncpg.Pool, ctx: AuthContext) -> None:
+    if not is_multi_tenant_enabled():
+        return
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT max_frames_per_hour
+            FROM users
+            WHERE user_pubkey = $1
+            """,
+            ctx.user_hex,
+        )
+        limit = _row_get(row, "max_frames_per_hour")
+        if not limit:
+            return
+        count = await conn.fetchval(
+            """
+            SELECT count(*)
+            FROM frames
+            WHERE user_pubkey = $1
+              AND created_at > now() - interval '1 hour'
+            """,
+            ctx.user_hex,
+        )
+    if int(count or 0) >= int(limit):
+        raise TenantQuotaError("tenant frame quota exceeded")
 
 
 async def _backfill_single_tenant_owner(db: asyncpg.Pool, owner_pubkey: bytes) -> None:
@@ -169,6 +348,25 @@ def _jsonb_scopes(value) -> set[str]:
     return {str(item) for item in value}
 
 
+def _row_get(row, key: str, default=None):
+    if row is None:
+        return default
+    if hasattr(row, "get"):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
+def _tenant_error_response(exc: Exception) -> "web.Response":
+    return web.json_response({"error": str(exc)}, status=403)
+
+
+def _rate_error_response(exc: Exception) -> "web.Response":
+    return web.json_response({"error": str(exc)}, status=429)
+
+
 async def _require_scoped_context(
     request: "web.Request",
     db: asyncpg.Pool,
@@ -186,6 +384,7 @@ async def _require_scoped_context(
         # candidate and must pass that user's ACL instead of becoming owner of
         # its own empty namespace.
         if not requested_user_hex or requested_user_hex == owner_ctx.user_hex:
+            await _ensure_tenant(db, owner_ctx)
             return owner_ctx
         actor_pubkey = owner_ctx.actor_pubkey
     else:
@@ -201,7 +400,7 @@ async def _require_scoped_context(
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT scopes
+            SELECT scopes, rate_per_hour
             FROM deputies
             WHERE user_pubkey = $1
               AND deputy_pubkey = $2
@@ -217,6 +416,41 @@ async def _require_scoped_context(
     scopes = _jsonb_scopes(row["scopes"])
     if "*" not in scopes and required_scope not in scopes:
         return None
+
+    rate_per_hour = _row_get(row, "rate_per_hour")
+    if rate_per_hour and int(rate_per_hour) > 0:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                DELETE FROM deputy_rate_events
+                WHERE user_pubkey = $1
+                  AND deputy_pubkey = $2
+                  AND ts < now() - interval '1 hour'
+                """,
+                user_hex,
+                deputy_hex,
+            )
+            count = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM deputy_rate_events
+                WHERE user_pubkey = $1
+                  AND deputy_pubkey = $2
+                  AND ts > now() - interval '1 hour'
+                """,
+                user_hex,
+                deputy_hex,
+            )
+            if int(count or 0) >= int(rate_per_hour):
+                raise DeputyRateLimitError("deputy request rate exceeded")
+            await conn.execute(
+                """
+                INSERT INTO deputy_rate_events (user_pubkey, deputy_pubkey)
+                VALUES ($1, $2)
+                """,
+                user_hex,
+                deputy_hex,
+            )
 
     return AuthContext(
         actor_pubkey=actor_pubkey,
@@ -253,6 +487,7 @@ async def _handle_frame(
     r2: R2Storage,
     loop: asyncio.AbstractEventLoop,
     ctx: AuthContext,
+    tenant_data_key: str | None = None,
 ) -> None:
     """Process a single frame: encrypt sensitive fields, upload image, store to Postgres."""
     ts = msg["ts"]
@@ -260,12 +495,13 @@ async def _handle_frame(
     urls = msg.get("urls", [])
 
     window = msg.get("window", "")
+    await _check_frame_quota(db, ctx)
 
     # Encrypt sensitive fields (CPU-bound, run in thread)
     enc_ocr, enc_urls, enc_window = await asyncio.gather(
-        loop.run_in_executor(_pool, encrypt_text, ocr_text),
-        loop.run_in_executor(_pool, encrypt_json, urls),
-        loop.run_in_executor(_pool, encrypt_text, window),
+        loop.run_in_executor(_pool, partial(encrypt_text, ocr_text, tenant_data_key)),
+        loop.run_in_executor(_pool, partial(encrypt_json, urls, tenant_data_key)),
+        loop.run_in_executor(_pool, partial(encrypt_text, window, tenant_data_key)),
     )
 
     # Encrypt and upload image to R2 (I/O-bound, run in thread)
@@ -275,7 +511,7 @@ async def _handle_frame(
         jpeg_data = base64.b64decode(image_b64)
         image_key = await loop.run_in_executor(
             _pool,
-            partial(r2.upload, jpeg_data, ts, user_pubkey=ctx.user_hex),
+            partial(r2.upload, jpeg_data, ts, user_pubkey=ctx.user_hex, data_key=tenant_data_key),
         )
 
     # Extract routing
@@ -325,6 +561,7 @@ async def _handle_audio(
     db: asyncpg.Pool,
     loop: asyncio.AbstractEventLoop,
     ctx: AuthContext,
+    tenant_data_key: str | None = None,
 ) -> None:
     """Store a meeting audio transcript (encrypted)."""
     ts = msg["ts"]
@@ -332,7 +569,10 @@ async def _handle_audio(
     if not transcript:
         return
 
-    enc_transcript = await loop.run_in_executor(_pool, encrypt_text, transcript)
+    enc_transcript = await loop.run_in_executor(
+        _pool,
+        partial(encrypt_text, transcript, tenant_data_key),
+    )
 
     async with db.acquire() as conn:
         await conn.execute(
@@ -562,7 +802,12 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
     Auth: FishKey ed25519 signature (owner/tenant or scoped deputy).
     """
     db: asyncpg.Pool = request.app["db"]
-    ctx = await _require_scoped_context(request, db, "read:status")
+    try:
+        ctx = await _require_scoped_context(request, db, "read:status")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
     if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
@@ -571,6 +816,7 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
     user_hex = ctx.user_hex
 
     try:
+        data_key = await _tenant_data_key(db, user_hex)
         async with db.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
@@ -601,7 +847,10 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
                 "flow": False,
             })
 
-        activity = await loop.run_in_executor(_pool, decrypt_json, row["activity"])
+        activity = await loop.run_in_executor(
+            _pool,
+            partial(_decrypt_json_for_user, row["activity"], data_key),
+        )
 
         # Flow detection: same category for 30+ min with no disconnects.
         # A "disconnect" = gap between adjacent frames > 3 min, which implies
@@ -629,7 +878,10 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
                         gap_seconds = (prev_ts - fr["ts"]).total_seconds()
                         if gap_seconds > GAP_THRESHOLD_SECONDS:
                             break  # disconnect detected, flow chain breaks
-                        fa = await loop.run_in_executor(_pool, decrypt_json, fr["activity"])
+                        fa = await loop.run_in_executor(
+                            _pool,
+                            partial(_decrypt_json_for_user, fr["activity"], data_key),
+                        )
                         if fa.get("category") == current_cat:
                             earliest_match = fr["ts"]
                             prev_ts = fr["ts"]
@@ -666,6 +918,7 @@ async def _http_health(request: "web.Request") -> "web.Response":
         "configured": True,
         "ingest_ready": True,
         "multi_tenant": is_multi_tenant_enabled(),
+        "enrollment_mode": _cloud_enrollment_mode() if is_multi_tenant_enabled() else None,
         "storage": storage_backend,
         "missing": [],
     })
@@ -678,7 +931,12 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
     Query params: limit (default 10, max 50)
     """
     db: asyncpg.Pool = request.app["db"]
-    ctx = await _require_scoped_context(request, db, "read:status")
+    try:
+        ctx = await _require_scoped_context(request, db, "read:status")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
     if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
@@ -688,6 +946,7 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
     loop = asyncio.get_running_loop()
 
     try:
+        data_key = await _tenant_data_key(db, ctx.user_hex)
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
@@ -706,7 +965,10 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
 
         entries = []
         for row in rows:
-            activity = await loop.run_in_executor(_pool, decrypt_json, row["activity"])
+            activity = await loop.run_in_executor(
+                _pool,
+                partial(_decrypt_json_for_user, row["activity"], data_key),
+            )
             entries.append({
                 "emoji": activity.get("emoji", "❓"),
                 "category": activity.get("category", "idle"),
@@ -721,19 +983,19 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
-def _decrypted_frame_row(row) -> dict:
+def _decrypted_frame_row(row, data_key: str | None = None) -> dict:
     d = dict(row)
     for field in ("ocr_text", "window"):
         raw = d.get(field)
         if raw:
             try:
-                d[field] = decrypt_text(bytes(raw))
+                d[field] = _decrypt_text_for_user(bytes(raw), data_key)
             except Exception:
                 d[field] = None
     urls_raw = d.get("urls")
     if urls_raw:
         try:
-            d["urls"] = decrypt_json(bytes(urls_raw))
+            d["urls"] = _decrypt_json_for_user(bytes(urls_raw), data_key)
         except Exception:
             d["urls"] = None
     for field in ("ts", "created_at"):
@@ -743,12 +1005,12 @@ def _decrypted_frame_row(row) -> dict:
     return d
 
 
-def _decrypted_audio_row(row) -> dict:
+def _decrypted_audio_row(row, data_key: str | None = None) -> dict:
     d = dict(row)
     raw = d.get("transcript")
     if raw:
         try:
-            d["transcript"] = decrypt_text(bytes(raw))
+            d["transcript"] = _decrypt_text_for_user(bytes(raw), data_key)
         except Exception:
             d["transcript"] = None
     for field in ("ts", "created_at"):
@@ -760,7 +1022,12 @@ def _decrypted_audio_row(row) -> dict:
 async def _http_query(request: "web.Request") -> "web.Response":
     """Backend read path for owners and scoped deputies."""
     db: asyncpg.Pool = request.app["db"]
-    ctx = await _require_scoped_context(request, db, "read:captures")
+    try:
+        ctx = await _require_scoped_context(request, db, "read:captures")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
     if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
 
@@ -770,6 +1037,7 @@ async def _http_query(request: "web.Request") -> "web.Response":
         limit = 50
 
     try:
+        data_key = await _tenant_data_key(db, ctx.user_hex)
         clauses = [_tenant_predicate()]
         params: list[object] = [ctx.user_hex]
         idx = 2
@@ -810,7 +1078,7 @@ async def _http_query(request: "web.Request") -> "web.Response":
                 *params,
             )
 
-        out = [_decrypted_frame_row(row) for row in rows]
+        out = [_decrypted_frame_row(row, data_key) for row in rows]
         if search:
             needle = search.lower()
             out = [
@@ -826,7 +1094,12 @@ async def _http_query(request: "web.Request") -> "web.Response":
 
 async def _http_transcripts(request: "web.Request") -> "web.Response":
     db: asyncpg.Pool = request.app["db"]
-    ctx = await _require_scoped_context(request, db, "read:transcripts")
+    try:
+        ctx = await _require_scoped_context(request, db, "read:transcripts")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
     if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
 
@@ -836,6 +1109,7 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
         limit = 200
 
     try:
+        data_key = await _tenant_data_key(db, ctx.user_hex)
         clauses = [_tenant_predicate()]
         params: list[object] = [ctx.user_hex]
         idx = 2
@@ -870,7 +1144,7 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
                 *params,
             )
 
-        out = [_decrypted_audio_row(row) for row in rows]
+        out = [_decrypted_audio_row(row, data_key) for row in rows]
         if search:
             needle = search.lower()
             out = [
@@ -934,6 +1208,8 @@ async def _http_put_deputy(request: "web.Request") -> "web.Response":
                 expires_dt,
             )
         return web.json_response({"ok": True})
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
     except Exception:
         log.error("http_put_deputy_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -946,6 +1222,7 @@ async def _http_list_deputies(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     try:
+        await _ensure_tenant(db, ctx)
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -966,6 +1243,8 @@ async def _http_list_deputies(request: "web.Request") -> "web.Response":
                     d[field] = d[field].isoformat()
             out.append(d)
         return web.json_response(out)
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
     except Exception:
         log.error("http_list_deputies_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -981,6 +1260,7 @@ async def _http_delete_deputy(request: "web.Request") -> "web.Response":
     if not _valid_pubkey_hex(deputy_pubkey):
         return web.json_response({"error": "invalid deputy pubkey"}, status=400)
     try:
+        await _ensure_tenant(db, ctx)
         async with db.acquire() as conn:
             result = await conn.execute(
                 """
@@ -992,6 +1272,8 @@ async def _http_delete_deputy(request: "web.Request") -> "web.Response":
                 deputy_pubkey,
             )
         return web.json_response({"ok": True, "result": result})
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
     except Exception:
         log.error("http_delete_deputy_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1029,13 +1311,29 @@ async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
 
             for latest in rows:
                 user_key = latest["user_pubkey"] or "unscoped"
-                window = await loop.run_in_executor(_pool, decrypt_text, latest["window"]) if latest["window"] else ""
-                ocr_text = await loop.run_in_executor(_pool, decrypt_text, latest["ocr_text"]) if latest["ocr_text"] else ""
+                data_key = await _tenant_data_key(db, user_key if user_key != "unscoped" else None)
+                window = (
+                    await loop.run_in_executor(
+                        _pool,
+                        partial(_decrypt_text_for_user, latest["window"], data_key),
+                    )
+                    if latest["window"] else ""
+                )
+                ocr_text = (
+                    await loop.run_in_executor(
+                        _pool,
+                        partial(_decrypt_text_for_user, latest["ocr_text"], data_key),
+                    )
+                    if latest["ocr_text"] else ""
+                )
 
                 activity = await _categorize_activity(latest["app"], window, ocr_text)
 
                 if activity:
-                    enc_activity = await loop.run_in_executor(_pool, encrypt_json, activity)
+                    enc_activity = await loop.run_in_executor(
+                        _pool,
+                        partial(encrypt_json, activity, data_key),
+                    )
                     async with db.acquire() as conn:
                         await conn.execute(
                             """
@@ -1056,7 +1354,10 @@ async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
                 else:
                     last_activity = last_activity_by_user.get(user_key)
                     if last_activity:
-                        enc_activity = await loop.run_in_executor(_pool, encrypt_json, last_activity)
+                        enc_activity = await loop.run_in_executor(
+                            _pool,
+                            partial(encrypt_json, last_activity, data_key),
+                        )
                         async with db.acquire() as conn:
                             await conn.execute(
                                 """
@@ -1093,7 +1394,17 @@ async def _handle_connection(
         await ws.close(code=1008, reason="Unauthorized")
         return
 
-    await _ensure_tenant(db, ctx)
+    try:
+        tenant_data_key = await _ensure_tenant(db, ctx)
+    except TenantEnrollmentError as e:
+        log.warning(
+            "ws_tenant_rejected",
+            remote=remote,
+            user=ctx.user_hex[:16],
+            reason=str(e),
+        )
+        await ws.close(code=1008, reason=str(e))
+        return
     log.info(
         "client_connected",
         remote=remote,
@@ -1107,9 +1418,16 @@ async def _handle_connection(
             try:
                 msg = json.loads(raw)
                 if msg.get("type") == "frame":
-                    await _handle_frame(msg, db, r2, loop, ctx)
+                    await _handle_frame(msg, db, r2, loop, ctx, tenant_data_key)
                 elif msg.get("type") == "audio":
-                    await _handle_audio(msg, db, loop, ctx)
+                    await _handle_audio(msg, db, loop, ctx, tenant_data_key)
+            except TenantQuotaError as e:
+                log.warning(
+                    "tenant_quota_rejected",
+                    user=ctx.user_hex[:16],
+                    reason=str(e),
+                )
+                await ws.send(json.dumps({"type": "error", "error": str(e)}))
             except Exception:
                 log.warning("frame_processing_failed", exc_info=True)
     except ConnectionClosed:

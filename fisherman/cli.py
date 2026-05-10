@@ -345,7 +345,7 @@ def _ensure_cloud_trust_or_disable(config: FishermanConfig) -> None:
     config.server_url = DEFAULT_SERVER_URL
 
 
-@main.command()
+@main.command(hidden=True)
 @click.argument("mirror_url")
 @click.option("--rpc-url", "rpc_url", envvar="FISHERMAN_ETH_RPC_URL", default=None,
               help="Ethereum RPC URL for the on-chain isAppAllowed check "
@@ -2289,7 +2289,7 @@ def deputy_revoke(name_or_pubkey: str):
         sys.exit(1)
 
 
-@main.group(name="mirror")
+@main.group(name="mirror", hidden=True)
 def mirror_group():
     """Pair a remote mirror endpoint to serve agent queries when laptop is offline."""
 

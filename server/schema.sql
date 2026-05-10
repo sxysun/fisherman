@@ -1,8 +1,23 @@
 CREATE TABLE IF NOT EXISTS users (
     user_pubkey TEXT PRIMARY KEY CHECK (length(user_pubkey) = 64),
     created_at  TIMESTAMPTZ DEFAULT now(),
-    disabled_at TIMESTAMPTZ
+    disabled_at TIMESTAMPTZ,
+    enrollment_state TEXT NOT NULL DEFAULT 'active',
+    plan TEXT NOT NULL DEFAULT 'default',
+    max_frames_per_hour INT,
+    max_storage_mb INT,
+    wrapped_data_key BYTEA,
+    data_key_created_at TIMESTAMPTZ,
+    data_key_rotated_at TIMESTAMPTZ
 );
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_state TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS max_frames_per_hour INT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS max_storage_mb INT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS wrapped_data_key BYTEA;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS data_key_created_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS data_key_rotated_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS devices (
     user_pubkey   TEXT NOT NULL REFERENCES users(user_pubkey) ON DELETE CASCADE,
@@ -82,3 +97,12 @@ CREATE TABLE IF NOT EXISTS deputies (
 CREATE INDEX IF NOT EXISTS idx_deputies_user_active
     ON deputies(user_pubkey, deputy_pubkey)
     WHERE revoked_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS deputy_rate_events (
+    user_pubkey TEXT NOT NULL,
+    deputy_pubkey TEXT NOT NULL CHECK (length(deputy_pubkey) = 64),
+    ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deputy_rate_events_window
+    ON deputy_rate_events(user_pubkey, deputy_pubkey, ts DESC);

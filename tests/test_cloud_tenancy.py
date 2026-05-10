@@ -95,7 +95,28 @@ class RecordingConn:
     async def execute(self, sql: str, *args):
         normalized = " ".join(sql.split())
         self._pool.executed.append((normalized, args))
-        if normalized.startswith("INSERT INTO frames"):
+        if normalized.startswith("INSERT INTO users"):
+            self._pool.users.setdefault(
+                args[0],
+                {
+                    "disabled_at": None,
+                    "enrollment_state": "active",
+                    "max_frames_per_hour": args[1] if len(args) > 1 else None,
+                    "wrapped_data_key": args[2] if len(args) > 2 else None,
+                },
+            )
+        elif normalized.startswith("UPDATE users"):
+            row = self._pool.users.setdefault(
+                args[0],
+                {
+                    "disabled_at": None,
+                    "enrollment_state": "active",
+                    "max_frames_per_hour": None,
+                    "wrapped_data_key": None,
+                },
+            )
+            row["wrapped_data_key"] = args[1]
+        elif normalized.startswith("INSERT INTO frames"):
             self._pool.frames.append(
                 {
                     "user_pubkey": args[0],
@@ -123,18 +144,45 @@ class RecordingConn:
             key = (args[0], args[1])
             if key in self._pool.deputies:
                 self._pool.deputies[key]["revoked_at"] = time.time()
+        elif normalized.startswith("DELETE FROM deputy_rate_events"):
+            pass
+        elif normalized.startswith("INSERT INTO deputy_rate_events"):
+            self._pool.deputy_rate_events.append({
+                "user_pubkey": args[0],
+                "deputy_pubkey": args[1],
+                "ts": time.time(),
+            })
         return "OK"
 
     async def fetchrow(self, sql: str, *args):
         self._pool.fetches.append(("fetchrow", " ".join(sql.split()), args))
         normalized = " ".join(sql.split())
         user_pubkey = args[0]
+        if "FROM users" in normalized:
+            return self._pool.users.get(user_pubkey)
         if "FROM deputies" in normalized:
             row = self._pool.deputies.get((args[0], args[1]))
             if row and row.get("revoked_at") is None:
-                return {"scopes": row["scopes"]}
+                return {
+                    "scopes": row["scopes"],
+                    "rate_per_hour": row["rate_per_hour"],
+                }
             return None
         return self._pool.activity_rows.get(user_pubkey)
+
+    async def fetchval(self, sql: str, *args):
+        normalized = " ".join(sql.split())
+        self._pool.fetches.append(("fetchval", normalized, args))
+        if "FROM deputy_rate_events" in normalized:
+            user, deputy = args
+            return sum(
+                1 for event in self._pool.deputy_rate_events
+                if event["user_pubkey"] == user and event["deputy_pubkey"] == deputy
+            )
+        if "FROM frames" in normalized:
+            user = args[0]
+            return sum(1 for row in self._pool.frames if row["user_pubkey"] == user)
+        return 0
 
     async def fetch(self, sql: str, *args):
         normalized = " ".join(sql.split())
@@ -181,6 +229,8 @@ class RecordingPool:
         self.query_rows = []
         self.transcript_rows = []
         self.deputies = {}
+        self.users = {}
+        self.deputy_rate_events = []
 
     def acquire(self):
         return RecordingAcquire(self)
@@ -190,7 +240,14 @@ class FakeStorage:
     def __init__(self):
         self.uploads = []
 
-    def upload(self, jpeg_data: bytes, timestamp: float, *, user_pubkey: str | None = None) -> str:
+    def upload(
+        self,
+        jpeg_data: bytes,
+        timestamp: float,
+        *,
+        user_pubkey: str | None = None,
+        data_key: str | bytes | None = None,
+    ) -> str:
         key = f"users/{user_pubkey}/frames/{int(timestamp * 1000)}.jpg.enc"
         self.uploads.append(
             {
@@ -306,6 +363,66 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(db.frames[0]["image_key"].startswith(f"users/{_pub_hex(SEED_A)}/"))
         self.assertTrue(db.frames[1]["image_key"].startswith(f"users/{_pub_hex(SEED_B)}/"))
 
+    async def test_allowlist_enrollment_rejects_unknown_cloud_tenant(self):
+        os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "allowlist"
+        os.environ["FISH_CLOUD_ALLOWED_PUBKEYS"] = _pub_hex(SEED_A)
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            role="tenant",
+        )
+        ctx_b = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_B)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_B)),
+            role="tenant",
+        )
+
+        key = await ingest._ensure_tenant(db, ctx_a)
+        self.assertIsInstance(key, str)
+        self.assertIn(_pub_hex(SEED_A), db.users)
+        with self.assertRaises(ingest.TenantEnrollmentError):
+            await ingest._ensure_tenant(db, ctx_b)
+
+    async def test_new_cloud_rows_use_per_tenant_data_key(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        storage = FakeStorage()
+        loop = asyncio.get_running_loop()
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            role="tenant",
+        )
+        tenant_key = await ingest._ensure_tenant(db, ctx_a)
+
+        await ingest._handle_frame(
+            {
+                "type": "frame",
+                "ts": 1710000000.0,
+                "app": "Code",
+                "bundle": "com.example.code",
+                "window": "Tenant A",
+                "ocr_text": "tenant-key-only",
+                "urls": [],
+                "image": base64.b64encode(b"jpeg").decode("ascii"),
+            },
+            db,
+            storage,
+            loop,
+            ctx_a,
+            tenant_key,
+        )
+
+        crypto = sys.modules["crypto"]
+        self.assertEqual(
+            crypto.decrypt_text(db.frames[0]["ocr_text"], tenant_key),
+            "tenant-key-only",
+        )
+        with self.assertRaises(Exception):
+            crypto.decrypt_text(db.frames[0]["ocr_text"])
+
     async def test_current_activity_is_filtered_by_authenticated_tenant(self):
         ingest = _load_ingest_module()
         db = RecordingPool()
@@ -328,7 +445,11 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(json.loads(resp_a.text)["status"], "tenant A")
         self.assertEqual(json.loads(resp_b.text)["status"], "tenant B")
-        fetchrow_args = [entry[2][0] for entry in db.fetches if entry[0] == "fetchrow"]
+        fetchrow_args = [
+            entry[2][0]
+            for entry in db.fetches
+            if entry[0] == "fetchrow" and "FROM frames" in entry[1]
+        ]
         self.assertEqual(fetchrow_args, [pub_a, pub_b])
 
     async def test_activity_categorizer_has_private_heuristic_fallback(self):
@@ -416,6 +537,34 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         ))
 
         self.assertEqual(resp.status, 401)
+
+    async def test_backend_deputy_rate_limit_returns_429(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        pub_a = _pub_hex(SEED_A)
+        pub_b = _pub_hex(SEED_B)
+        db.deputies[(pub_a, pub_b)] = {
+            "user_pubkey": pub_a,
+            "deputy_pubkey": pub_b,
+            "name": "agent",
+            "scopes": ["read:captures"],
+            "rate_per_hour": 1,
+            "expires_at": None,
+            "revoked_at": None,
+        }
+        db.deputy_rate_events.append({
+            "user_pubkey": pub_a,
+            "deputy_pubkey": pub_b,
+            "ts": time.time(),
+        })
+
+        resp = await ingest._http_query(FakeRequest(
+            _fishkey(SEED_B),
+            db,
+            headers={"X-Fisherman-User-Pubkey": pub_a},
+        ))
+
+        self.assertEqual(resp.status, 429)
 
     async def test_owner_can_provision_and_revoke_backend_deputy(self):
         ingest = _load_ingest_module()

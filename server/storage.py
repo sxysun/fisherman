@@ -7,7 +7,8 @@ import re
 
 import boto3
 import structlog
-from cryptography.fernet import Fernet
+
+from crypto import fernet_for_data_key
 
 log = structlog.get_logger()
 
@@ -31,7 +32,6 @@ def frame_object_key(timestamp: float, user_pubkey: str | None = None) -> str:
 class R2Storage:
     def __init__(self):
         account_id = os.environ["R2_ACCOUNT_ID"]
-        self._fernet = Fernet(os.environ["ENCRYPTION_KEY"].encode())
         self._bucket = os.environ.get("R2_BUCKET", "fisherman")
         self._s3 = boto3.client(
             "s3",
@@ -47,26 +47,31 @@ class R2Storage:
         timestamp: float,
         *,
         user_pubkey: str | None = None,
+        data_key: str | bytes | None = None,
     ) -> str:
         """Fernet-encrypt jpeg_data and upload to R2. Returns the object key."""
-        encrypted = self._fernet.encrypt(jpeg_data)
+        encrypted = fernet_for_data_key(data_key).encrypt(jpeg_data)
         key = frame_object_key(timestamp, user_pubkey)
         self._s3.put_object(Bucket=self._bucket, Key=key, Body=encrypted)
         log.debug("r2_uploaded", key=key, size=len(encrypted))
         return key
 
-    def download(self, key: str) -> bytes:
+    def download(self, key: str, data_key: str | bytes | None = None) -> bytes:
         """Download from R2 and Fernet-decrypt. Returns raw JPEG bytes."""
         resp = self._s3.get_object(Bucket=self._bucket, Key=key)
         encrypted = resp["Body"].read()
-        return self._fernet.decrypt(encrypted)
+        try:
+            return fernet_for_data_key(data_key).decrypt(encrypted)
+        except Exception:
+            if data_key is None:
+                raise
+            return fernet_for_data_key().decrypt(encrypted)
 
 
 class LocalStorage:
     """Fallback: store encrypted frames on local disk when R2 is not configured."""
 
     def __init__(self, base_dir: str | None = None):
-        self._fernet = Fernet(os.environ["ENCRYPTION_KEY"].encode())
         if base_dir is None:
             # Keep storage path stable regardless of process CWD.
             default_base = pathlib.Path(__file__).resolve().parent / "frames"
@@ -80,8 +85,9 @@ class LocalStorage:
         timestamp: float,
         *,
         user_pubkey: str | None = None,
+        data_key: str | bytes | None = None,
     ) -> str:
-        encrypted = self._fernet.encrypt(jpeg_data)
+        encrypted = fernet_for_data_key(data_key).encrypt(jpeg_data)
         key = frame_object_key(timestamp, user_pubkey)
         path = self._path_for_key(key)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,10 +95,15 @@ class LocalStorage:
         log.debug("local_stored", key=key, size=len(encrypted))
         return key
 
-    def download(self, key: str) -> bytes:
+    def download(self, key: str, data_key: str | bytes | None = None) -> bytes:
         path = self._path_for_key(key)
         encrypted = path.read_bytes()
-        return self._fernet.decrypt(encrypted)
+        try:
+            return fernet_for_data_key(data_key).decrypt(encrypted)
+        except Exception:
+            if data_key is None:
+                raise
+            return fernet_for_data_key().decrypt(encrypted)
 
     def _path_for_key(self, key: str) -> pathlib.Path:
         # Existing local keys omit the top-level "frames/" directory on disk.

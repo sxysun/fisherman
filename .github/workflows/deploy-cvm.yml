@@ -81,6 +81,9 @@ jobs:
           CLOUD_OPENAI_API_KEY: ${{ secrets.FISHERMAN_CLOUD_OPENAI_API_KEY }}
           CLOUD_OPENAI_BASE_URL: ${{ secrets.FISHERMAN_CLOUD_OPENAI_BASE_URL }}
           CLOUD_OPENAI_MODEL:  ${{ vars.FISHERMAN_CLOUD_OPENAI_MODEL }}
+          CLOUD_ENROLLMENT_MODE: ${{ vars.FISHERMAN_CLOUD_ENROLLMENT_MODE }}
+          CLOUD_ALLOWED_PUBKEYS: ${{ vars.FISHERMAN_CLOUD_ALLOWED_PUBKEYS }}
+          CLOUD_MAX_FRAMES_PER_HOUR: ${{ vars.FISHERMAN_CLOUD_MAX_FRAMES_PER_HOUR }}
         run: |
           set -euo pipefail
           # The older `phala cvms upgrade` wrapper mis-parses -e KEY=VALUE
@@ -140,6 +143,9 @@ jobs:
             -e FISHERMAN_CLOUD_OPENAI_API_KEY="$CLOUD_OPENAI_API_KEY" \
             -e FISHERMAN_CLOUD_OPENAI_BASE_URL="$CLOUD_OPENAI_BASE_URL" \
             -e FISHERMAN_CLOUD_OPENAI_MODEL="$CLOUD_OPENAI_MODEL" \
+            -e FISHERMAN_CLOUD_ENROLLMENT_MODE="$CLOUD_ENROLLMENT_MODE" \
+            -e FISHERMAN_CLOUD_ALLOWED_PUBKEYS="$CLOUD_ALLOWED_PUBKEYS" \
+            -e FISHERMAN_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR="$CLOUD_MAX_FRAMES_PER_HOUR" \
             --wait
 
       - name: Read Phala-reported compose_hash AFTER upgrade

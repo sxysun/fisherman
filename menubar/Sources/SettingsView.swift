@@ -13,6 +13,8 @@ struct SettingsView: View {
     @State private var controlPort: String = ""
     @State private var showAdvancedBackend = false
     @State private var selectedTab: SettingsTab = .server
+    @State private var cloudApprovalStatus: String?
+    @State private var approvingCloud = false
 
     @State private var displayName: String = ""
 
@@ -171,6 +173,19 @@ struct SettingsView: View {
                 hintText("Managed by Fisherman. Service endpoints and encrypted friend-status relay are configured automatically.")
                 hintText("Raw context is processed inside the attested Cloud CVM and encrypted at rest with a CVM-held key. This is not client-held end-to-end encryption from the Fisherman operator yet.")
                 hintText("Friend status uses separate end-to-end encryption to each friend; the relay does not receive plaintext status.")
+                HStack(spacing: 8) {
+                    Button(approvingCloud ? "Reviewing..." : "Review & Approve Cloud") {
+                        approveCloud()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(approvingCloud)
+                    if let cloudApprovalStatus {
+                        Text(cloudApprovalStatus)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
             } else if backendMode == "self_hosted" {
                 fieldRow("Self-hosted URL", placeholder: "wss://your-server:9999/ingest", text: $selfHostedURL)
                 hintText("Use this when you run your own Fisherman server. One URL is enough; Fisherman derives the activity and history endpoints automatically.")
@@ -640,6 +655,38 @@ struct SettingsView: View {
         parsedFriendCode = nil
         friendCodeOverrideName = ""
         friendCodeError = nil
+    }
+
+    private func approveCloud() {
+        let trimmedCloud = cloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedCloudURL = trimmedCloud.isEmpty ? defaultCloudURL : trimmedCloud
+        let relayURL = statusRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        approvingCloud = true
+        cloudApprovalStatus = "Auditing Cloud..."
+        DispatchQueue.global(qos: .userInitiated).async {
+            var args = ["backend", "configure", "cloud", "--url", savedCloudURL]
+            if !relayURL.isEmpty {
+                args += ["--relay-url", relayURL]
+            }
+            let result = CliBridge.run(args, timeout: 75)
+            DispatchQueue.main.async {
+                approvingCloud = false
+                if result.exitCode == 0 {
+                    config.load()
+                    backendMode = config.backendMode
+                    cloudURL = config.backendMode == "cloud" && !config.backendURL.isEmpty
+                        ? config.backendURL
+                        : defaultCloudURL
+                    statusRelayURL = config.statusRelayURL
+                    serverURL = config.serverURL
+                    cloudApprovalStatus = "Approved"
+                    onSave()
+                } else {
+                    let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    cloudApprovalStatus = detail.isEmpty ? "Approval failed" : detail
+                }
+            }
+        }
     }
 
     private func ingestURL(from raw: String) -> String {
