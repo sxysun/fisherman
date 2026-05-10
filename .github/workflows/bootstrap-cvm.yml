@@ -95,12 +95,10 @@ jobs:
         run: |
           set -euo pipefail
           ME_JSON="$(mktemp)"
-          HTTP_CODE=$(curl -sS -w "%{http_code}" -o "$ME_JSON" \
-            "https://cloud-api.phala.com/api/v1/users/me" \
-            -H "X-API-Key: $PHALA_CLOUD_API_KEY")
-          if [[ "$HTTP_CODE" != "200" ]]; then
-            echo "::error::Phala API rejected PHALA_CLOUD_API_KEY with HTTP $HTTP_CODE."
-            echo "::error::Create a fresh API key in sxysuns-projects, update the GitHub secret, then rerun this workflow."
+          ME_ERR="$(mktemp)"
+          if ! phala whoami --api-token "$PHALA_CLOUD_API_KEY" --json > "$ME_JSON" 2> "$ME_ERR"; then
+            echo "::error::Phala CLI rejected PHALA_CLOUD_API_KEY."
+            sed -E 's/phak_[A-Za-z0-9_-]+/<redacted-token>/g' "$ME_ERR" >&2
             exit 1
           fi
 
