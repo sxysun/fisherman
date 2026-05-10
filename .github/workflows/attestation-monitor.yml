@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install --quiet pycryptodome
+      - run: pip install --quiet cryptography pycryptodome
 
       - name: verify_attestation
         id: verify
@@ -39,26 +39,67 @@ jobs:
           MIRROR_URL: https://${{ vars.MIRROR_DOMAIN }}
           RPC_URL: ${{ secrets.ETH_SEPOLIA_RPC_URL }}
           CONTRACT: ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
+          TIMEOUT: "15"
+        shell: bash
         run: |
+          set -o pipefail
           python <<'PY' | tee /tmp/result.txt
-          import os, sys, json
+          import hashlib
+          import json
+          import os
+          import socket
+          import ssl
+          import sys
+          from urllib.parse import urlparse
+
           sys.path.insert(0, ".")
           from fisherman.attestation import verify_attestation
+
+          def live_tls_fingerprint(url: str, timeout: float) -> str | None:
+              parsed = urlparse(url)
+              if parsed.scheme != "https" or not parsed.hostname:
+                  return None
+              ctx = ssl.create_default_context()
+              with socket.create_connection((parsed.hostname, parsed.port or 443), timeout=timeout) as sock:
+                  with ctx.wrap_socket(sock, server_hostname=parsed.hostname) as tls:
+                      return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+
+          def cloud_required_failures(res) -> list[str]:
+              failures: list[str] = []
+              if not res.all_required_ok:
+                  failures.extend(res.errors or ["base attestation checks failed"])
+              if res.on_chain_allowed is not True:
+                  failures.append("cloud requires on-chain compose_hash authorization")
+              if res.tls_fingerprint_ok is not True:
+                  failures.append("cloud requires TLS certificate fingerprint bound in attestation")
+              return failures
+
+          mirror_url = os.environ["MIRROR_URL"]
+          timeout = float(os.environ.get("TIMEOUT") or "15")
+          live_tls_fp = live_tls_fingerprint(mirror_url, timeout)
           res = verify_attestation(
-              mirror_url=os.environ["MIRROR_URL"],
+              mirror_url=mirror_url,
               rpc_url=os.environ.get("RPC_URL") or None,
               contract_address=os.environ.get("CONTRACT") or None,
+              live_tls_cert_sha256_hex=live_tls_fp,
+              timeout=timeout,
           )
+          cloud_failures = cloud_required_failures(res)
           print(json.dumps({
-              "ok": res.ok,
+              "all_required_ok": res.all_required_ok,
+              "cloud_required_ok": not cloud_failures,
+              "cloud_required_failures": cloud_failures,
               "errors": res.errors,
               "git_commit": res.git_commit,
               "image_digest": res.image_digest,
               "compose_hash_hex": (res.compose_hash.hex() if res.compose_hash else None),
-              "rtmr3_replays_ok": res.rtmr3_replays_ok,
+              "event_log_replay_ok": res.event_log_replay_ok,
               "on_chain_allowed": res.on_chain_allowed,
+              "tls_fingerprint_ok": res.tls_fingerprint_ok,
+              "live_tls_fingerprint_hex": live_tls_fp,
+              "attested_tls_fingerprint_hex": res.attested_tls_fingerprint_hex,
           }, indent=2))
-          if not res.ok:
+          if cloud_failures:
               raise SystemExit(1)
           PY
 
