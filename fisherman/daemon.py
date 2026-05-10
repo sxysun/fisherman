@@ -1,7 +1,11 @@
 import asyncio
+import hashlib
 import os
+import socket
+import ssl
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 
 import structlog
 
@@ -36,6 +40,17 @@ log = structlog.get_logger()
 _SWIFT_CAPTURE = os.environ.get("FISHERMAN_SWIFT_CAPTURE", "") == "1"
 
 
+def _live_tls_fingerprint(url: str, timeout: float = 15.0) -> str | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"https", "wss"} or not parsed.hostname:
+        return None
+    port = parsed.port or (443 if parsed.scheme in {"https", "wss"} else 80)
+    ctx = ssl.create_default_context()
+    with socket.create_connection((parsed.hostname, port), timeout=timeout) as raw:
+        with ctx.wrap_socket(raw, server_hostname=parsed.hostname) as tls:
+            return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+
+
 class FishermanDaemon:
     def __init__(self, config: FishermanConfig):
         self._config = config
@@ -51,7 +66,12 @@ class FishermanDaemon:
             else None
         )
         self._streamer: Streamer | None = (
-            Streamer(config.server_url, config.private_key, upload_queue=self._upload_queue)
+            Streamer(
+                config.server_url,
+                config.private_key,
+                upload_queue=self._upload_queue,
+                connect_guard=self._cloud_connect_guard if config.backend_mode == "cloud" else None,
+            )
             if config.streaming_enabled else None
         )
         self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
@@ -83,6 +103,7 @@ class FishermanDaemon:
         self._processor_last_ok: bool | None = None
         self._processor_last_error: str | None = None
         self._blob_at_rest_key: bytes | None = None
+
         if config.private_key:
             try:
                 seed = bytes.fromhex(config.private_key)
@@ -92,6 +113,30 @@ class FishermanDaemon:
             except Exception:
                 log.warning("invalid_private_key_for_relay", exc_info=True)
         self._mirror_sync: MirrorSync | None = None
+
+    def _cloud_connect_guard(self) -> bool:
+        """Re-check Cloud trust before every websocket connect/reconnect."""
+        if self._config.backend_mode != "cloud":
+            return True
+        try:
+            from fisherman import cloud_trust
+
+            result = cloud_trust.verify_or_approve(
+                self._config.backend_url,
+                allow_bootstrap=False,
+                live_tls_fingerprint_func=_live_tls_fingerprint,
+            )
+        except Exception:
+            log.warning("cloud_trust_recheck_failed", exc_info=True)
+            return False
+        if result.ok:
+            return True
+        log.warning(
+            "cloud_trust_recheck_blocked",
+            reason=result.reason,
+            failures=list(result.failures),
+        )
+        return False
 
     async def _enhance_pdf_context(self, frame, ocr_text: str, urls: list[str]) -> tuple[str, list[str]]:
         loop = asyncio.get_running_loop()

@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import time
+from collections.abc import Callable
 
 import structlog
 import websockets
@@ -95,9 +96,11 @@ class Streamer:
         url: str,
         private_key_hex: str,
         upload_queue: UploadQueue | None = None,
+        connect_guard: Callable[[], bool] | None = None,
     ):
         self._url = url
         self._priv_key, self._pub_hex = _load_signing_key(private_key_hex)
+        self._connect_guard = connect_guard
         self._ws: websockets.WebSocketClientProtocol | None = None
         # Queue items are tuples (payload_json, frame_screenpipe_ts | None).
         # Carrying the screenpipe timestamp through to the send-success
@@ -283,6 +286,15 @@ class Streamer:
         backoff = 1.0
         while True:
             try:
+                if self._connect_guard is not None:
+                    allowed = await asyncio.to_thread(self._connect_guard)
+                    if not allowed:
+                        self._connected = False
+                        self._connected_event.clear()
+                        log.warning("websocket_connect_guard_blocked", backoff=backoff)
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, _MAX_BACKOFF)
+                        continue
                 headers = {}
                 if self._priv_key:
                     headers["Authorization"] = _sign_fishkey(self._priv_key, self._pub_hex)
