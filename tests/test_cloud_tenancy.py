@@ -96,14 +96,18 @@ class RecordingConn:
         normalized = " ".join(sql.split())
         self._pool.executed.append((normalized, args))
         if normalized.startswith("INSERT INTO users"):
+            pending_insert = "'pending'" in normalized
             self._pool.users.setdefault(
                 args[0],
                 {
                     "disabled_at": None,
-                    "enrollment_state": "active",
-                    "max_frames_per_hour": args[1] if len(args) > 1 else None,
-                    "wrapped_data_key": args[2] if len(args) > 2 else None,
-                    "data_key_source": args[3] if len(args) > 3 else "server_wrapped",
+                    "enrollment_state": "pending" if pending_insert else "active",
+                    "enrollment_requested_at": time.time() if pending_insert else None,
+                    "enrollment_approved_at": None if pending_insert else time.time(),
+                    "plan": "requested" if pending_insert else "default",
+                    "max_frames_per_hour": 0 if pending_insert else (args[1] if len(args) > 1 else None),
+                    "wrapped_data_key": None if pending_insert else (args[2] if len(args) > 2 else None),
+                    "data_key_source": args[1] if pending_insert and len(args) > 1 else (args[3] if len(args) > 3 else "server_wrapped"),
                     "status_llm_mode": "managed",
                     "status_llm_base_url": None,
                     "status_llm_model": None,
@@ -498,6 +502,23 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ingest.TenantEnrollmentError):
             await ingest._ensure_tenant(db, ctx_a)
         self.assertNotIn(_pub_hex(SEED_A), db.users)
+
+    async def test_closed_cloud_access_request_records_pending_tenant(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        pub_a = _pub_hex(SEED_A)
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(pub_a),
+            user_pubkey=bytes.fromhex(pub_a),
+            role="tenant",
+        )
+
+        payload = await ingest._request_cloud_access(db, ctx_a, None)
+
+        self.assertEqual(payload["state"], "pending")
+        self.assertFalse(payload["active"])
+        self.assertEqual(db.users[pub_a]["enrollment_state"], "pending")
+        self.assertEqual(db.users[pub_a]["plan"], "requested")
 
     async def test_existing_cloud_tenant_gets_default_quota_and_revoked_device_rejected(self):
         ingest = _load_ingest_module()

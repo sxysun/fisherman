@@ -1,9 +1,9 @@
-"""Verify a fisherman-mirror TEE attestation bundle.
+"""Verify a Fisherman Cloud TEE attestation bundle.
 
-Mirrors the rigour of feedling-mcp-v1's iOS audit card and CLI auditor
-(`tools/audit_live_cvm.py`) — every check that runs on-device there
-runs here too. A `fisherman audit <mirror-url>` shells through to
-`verify_attestation()` and prints the same green/red row table.
+Runs the Cloud release checks used by the CLI and menu bar review flow.
+A hidden `fisherman audit <url>` command and the public
+`fisherman cloud audit <url>` command both shell through to
+`verify_attestation()`.
 
 The verifier is layered. Each layer is independently meaningful:
 
@@ -37,12 +37,11 @@ The verifier is layered. Each layer is independently meaningful:
        enclave_tls_cert_fingerprint_hex baked into REPORT_DATA
        (caller supplies the live fingerprint — this module compares).
 
-What we deliberately do NOT do (parity gaps, documented):
-  - Intel TCB level + PCK CRL via PCS collateral. feedling does this
-    via the dcap-qvl Rust XCFramework on iOS; we surface the FMSPC
-    we extracted from the PCK leaf so an auditor can pull tcbInfo.json
-    by hand if they want. Adding an in-process dcap-qvl Python binding
-    is one more PR; not in this one.
+What we deliberately do NOT do yet:
+  - Intel TCB level + PCK CRL via PCS collateral. We surface the FMSPC
+    extracted from the PCK leaf so an auditor can pull tcbInfo.json by
+    hand if they want. Adding an in-process dcap-qvl Python binding is a
+    separate hardening task.
   - Base-image trust-on-first-use pin. Will land alongside the menubar
     pairing flow when the audit card is ported to SwiftUI.
 """
@@ -508,8 +507,7 @@ def validate_pck_chain(
 # ---------------------------------------------------------------------------
 
 def _event_payload_bytes(event: dict) -> Optional[bytes]:
-    """Tolerate both `event_payload` (dstack canonical, also feedling)
-    and `payload` (older fisherman) field names."""
+    """Tolerate dstack `event_payload` and older `payload` field names."""
     raw = event.get("event_payload")
     if raw is None:
         raw = event.get("payload")

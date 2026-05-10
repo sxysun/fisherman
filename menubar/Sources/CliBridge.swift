@@ -1,7 +1,7 @@
 import Foundation
 
-/// Lightweight wrapper around the bundled `fisherman` / `fisherman-mirror`
-/// CLI binaries. Used by the advanced settings tabs.
+/// Lightweight wrapper around the bundled `fisherman` CLI. Used by the
+/// advanced settings tabs.
 ///
 /// Resolution order for the CLI:
 ///   1. /usr/local/bin/fisherman   (created by the symlink installer)

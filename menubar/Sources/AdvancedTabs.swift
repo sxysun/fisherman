@@ -1,5 +1,7 @@
 import Foundation
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Deputies tab
 
@@ -180,153 +182,6 @@ struct DeputiesTab: View {
         let r = CliBridge.run(["deputy", "revoke", pubkey])
         if r.exitCode == 0 { reload() }
         else { error = r.stderr.trimmingCharacters(in: .whitespacesAndNewlines) }
-    }
-}
-
-
-// MARK: - Backup tab
-
-struct BackupTab: View {
-    @State private var statusOutput: String = ""
-    @State private var selectedKind: String = "none"
-    @State private var driveClientId = ""
-    @State private var driveSecret = ""
-    @State private var driveRefresh = ""
-    @State private var driveFolderName = "fisherman"
-    @State private var statusMessage: String?
-    @State private var existingAdvancedKind: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Backup")
-                .font(.system(size: 14, weight: .semibold))
-            Text("Optional encrypted backup for laptop-local context.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-            Text("You do not need this for Self-hosted or Fisherman Cloud. Those backends already store context for their mode.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-
-            if let existingAdvancedKind {
-                Text("A \(existingAdvancedKind) backup is configured from the CLI. The app now only supports Google Drive backup.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Button("Disable backup") { disable() }
-                    .buttonStyle(.bordered)
-            } else {
-                Picker("Backup", selection: $selectedKind) {
-                    Text("Off").tag("none")
-                    Text("Google Drive").tag("drive")
-                }
-                .pickerStyle(.segmented)
-            }
-
-            if existingAdvancedKind == nil && selectedKind == "drive" {
-                Text("Bring your own Google Drive account. Fisherman encrypts snapshots before upload.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                Text("See docs/drive-setup.md to create the OAuth credentials.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                TextField("Client ID", text: $driveClientId).textFieldStyle(.roundedBorder)
-                SecureField("Client Secret", text: $driveSecret).textFieldStyle(.roundedBorder)
-                SecureField("Refresh Token", text: $driveRefresh).textFieldStyle(.roundedBorder)
-                TextField("Folder Name", text: $driveFolderName).textFieldStyle(.roundedBorder)
-            }
-
-            HStack {
-                Button(selectedKind == "drive" ? "Save Google Drive Backup" : "Save") { apply() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(existingAdvancedKind != nil)
-                if selectedKind != "none" || existingAdvancedKind != nil {
-                    Button("Disable backup") { disable() }
-                }
-                Spacer()
-                Button("Refresh status") { reloadStatus() }
-            }
-
-            if let m = statusMessage {
-                Text(m).font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            Text("Status")
-                .font(.system(size: 12, weight: .medium))
-            ScrollView {
-                Text(statusOutput.isEmpty ? "(unknown)" : statusOutput)
-                    .font(.system(size: 10, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color.secondary.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
-            .frame(height: 90)
-        }
-        .onAppear {
-            loadExistingConfig()
-            reloadStatus()
-        }
-    }
-
-    private func loadExistingConfig() {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".fisherman/storage.json")
-        guard let data = try? Data(contentsOf: url),
-              let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            selectedKind = "none"
-            existingAdvancedKind = nil
-            return
-        }
-
-        let kind = cfg["kind"] as? String ?? "none"
-        if kind == "drive" {
-            selectedKind = "drive"
-            existingAdvancedKind = nil
-            driveClientId = cfg["client_id"] as? String ?? ""
-            driveSecret = cfg["client_secret"] as? String ?? ""
-            driveRefresh = cfg["refresh_token"] as? String ?? ""
-            driveFolderName = cfg["folder_name"] as? String ?? "fisherman"
-        } else if kind == "none" {
-            selectedKind = "none"
-            existingAdvancedKind = nil
-        } else {
-            selectedKind = "none"
-            existingAdvancedKind = kind
-        }
-    }
-
-    private func reloadStatus() {
-        let r = CliBridge.run(["storage", "status", "--text"])
-        statusOutput = r.exitCode == 0 ? r.stdout : (r.stderr.isEmpty ? r.stdout : r.stderr)
-    }
-
-    private func apply() {
-        statusMessage = nil
-        let r: CliBridge.Result
-        switch selectedKind {
-        case "drive":
-            r = CliBridge.run(["storage", "configure-drive",
-                               "--client-id", driveClientId,
-                               "--client-secret", driveSecret,
-                               "--refresh-token", driveRefresh,
-                               "--folder-name", driveFolderName.isEmpty ? "fisherman" : driveFolderName])
-        default:
-            disable(); return
-        }
-        if r.exitCode == 0 {
-            statusMessage = "Configured. Restart the daemon for changes to take effect."
-            loadExistingConfig()
-            reloadStatus()
-        } else {
-            statusMessage = "Error: " + r.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-
-    private func disable() {
-        let r = CliBridge.run(["storage", "disable"])
-        statusMessage = r.exitCode == 0 ? "Disabled." : r.stderr
-        loadExistingConfig()
-        reloadStatus()
     }
 }
 
@@ -567,5 +422,184 @@ struct ActivityStatusTab: View {
         default:
             return "Saved locally in ~/.fisherman/.env. Local Only does not run a remote status worker."
         }
+    }
+}
+
+// MARK: - Context data tab
+
+struct ContextDataTab: View {
+    var config: ConfigManager
+
+    @State private var exportSince: String = ""
+    @State private var exportLimit: String = "5000"
+    @State private var includeImages: Bool = false
+    @State private var deleteSince: String = "30d"
+    @State private var deleteConfirm: String = ""
+    @State private var statusMessage: String?
+    @State private var busy: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Context Data")
+                .font(.system(size: 14, weight: .semibold))
+
+            Text("Export, import, or delete the active context home. Switching between Local Only, Fisherman Cloud, and Self-hosted affects new uploads only; use this tab to move history intentionally.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Active home")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(activeHomeSummary)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            Divider()
+
+            Text("Export")
+                .font(.system(size: 12, weight: .semibold))
+            HStack {
+                TextField("Since, e.g. 7d or 24h (blank = newest)", text: $exportSince)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Limit", text: $exportLimit)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 72)
+            }
+            Toggle("Include screenshots", isOn: $includeImages)
+                .font(.system(size: 11))
+            Text(includeImages ? "The archive will contain raw screenshots. Treat it like highly private data." : "Default export includes OCR, app/window metadata, URLs, and transcripts, but not screenshots.")
+                .font(.system(size: 10))
+                .foregroundStyle(includeImages ? .orange : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Export Archive") { exportArchive() }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+
+            Divider()
+
+            Text("Import")
+                .font(.system(size: 12, weight: .semibold))
+            Text("Import writes archive contents into the active home. It does not delete the source home.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Button("Import Archive") { importArchive() }
+                .buttonStyle(.bordered)
+                .disabled(busy)
+
+            Divider()
+
+            Text("Delete")
+                .font(.system(size: 12, weight: .semibold))
+            TextField("Delete records newer than, e.g. 30d", text: $deleteSince)
+                .textFieldStyle(.roundedBorder)
+            TextField("Type DELETE to enable deletion", text: $deleteConfirm)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Button("Dry Run") { deleteContext(dryRun: true) }
+                    .buttonStyle(.bordered)
+                    .disabled(busy)
+                Button("Delete Matching Context") { deleteContext(dryRun: false) }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(busy || deleteConfirm != "DELETE")
+            }
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var activeHomeSummary: String {
+        switch config.backendMode {
+        case "cloud":
+            return "Fisherman Cloud  \(config.backendURL.isEmpty ? "https://fisherman.teleport.computer" : config.backendURL)"
+        case "self_hosted":
+            return "Self-hosted  \((config.backendURL.isEmpty ? config.serverURL : config.backendURL))"
+        default:
+            return "Local Only  ~/.fisherman/frames and ~/.fisherman/audio"
+        }
+    }
+
+    private func exportArchive() {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "fisherman-context-\(Self.dateSlug()).json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        busy = true
+        statusMessage = "Exporting context..."
+        var args = [
+            "context", "export",
+            "--home", "active",
+            "--output", url.path,
+            "--limit", exportLimit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "5000" : exportLimit,
+        ]
+        let since = exportSince.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !since.isEmpty { args += ["--since", since] }
+        if includeImages { args += ["--include-images"] }
+        runLong(args, successPrefix: "Export complete.")
+    }
+
+    private func importArchive() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        busy = true
+        statusMessage = "Importing context..."
+        runLong(["context", "import", url.path, "--home", "active"], successPrefix: "Import complete.")
+    }
+
+    private func deleteContext(dryRun: Bool) {
+        busy = true
+        statusMessage = dryRun ? "Counting matching context..." : "Deleting matching context..."
+        var args = ["context", "delete", "--home", "active"]
+        let since = deleteSince.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !since.isEmpty {
+            args += ["--since", since]
+        } else {
+            args += ["--all"]
+        }
+        if dryRun {
+            args += ["--dry-run"]
+        } else {
+            args += ["--confirm", "DELETE"]
+        }
+        runLong(args, successPrefix: dryRun ? "Dry run complete." : "Delete complete.")
+    }
+
+    private func runLong(_ args: [String], successPrefix: String) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = CliBridge.run(args, timeout: 600)
+            DispatchQueue.main.async {
+                busy = false
+                if result.exitCode == 0 {
+                    statusMessage = successPrefix + "\n" + result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    statusMessage = stderr.isEmpty ? "Command failed." : stderr
+                }
+            }
+        }
+    }
+
+    private static func dateSlug() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: Date())
     }
 }

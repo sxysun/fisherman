@@ -22,7 +22,9 @@ curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | 
 ```
 
 This installs Screenpipe, the Python daemon, and the macOS menu bar app.
-Grant Screen Recording permission when macOS asks.
+New installs start in **Local Only** mode with a persistent identity key.
+Grant Screen Recording permission when macOS asks, then use Settings to
+choose Fisherman Cloud or Self-hosted if you want an always-on backend.
 
 ## Backend Modes
 
@@ -74,8 +76,10 @@ Cloud multi-tenant ingest is intentionally fail-closed. If required
 storage or database config is missing, the CVM reports
 `ingest.ready=false` and refuses `/ingest` instead of accepting raw
 context into a half-configured service. `fisherman backend configure
-cloud` only persists the Cloud ingest WebSocket after that health
-manifest reports `ingest.ready=true`.
+cloud` only persists the Cloud ingest WebSocket after health reports
+`ingest.ready=true` and this identity's Cloud account is active. In
+invite-only deployments it records an access request and keeps uploads
+queued locally until approval.
 
 Cloud uses client-held tenant data keys. After the user approves a Cloud
 attestation, the daemon derives a tenant key from the user's persistent
@@ -93,10 +97,32 @@ Use this when you want to operate your own backend:
 fisherman backend configure self-hosted --url wss://your-host:9999/ingest
 ```
 
-The current self-hosted implementation lives in `server/` for ingest and
-activity APIs, `relay/` for encrypted friend status/RPC routing, and
-`mirror/` for replica/query serving. Those are implementation pieces; the
-user-facing concept is one self-hosted backend.
+The self-hosted backend implementation lives in `server/`. The relay can
+be hosted separately or you can keep using the official E2EE relay. The
+`mirror/` package is an internal Cloud gateway/deployment package, not a
+separate setup mode users need to understand.
+
+## Context Portability
+
+Changing context homes affects new uploads only; history is never copied
+behind your back. Use Settings -> Data or the CLI to move data:
+
+```bash
+# Download recent history from the active context home
+fisherman context export --home active --output context.json --since 30d
+
+# Include screenshots when you explicitly need a full-fidelity archive
+fisherman context export --home active --output context-with-images.json --since 7d --include-images
+
+# Upload an archive into the active context home
+fisherman context import context.json --home active
+
+# Delete matching history from the active context home
+fisherman context delete --home active --since 30d --confirm DELETE
+```
+
+Archives are plain JSON. Screenshots are excluded by default because they
+are large and highly private.
 
 ## Friends
 
@@ -120,7 +146,7 @@ local-dev users can override it with `FISH_STATUS_RELAY_URL`.
 
 ## Agent Access
 
-Remote agents use scoped, expiring access tokens:
+Remote agents use scoped, expiring access keys:
 
 ```bash
 fisherman deputy new --name hermes --scopes read:captures,read:transcripts --expires 30d
@@ -128,8 +154,8 @@ fisherman deputy list --text
 fisherman deputy revoke <name-or-pubkey>
 ```
 
-The UX should call this **Agent Access**. The internal protocol still
-uses the deputy command name.
+The product UX calls this **Agent Access**. The CLI command is still
+`deputy` because the protocol object is a scoped deputy key.
 
 ## Processors
 
@@ -228,6 +254,14 @@ uv run python -m relay.server --port 9100
 cat SETUP.md
 cat docs/tee-deployment.md
 ```
+
+## More Docs
+
+- [Architecture](ARCHITECTURE.md)
+- [Privacy threat model](docs/privacy-threat-model.md)
+- [Context migration](docs/context-migration.md)
+- [Cloud operations](docs/cloud-operations.md)
+- [Google Drive backup](docs/drive-setup.md)
 
 ## Requirements
 

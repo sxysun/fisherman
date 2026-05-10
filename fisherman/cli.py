@@ -151,7 +151,7 @@ def _fmt_ts(ts: float) -> str:
 @click.option("--port", default=7892, help="Control server port")
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
-              default=None, help="Force routing through laptop (primary) or mirror (secondary)")
+              default=None, help="Force routing through laptop (primary) or backend relay path (secondary)")
 def status(port: int, as_text: bool, source_pref: str | None):
     """Show daemon status."""
     if _is_remote_mode():
@@ -205,7 +205,7 @@ def resume(port: int):
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--port", default=7892, help="Control server port")
 @click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
-              default=None, help="Force routing through laptop (primary) or mirror (secondary)")
+              default=None, help="Force routing through laptop (primary) or backend relay path (secondary)")
 def query(since, until, app, bundle, search, limit, as_text, port, source_pref):
     """Read your local capture history (OCR + window + URLs).
 
@@ -250,7 +250,7 @@ def query(since, until, app, bundle, search, limit, as_text, port, source_pref):
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--port", default=7892, help="Control server port")
 @click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
-              default=None, help="Force routing through laptop (primary) or mirror (secondary)")
+              default=None, help="Force routing through laptop (primary) or backend relay path (secondary)")
 def transcripts(since, until, meeting_app, search, limit, as_text, port, source_pref):
     """Read meeting audio transcripts captured during calls."""
     if _is_remote_mode():
@@ -408,10 +408,10 @@ def _ensure_cloud_trust_for_secret_request(config: FishermanConfig, purpose: str
 def audit(mirror_url, rpc_url, contract_address, expected_mrtd_hex, as_json, timeout):
     """Verify a fisherman-mirror's TEE attestation end-to-end.
 
-    Mirrors the rigour of feedling-mcp-v1's tools/audit_live_cvm.py:
-    structural quote parse, body ECDSA, PCK chain to bundled Intel SGX
-    Root CA, QE report binding, mr_config_id ↔ compose_hash, RTMR3
-    event-log replay, and (optional) on-chain isAppAllowed lookup.
+    Runs the full Cloud attestation check: structural quote parse, body
+    ECDSA, PCK chain to bundled Intel SGX Root CA, QE report binding,
+    mr_config_id ↔ compose_hash, RTMR3 event-log replay, and optional
+    on-chain isAppAllowed lookup.
 
     Exit code is 0 only when every required row passes.
     """
@@ -443,8 +443,7 @@ def audit(mirror_url, rpc_url, contract_address, expected_mrtd_hex, as_json, tim
 
 def _audit_print_table(res, *, mirror_url: str, live_tls_fp: str | None,
                        has_onchain_inputs: bool) -> None:
-    """Render an `AttestationResult` as a green/red row table — same
-    shape as feedling-mcp-v1/tools/audit_live_cvm.py's output."""
+    """Render an `AttestationResult` as a green/red row table."""
     rows: list[tuple[str, bool | None, str]] = []
     meas = res.measurements
 
@@ -684,38 +683,46 @@ def _cloud_capability_health(url: str, *, timeout: float = 10.0) -> dict | None:
         return None
 
 
-def _cloud_account_ready(url: str, *, timeout: float = 10.0) -> tuple[bool, str | None]:
-    """Return whether this identity can read/write its Cloud tenant.
-
-    /health only says Cloud ingest exists. This authenticated probe says the
-    current FishKey has an enrolled tenant. In open/allowlist deployments it
-    may create the row; in closed hosted Cloud it returns 403 until the account
-    service or operator enrolls the user.
-    """
+def _cloud_account_request(url: str, method: str = "GET", *, timeout: float = 10.0) -> dict:
     cfg = FishermanConfig()
     if not cfg.private_key:
         _load_keys()
         cfg = FishermanConfig()
     if not cfg.private_key:
-        return False, "identity key is not ready"
+        raise click.ClickException("identity key is not ready")
+    auth, _pub = _fishkey_header(cfg.private_key)
+    from fisherman import keys as _keys
+    path = "/api/cloud/access-request" if method == "POST" else "/api/cloud/account"
+    req = urllib.request.Request(
+        _backend_api_url(url, path),
+        method=method,
+        headers={
+            "Authorization": auth,
+            "Accept": "application/json",
+            "X-Fisherman-Tenant-Data-Key": _keys.cloud_tenant_data_key(
+                bytes.fromhex(cfg.private_key)
+            ),
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
+
+
+def _cloud_account_ready(url: str, *, timeout: float = 10.0) -> tuple[bool, str | None]:
+    """Return whether this identity can read/write its Cloud tenant."""
     try:
-        auth, _pub = _fishkey_header(cfg.private_key)
-        from fisherman import keys as _keys
-        req = urllib.request.Request(
-            _backend_api_url(url, "/api/current_activity"),
-            method="GET",
-            headers={
-                "Authorization": auth,
-                "Accept": "application/json",
-                "X-Fisherman-Tenant-Data-Key": _keys.cloud_tenant_data_key(
-                    bytes.fromhex(cfg.private_key)
-                ),
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if 200 <= resp.status < 300:
-                return True, None
-            return False, f"Cloud account probe returned HTTP {resp.status}"
+        status = _cloud_account_request(url, "GET", timeout=timeout)
+        if status.get("active"):
+            return True, None
+        requested = _cloud_account_request(url, "POST", timeout=timeout)
+        if requested.get("active"):
+            return True, None
+        state = requested.get("state") or status.get("state") or "unknown"
+        if state == "pending":
+            return False, "Cloud access requested; uploads will enable after the account is approved"
+        if state == "disabled":
+            return False, "Cloud account is disabled"
+        return False, f"Cloud account state: {state}"
     except urllib.error.HTTPError as e:
         detail = ""
         try:
@@ -724,6 +731,8 @@ def _cloud_account_ready(url: str, *, timeout: float = 10.0) -> tuple[bool, str 
             detail = e.reason or ""
         if e.code == 403:
             return False, detail or "Cloud tenant is not enrolled"
+        if e.code == 428:
+            return False, detail or "Cloud tenant key is not available"
         return False, f"Cloud account probe returned HTTP {e.code}: {detail or e.reason}"
     except Exception as e:
         return False, f"Cloud account probe failed: {e}"
@@ -1267,6 +1276,189 @@ def _backend_owner_headers(cfg: FishermanConfig, *, content_type: str | None = N
     return headers
 
 
+def _cfg_with_identity() -> FishermanConfig:
+    cfg = FishermanConfig()
+    if not cfg.private_key:
+        _load_keys()
+        cfg = FishermanConfig()
+    return cfg
+
+
+def _context_home_target(home: str, cfg: FishermanConfig) -> str:
+    if home in {"local", "backend"}:
+        return home
+    if cfg.backend_mode in {"cloud", "self_hosted"} and cfg.backend_url:
+        return "backend"
+    return "local"
+
+
+def _backend_context_request(
+    cfg: FishermanConfig,
+    method: str,
+    path: str,
+    *,
+    params: dict | None = None,
+    body: dict | None = None,
+    timeout: float = 60.0,
+) -> dict:
+    if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
+        raise click.ClickException("no active Cloud/Self-hosted backend")
+    data = None
+    headers = _backend_owner_headers(cfg, content_type="application/json" if body is not None else None)
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        _backend_api_url(cfg.backend_url, path, params),
+        method=method,
+        data=data,
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise click.ClickException(f"backend returned HTTP {e.code}: {detail}") from e
+    except Exception as e:
+        raise click.ClickException(f"backend context request failed: {e}") from e
+
+
+@main.group(name="context")
+def context_group():
+    """Export, import, or delete a context home."""
+
+
+@context_group.command(name="export")
+@click.option("--output", "-o", required=True, help="Destination .json archive.")
+@click.option("--home", type=click.Choice(["active", "local", "backend"]), default="active", show_default=True)
+@click.option("--since", default=None, help="Start window, e.g. '7d', '24h', or epoch seconds.")
+@click.option("--until", default=None, help="End window, e.g. '1h' or epoch seconds.")
+@click.option("--limit", default=5000, show_default=True, help="Maximum frames and transcripts to export.")
+@click.option("--include-images/--no-images", default=False, show_default=True,
+              help="Include screenshots in the archive. This can create large sensitive files.")
+@click.option("--timeout", default=120.0, show_default=True)
+def context_export(output, home, since, until, limit, include_images, timeout):
+    """Download context from Local Only or the active backend."""
+    from fisherman import context_home as _ctx
+
+    cfg = _cfg_with_identity()
+    target = _context_home_target(home, cfg)
+    since_ts = _parse_since_to_ts(since)
+    until_ts = _parse_since_to_ts(until)
+
+    if target == "local":
+        result = _ctx.export_local_context(
+            output,
+            cfg,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            limit=limit,
+            include_images=include_images,
+        )
+    else:
+        archive = _backend_context_request(
+            cfg,
+            "GET",
+            "/api/context/export",
+            params={
+                "since_ts": since_ts,
+                "until_ts": until_ts,
+                "limit": max(1, int(limit)),
+                "include_images": "1" if include_images else "0",
+            },
+            timeout=timeout,
+        )
+        _ctx.write_archive(output, archive)
+        result = {
+            "ok": True,
+            "path": os.path.expanduser(output),
+            "frames": len(archive.get("frames") or []),
+            "audio_transcripts": len(archive.get("audio_transcripts") or []),
+            "include_images": include_images,
+        }
+
+    click.echo(f"exported context: {result['path']}")
+    click.echo(f"  frames:      {result.get('frames', 0)}")
+    click.echo(f"  transcripts: {result.get('audio_transcripts', 0)}")
+    click.echo(f"  images:      {'included' if result.get('include_images') else 'not included'}")
+
+
+@context_group.command(name="import")
+@click.argument("archive")
+@click.option("--home", type=click.Choice(["active", "local", "backend"]), default="active", show_default=True)
+@click.option("--timeout", default=180.0, show_default=True)
+def context_import(archive, home, timeout):
+    """Upload an exported archive into Local Only or the active backend."""
+    from fisherman import context_home as _ctx
+
+    cfg = _cfg_with_identity()
+    target = _context_home_target(home, cfg)
+    if target == "local":
+        result = _ctx.import_local_context(archive, cfg)
+    else:
+        body = _ctx.load_archive(archive)
+        result = _backend_context_request(
+            cfg,
+            "POST",
+            "/api/context/import",
+            body=body,
+            timeout=timeout,
+        )
+    click.echo("imported context")
+    click.echo(f"  frames:      {result.get('imported_frames', 0)}")
+    click.echo(f"  transcripts: {result.get('imported_audio_transcripts', 0)}")
+
+
+@context_group.command(name="delete")
+@click.option("--home", type=click.Choice(["active", "local", "backend"]), default="active", show_default=True)
+@click.option("--since", default=None, help="Delete records newer than this, e.g. '30d'.")
+@click.option("--until", default=None, help="Delete records older than this end bound.")
+@click.option("--all", "all_records", is_flag=True, help="Delete the whole selected context home.")
+@click.option("--limit", default=50000, show_default=True, help="Local delete scan limit.")
+@click.option("--dry-run", is_flag=True, help="Count matching rows without deleting.")
+@click.option("--confirm", default="", help="Type DELETE to actually delete.")
+@click.option("--timeout", default=120.0, show_default=True)
+def context_delete(home, since, until, all_records, limit, dry_run, confirm, timeout):
+    """Delete context from Local Only or the active backend."""
+    from fisherman import context_home as _ctx
+
+    if not all_records and not since and not until:
+        raise click.ClickException("provide --since/--until or --all")
+    if not dry_run and confirm != "DELETE":
+        raise click.ClickException("refusing to delete without --confirm DELETE")
+
+    cfg = _cfg_with_identity()
+    target = _context_home_target(home, cfg)
+    since_ts = None if all_records else _parse_since_to_ts(since)
+    until_ts = None if all_records else _parse_since_to_ts(until)
+
+    if target == "local":
+        result = _ctx.delete_local_context(
+            cfg,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            limit=limit,
+            dry_run=dry_run,
+        )
+    else:
+        result = _backend_context_request(
+            cfg,
+            "DELETE",
+            "/api/context",
+            params={
+                "since_ts": since_ts,
+                "until_ts": until_ts,
+                "all": "1" if all_records else "",
+                "dry_run": "1" if dry_run else "",
+                "confirm": confirm,
+            },
+            timeout=timeout,
+        )
+    click.echo("context delete " + ("dry run" if dry_run else "complete"))
+    click.echo(f"  frames:      {result.get('frames', 0)}")
+    click.echo(f"  transcripts: {result.get('audio_transcripts', 0)}")
+
+
 def _local_status_llm_settings() -> dict:
     cfg = FishermanConfig()
     return {
@@ -1427,6 +1619,52 @@ def cloud_audit(cloud_url, rpc_url, contract_address, as_json, timeout):
         for failure in cloud_failures:
             click.echo(f"    - {failure}")
     sys.exit(0 if not cloud_failures else 1)
+
+
+@cloud_group.command(name="account")
+@click.argument("cloud_url", required=False)
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--timeout", default=15.0, show_default=True)
+def cloud_account(cloud_url, as_json, timeout):
+    """Show this identity's Fisherman Cloud account state."""
+    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL
+
+    url = cloud_url or DEFAULT_CLOUD_BACKEND_URL
+    out = _cloud_account_request(url, "GET", timeout=timeout)
+    if as_json:
+        click.echo(json.dumps(out, indent=2))
+        return
+    click.echo(f"user:    {str(out.get('user_pubkey') or '')[:16]}…")
+    click.echo(f"state:   {out.get('state')}")
+    click.echo(f"active:  {bool(out.get('active'))}")
+    if out.get("plan"):
+        click.echo(f"plan:    {out.get('plan')}")
+    if out.get("enrollment_requested_at"):
+        click.echo(f"request: {out.get('enrollment_requested_at')}")
+    if out.get("enrollment_approved_at"):
+        click.echo(f"approved:{out.get('enrollment_approved_at')}")
+
+
+@cloud_group.command(name="request-access")
+@click.argument("cloud_url", required=False)
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--timeout", default=15.0, show_default=True)
+def cloud_request_access(cloud_url, as_json, timeout):
+    """Request access to hosted Fisherman Cloud for this identity."""
+    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL
+
+    url = cloud_url or DEFAULT_CLOUD_BACKEND_URL
+    out = _cloud_account_request(url, "POST", timeout=timeout)
+    if as_json:
+        click.echo(json.dumps(out, indent=2))
+        return
+    click.echo(f"cloud account state: {out.get('state')}")
+    if out.get("active"):
+        click.echo("Cloud account is active.")
+    elif out.get("state") == "pending":
+        click.echo("Access request recorded. Uploads stay queued locally until approval.")
+    else:
+        click.echo("Cloud account is not active yet.")
 
 
 @cloud_group.command(name="migrate-client-key")

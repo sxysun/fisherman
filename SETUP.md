@@ -104,13 +104,13 @@ Do not commit real secret values to this file.
 - `mirror/deploy/BUILD.md` documents reproducible builds.
 - `mirror/deploy/DEPLOYMENTS.md` is the append-only deployment log.
 
-## Open Work
+## Remaining Operator Work
 
-- Rename user-facing docs and UI from mirror-centric wording to managed
-  backend wording.
-- Expand the current mirror service into the full Cloud backend surface:
-  ingest, query, processors, agent access, and sealed per-user state.
-- Add self-serve Cloud pairing in the menubar after attestation passes.
-- Move production governance from a single owner key to multisig.
-- Promote from testnet compose-hash governance to mainnet once the
+- Rotate any deployment token that has been pasted into chat, shell
+  history, or issue trackers before relying on production automation.
+- Move compose-hash governance from the current owner key to multisig
+  before opening Cloud beyond dogfood/invite users.
+- Promote compose-hash governance from Sepolia to mainnet once the
   dogfood deployment is stable.
+- Add a formal Cloud account admin workflow for approving pending users;
+  the backend already records `pending` access requests.

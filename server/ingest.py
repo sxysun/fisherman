@@ -252,6 +252,97 @@ def _can_auto_enroll(user_hex: str) -> bool:
     return False
 
 
+def _public_account_payload(user_hex: str, row) -> dict:
+    state = _row_get(row, "enrollment_state") if row else None
+    disabled_at = _row_get(row, "disabled_at") if row else None
+    if disabled_at is not None:
+        state = "disabled"
+    if row is None:
+        state = "eligible" if _can_auto_enroll(user_hex) else "not_requested"
+    payload = {
+        "user_pubkey": user_hex,
+        "state": state or "not_requested",
+        "active": state == "active" and disabled_at is None,
+        "multi_tenant": is_multi_tenant_enabled(),
+        "enrollment_mode": _cloud_enrollment_mode() if is_multi_tenant_enabled() else "single-tenant",
+        "tenant_key_mode": _cloud_key_mode() if is_multi_tenant_enabled() else _KEY_SOURCE_SERVER,
+        "client_key_available": bool(_SESSION_DATA_KEYS.get(user_hex)),
+    }
+    if row:
+        for field in (
+            "plan",
+            "max_frames_per_hour",
+            "max_storage_mb",
+            "data_key_source",
+            "client_key_last_seen_at",
+            "enrollment_requested_at",
+            "enrollment_approved_at",
+            "created_at",
+        ):
+            value = _row_get(row, field)
+            if isinstance(value, datetime.datetime):
+                value = value.isoformat()
+            payload[field] = value
+    return payload
+
+
+async def _fetch_account_row(db: asyncpg.Pool, user_hex: str):
+    async with db.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            SELECT user_pubkey, created_at, disabled_at, enrollment_state,
+                   enrollment_requested_at, enrollment_approved_at, plan,
+                   max_frames_per_hour, max_storage_mb, data_key_source,
+                   client_key_last_seen_at
+            FROM users
+            WHERE user_pubkey = $1
+            """,
+            user_hex,
+        )
+
+
+async def _request_cloud_access(
+    db: asyncpg.Pool,
+    ctx: AuthContext,
+    client_data_key: str | None,
+) -> dict:
+    if not is_multi_tenant_enabled():
+        await _ensure_tenant(db, ctx, client_data_key)
+        return _public_account_payload(ctx.user_hex, await _fetch_account_row(db, ctx.user_hex))
+
+    row = await _fetch_account_row(db, ctx.user_hex)
+    if row and _row_get(row, "enrollment_state") == "active" and _row_get(row, "disabled_at") is None:
+        _remember_client_data_key(ctx, client_data_key)
+        return _public_account_payload(ctx.user_hex, row)
+
+    if _can_auto_enroll(ctx.user_hex):
+        await _ensure_tenant(db, ctx, client_data_key)
+        return _public_account_payload(ctx.user_hex, await _fetch_account_row(db, ctx.user_hex))
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO users
+                (user_pubkey, enrollment_state, enrollment_requested_at,
+                 plan, max_frames_per_hour, data_key_source)
+            VALUES ($1, 'pending', now(), 'requested', 0, $2)
+            ON CONFLICT (user_pubkey) DO UPDATE SET
+                enrollment_state = CASE
+                    WHEN users.enrollment_state = 'active' THEN users.enrollment_state
+                    ELSE 'pending'
+                END,
+                enrollment_requested_at = COALESCE(users.enrollment_requested_at, now()),
+                plan = CASE
+                    WHEN users.enrollment_state = 'active' THEN users.plan
+                    ELSE 'requested'
+                END
+            """,
+            ctx.user_hex,
+            _KEY_SOURCE_CLIENT if _client_keys_required() else _KEY_SOURCE_SERVER,
+        )
+    return _public_account_payload(ctx.user_hex, await _fetch_account_row(db, ctx.user_hex))
+
+
 def _auth_header_from_ws(ws: websockets.WebSocketServerProtocol) -> str:
     request = getattr(ws, "request", None)
     headers = getattr(request, "headers", None)
@@ -335,8 +426,8 @@ async def _ensure_tenant(
                 INSERT INTO users
                     (user_pubkey, enrollment_state, max_frames_per_hour,
                      wrapped_data_key, data_key_source, client_key_last_seen_at,
-                     data_key_created_at)
-                VALUES ($1, 'active', $2, $3, $4, $5, now())
+                     data_key_created_at, enrollment_approved_at)
+                VALUES ($1, 'active', $2, $3, $4, $5, now(), now())
                 ON CONFLICT (user_pubkey) DO NOTHING
                 """,
                 ctx.user_hex,
@@ -1382,6 +1473,52 @@ async def _http_health(request: "web.Request") -> "web.Response":
     })
 
 
+async def _http_cloud_account(request: "web.Request") -> "web.Response":
+    """Return Cloud account/enrollment state without creating data rows."""
+    db: asyncpg.Pool = request.app["db"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        _remember_client_data_key(ctx, request.headers.get("X-Fisherman-Tenant-Data-Key"))
+        return web.json_response(
+            _public_account_payload(ctx.user_hex, await _fetch_account_row(db, ctx.user_hex))
+        )
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except Exception:
+        log.error("http_cloud_account_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_cloud_access_request(request: "web.Request") -> "web.Response":
+    """Create or return an invite/request state for a Cloud tenant."""
+    db: asyncpg.Pool = request.app["db"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        payload = await _request_cloud_access(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="cloud_access_request",
+            metadata={"state": payload.get("state")},
+        )
+        return web.json_response({"ok": True, **payload})
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except Exception:
+        log.error("http_cloud_access_request_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
 def _public_status_llm_settings(settings: dict) -> dict:
     return {
         "mode": settings.get("mode") or "managed",
@@ -1507,6 +1644,14 @@ async def _http_put_status_llm(request: "web.Request") -> "web.Response":
 def _row_ts_seconds(value) -> float:
     if isinstance(value, datetime.datetime):
         return value.timestamp()
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
     return float(value)
 
 
@@ -2083,6 +2228,343 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _http_context_export(request: "web.Request") -> "web.Response":
+    """Export a tenant context archive for migration."""
+    db: asyncpg.Pool = request.app["db"]
+    storage = request.app["storage"]
+    try:
+        ctx = await _require_scoped_context(request, db, "read:captures")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    if ctx.role not in {"owner", "tenant"}:
+        return web.json_response({"error": "owner credentials required"}, status=403)
+
+    try:
+        limit = max(1, min(int(request.query.get("limit", "5000")), 20000))
+    except ValueError:
+        limit = 5000
+    include_images = str(request.query.get("include_images", "")).lower() in {"1", "true", "yes"}
+    since = _parse_query_time(request.query.get("since_ts") or request.query.get("since"))
+    until = _parse_query_time(request.query.get("until_ts") or request.query.get("until"))
+
+    clauses = [_tenant_predicate()]
+    params: list[object] = [ctx.user_hex]
+    idx = 2
+    if since is not None:
+        clauses.append(f"ts >= ${idx}")
+        params.append(since)
+        idx += 1
+    if until is not None:
+        clauses.append(f"ts <= ${idx}")
+        params.append(until)
+        idx += 1
+    params.append(limit)
+    where_sql = " AND ".join(clauses)
+    loop = asyncio.get_running_loop()
+
+    try:
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="context_export",
+            scope="read:captures",
+            metadata={
+                "limit": limit,
+                "include_images": include_images,
+                "has_since": since is not None,
+                "has_until": until is not None,
+            },
+        )
+        async with db.acquire() as conn:
+            frame_rows = await conn.fetch(
+                f"""
+                SELECT id, user_pubkey, device_pubkey, ts, app, bundle_id,
+                       "window", ocr_text, urls, image_key, width, height,
+                       tier_hint, routing, data_key_source, created_at
+                FROM frames
+                WHERE {where_sql}
+                ORDER BY ts DESC
+                LIMIT ${idx}
+                """,
+                *params,
+            )
+            audio_rows = await conn.fetch(
+                f"""
+                SELECT id, user_pubkey, device_pubkey, ts, meeting_app,
+                       device_name, is_input_device, transcript,
+                       data_key_source, created_at
+                FROM audio_transcripts
+                WHERE {where_sql}
+                ORDER BY ts DESC
+                LIMIT ${idx}
+                """,
+                *params,
+            )
+
+        frames = []
+        image_errors = 0
+        for row in frame_rows:
+            data_key = await _tenant_data_key(db, ctx.user_hex, _row_get(row, "data_key_source"))
+            item = _decrypted_frame_row(row, data_key)
+            item["bundle"] = item.get("bundle_id")
+            item["w"] = item.get("width")
+            item["h"] = item.get("height")
+            item["has_image"] = bool(item.get("image_key"))
+            if include_images and item.get("image_key"):
+                try:
+                    jpeg = await loop.run_in_executor(
+                        _pool,
+                        partial(storage.download, item["image_key"], data_key),
+                    )
+                    item["image_b64"] = base64.b64encode(jpeg).decode("ascii")
+                except Exception:
+                    image_errors += 1
+                    item["image_b64"] = None
+            frames.append(item)
+
+        audio = [
+            _decrypted_audio_row(
+                row,
+                await _tenant_data_key(db, ctx.user_hex, _row_get(row, "data_key_source")),
+            )
+            for row in audio_rows
+        ]
+        return web.json_response({
+            "format": "fisherman.context.v1",
+            "exported_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "source": {
+                "kind": "backend",
+                "user_pubkey": ctx.user_hex,
+                "multi_tenant": is_multi_tenant_enabled(),
+            },
+            "options": {
+                "since_ts": since.timestamp() if since else None,
+                "until_ts": until.timestamp() if until else None,
+                "limit": limit,
+                "include_images": include_images,
+                "image_errors": image_errors,
+            },
+            "frames": frames,
+            "audio_transcripts": audio,
+        })
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except Exception:
+        log.error("http_context_export_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_context_import(request: "web.Request") -> "web.Response":
+    """Import a Fisherman context archive into this tenant."""
+    db: asyncpg.Pool = request.app["db"]
+    storage = request.app["storage"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    if not isinstance(body, dict) or body.get("format") != "fisherman.context.v1":
+        return web.json_response({"error": "unsupported archive format"}, status=400)
+    frames = body.get("frames")
+    audio = body.get("audio_transcripts")
+    if not isinstance(frames, list) or not isinstance(audio, list):
+        return web.json_response({"error": "archive must contain frames and audio_transcripts arrays"}, status=400)
+    if len(frames) + len(audio) > 20000:
+        return web.json_response({"error": "archive too large for one import request"}, status=413)
+
+    loop = asyncio.get_running_loop()
+    imported_frames = 0
+    imported_audio = 0
+    try:
+        tenant_data_key = await _ensure_tenant(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
+        data_key_source = _KEY_SOURCE_CLIENT if _client_keys_required() else _KEY_SOURCE_SERVER
+        for row in frames:
+            if not isinstance(row, dict):
+                continue
+            try:
+                msg = {
+                    "type": "frame",
+                    "ts": _row_ts_seconds(row.get("ts")),
+                    "app": row.get("app") or "",
+                    "bundle": row.get("bundle") or row.get("bundle_id") or "",
+                    "window": row.get("window") or "",
+                    "ocr_text": row.get("ocr_text") or "",
+                    "urls": row.get("urls") or [],
+                    "image": row.get("image_b64") or None,
+                    "w": row.get("w") or row.get("width"),
+                    "h": row.get("h") or row.get("height"),
+                    "tier_hint": row.get("tier_hint"),
+                    "routing_signals": row.get("routing_signals") or row.get("routing"),
+                }
+                await _handle_frame(
+                    msg,
+                    db,
+                    storage,
+                    loop,
+                    ctx,
+                    tenant_data_key,
+                    data_key_source,
+                )
+                imported_frames += 1
+            except Exception:
+                log.warning("context_import_frame_skipped", user=ctx.user_hex[:16], exc_info=True)
+        for row in audio:
+            if not isinstance(row, dict) or not row.get("transcript"):
+                continue
+            try:
+                msg = {
+                    "type": "audio",
+                    "ts": _row_ts_seconds(row.get("ts")),
+                    "transcript": row.get("transcript") or "",
+                    "meeting_app": row.get("meeting_app") or "",
+                    "device_name": row.get("device_name") or "",
+                    "is_input_device": bool(row.get("is_input_device")),
+                }
+                await _handle_audio(
+                    msg,
+                    db,
+                    loop,
+                    ctx,
+                    tenant_data_key,
+                    data_key_source,
+                )
+                imported_audio += 1
+            except Exception:
+                log.warning("context_import_audio_skipped", user=ctx.user_hex[:16], exc_info=True)
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="context_import",
+            metadata={"frames": imported_frames, "audio_transcripts": imported_audio},
+        )
+        return web.json_response({
+            "ok": True,
+            "imported_frames": imported_frames,
+            "imported_audio_transcripts": imported_audio,
+        })
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except Exception:
+        log.error("http_context_import_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_context_delete(request: "web.Request") -> "web.Response":
+    """Delete tenant context rows and best-effort image blobs."""
+    db: asyncpg.Pool = request.app["db"]
+    storage = request.app["storage"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    if str(request.query.get("confirm", "")) != "DELETE" and not _truthy("FISH_CONTEXT_DELETE_TEST_MODE"):
+        return web.json_response({"error": "confirm=DELETE required"}, status=400)
+
+    dry_run = str(request.query.get("dry_run", "")).lower() in {"1", "true", "yes"}
+    all_records = str(request.query.get("all", "")).lower() in {"1", "true", "yes"}
+    since = _parse_query_time(request.query.get("since_ts") or request.query.get("since"))
+    until = _parse_query_time(request.query.get("until_ts") or request.query.get("until"))
+    if not all_records and since is None and until is None:
+        return web.json_response({"error": "provide since/until or all=1"}, status=400)
+
+    clauses = [_tenant_predicate()]
+    params: list[object] = [ctx.user_hex]
+    idx = 2
+    if not all_records:
+        if since is not None:
+            clauses.append(f"ts >= ${idx}")
+            params.append(since)
+            idx += 1
+        if until is not None:
+            clauses.append(f"ts <= ${idx}")
+            params.append(until)
+            idx += 1
+    where_sql = " AND ".join(clauses)
+
+    try:
+        await _ensure_tenant(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
+        async with db.acquire() as conn:
+            if dry_run:
+                frames_count = await conn.fetchval(
+                    f"SELECT count(*) FROM frames WHERE {where_sql}",
+                    *params,
+                )
+                audio_count = await conn.fetchval(
+                    f"SELECT count(*) FROM audio_transcripts WHERE {where_sql}",
+                    *params,
+                )
+                return web.json_response({
+                    "ok": True,
+                    "dry_run": True,
+                    "frames": int(frames_count or 0),
+                    "audio_transcripts": int(audio_count or 0),
+                })
+            frame_rows = await conn.fetch(
+                f"DELETE FROM frames WHERE {where_sql} RETURNING image_key",
+                *params,
+            )
+            audio_rows = await conn.fetch(
+                f"DELETE FROM audio_transcripts WHERE {where_sql} RETURNING id",
+                *params,
+            )
+
+        image_errors = 0
+        for row in frame_rows:
+            image_key = _row_get(row, "image_key")
+            if not image_key:
+                continue
+            try:
+                await asyncio.get_running_loop().run_in_executor(
+                    _pool,
+                    partial(storage.delete, image_key),
+                )
+            except Exception:
+                image_errors += 1
+                log.warning("context_delete_image_failed", user=ctx.user_hex[:16], exc_info=True)
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="context_delete",
+            metadata={
+                "frames": len(frame_rows),
+                "audio_transcripts": len(audio_rows),
+                "all": all_records,
+                "image_errors": image_errors,
+            },
+        )
+        return web.json_response({
+            "ok": True,
+            "dry_run": False,
+            "frames": len(frame_rows),
+            "audio_transcripts": len(audio_rows),
+            "image_errors": image_errors,
+        })
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except Exception:
+        log.error("http_context_delete_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
 async def _http_put_deputy(request: "web.Request") -> "web.Response":
     db: asyncpg.Pool = request.app["db"]
     ctx = _require_http_context(request)
@@ -2466,14 +2948,19 @@ async def _run(host: str, port: int) -> None:
     # Start HTTP API server (if aiohttp available)
     http_runner = None
     if web:
-        app = web.Application()
+        app = web.Application(client_max_size=max(_max_ws_message_bytes() * 4, 64 * 1024 * 1024))
         app["db"] = db
         app["storage"] = r2
         app.router.add_get("/health", _http_health)
+        app.router.add_get("/api/cloud/account", _http_cloud_account)
+        app.router.add_post("/api/cloud/access-request", _http_cloud_access_request)
         app.router.add_get("/api/current_activity", _http_current_activity)
         app.router.add_get("/api/activity_history", _http_activity_history)
         app.router.add_get("/api/query", _http_query)
         app.router.add_get("/api/transcripts", _http_transcripts)
+        app.router.add_get("/api/context/export", _http_context_export)
+        app.router.add_post("/api/context/import", _http_context_import)
+        app.router.add_delete("/api/context", _http_context_delete)
         app.router.add_get("/api/status-llm", _http_get_status_llm)
         app.router.add_put("/api/status-llm", _http_put_status_llm)
         app.router.add_post("/api/cloud/migrate-client-key", _http_migrate_client_key)

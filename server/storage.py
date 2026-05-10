@@ -67,6 +67,9 @@ class R2Storage:
                 raise
             return fernet_for_data_key().decrypt(encrypted)
 
+    def delete(self, key: str) -> None:
+        self._s3.delete_object(Bucket=self._bucket, Key=key)
+
 
 class LocalStorage:
     """Fallback: store encrypted frames on local disk when R2 is not configured."""
@@ -104,6 +107,12 @@ class LocalStorage:
             if data_key is None:
                 raise
             return fernet_for_data_key().decrypt(encrypted)
+
+    def delete(self, key: str) -> None:
+        try:
+            self._path_for_key(key).unlink()
+        except FileNotFoundError:
+            pass
 
     def _path_for_key(self, key: str) -> pathlib.Path:
         # Existing local keys omit the top-level "frames/" directory on disk.

@@ -57,6 +57,7 @@ struct SettingsView: View {
         case friends = "Friends"
         case deputies = "Agent Access"
         case agent = "Activity Status"
+        case data = "Data"
         case diagnostics = "Diagnostics"
     }
 
@@ -104,6 +105,8 @@ struct SettingsView: View {
                         DeputiesTab()
                     case .agent:
                         ActivityStatusTab(config: config)
+                    case .data:
+                        ContextDataTab(config: config)
                     case .diagnostics:
                         DiagnosticsTab()
                     }
@@ -408,7 +411,7 @@ struct SettingsView: View {
         if cloudTrustSummary == nil {
             return "Review the live release first. Until approval, Fisherman captures locally and queues Cloud uploads."
         }
-        return "The release is approved, but this Mac has not finished account setup. Click Finish Setup; if it still fails, use Local Only or Self-hosted until the Cloud account is active."
+        return "The release is approved, but this Mac has not finished account setup. Finish Setup requests hosted Cloud access and enables uploads once the account is active."
     }
 
     // MARK: - Identity tab

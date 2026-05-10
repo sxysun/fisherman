@@ -1,4 +1,9 @@
-# iOS Broadcast Extension: Real-Time Streaming Spec
+# Archived: iOS Broadcast Extension Real-Time Streaming Spec
+
+This document predates the current context-home model, durable upload
+queue, Fisherman Cloud strict attestation gate, and context
+export/import/delete migration path. Treat it as historical design
+context, not current product architecture.
 
 ## Overview
 

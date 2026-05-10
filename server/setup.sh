@@ -105,7 +105,7 @@ INGEST_HOST=0.0.0.0
 INGEST_PORT=9999
 HTTP_API_PORT=9998
 
-# Auth token (auto-generated — copy this to the client's FISH_AUTH_TOKEN)
+# Compatibility bearer token (FishKey is the primary auth path)
 INGEST_AUTH_TOKEN=${AUTH_TOKEN}
 
 # Ed25519 identity (auto-generated — used for FishKey auth and friend codes)
@@ -124,10 +124,10 @@ fi
 echo ""
 echo "==> Setup complete!"
 echo ""
-echo "    Auth token (set this as FISH_AUTH_TOKEN on the client):"
-grep INGEST_AUTH_TOKEN .env | head -1
-echo ""
 echo "    Start the server:"
 echo "      uv run python ingest.py"
+echo ""
+echo "    Then configure a client with:"
+echo "      fisherman backend configure self-hosted --url ws://YOUR_HOST:9999/ingest"
 echo ""
 echo "    R2 is optional. Without R2 credentials, frames are stored locally in ./frames/"

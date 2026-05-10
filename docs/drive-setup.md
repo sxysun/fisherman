@@ -1,4 +1,4 @@
-# Google Drive backend setup
+# Google Drive backup setup
 
 Fisherman doesn't ship its own OAuth client — that requires a verified
 Google Cloud project + branded consent screen, which is real
@@ -56,17 +56,17 @@ fisherman storage configure-drive \
 ```
 
 Restart the daemon. Fisherman will create a top-level "fisherman"
-folder in your Drive and put encrypted blobs there.
+folder in your Drive and put encrypted backup blobs there. This is an
+optional backup path, not a separate context home.
 
 ## Caveats
 
 - **Quota**: Google Drive's API allows ~10k requests / day per user
   for free tier. The daemon batches uploads, but very high capture
-  rates may hit limits. If you do, switch to S3 / R2 / Hetzner SB.
+  rates may hit limits.
 - **Scope**: We only request `drive.file` (apps see only files they
   create), so fisherman cannot read your other Drive content.
 - **Refresh token expiry**: Tokens issued through "Testing" consent
   screens expire after 7 days. Either publish your OAuth client app
   ("In production" status — Google re-checks) or remint the token
-  weekly. For long-running production deployments, S3 or WebDAV are
-  less fiddly.
+  weekly.

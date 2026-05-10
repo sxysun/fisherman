@@ -1,7 +1,7 @@
 # TEE deployment for Fisherman Cloud backend
 
 Fisherman Cloud is the managed backend mode. The deployable CVM now has a
-public Cloud gateway, a multi-tenant ingest service, the mirror/query
+public Cloud gateway, a multi-tenant ingest service, the query
 endpoint, and the official encrypted status relay. The gateway is the
 only user-facing Cloud backend surface; internal services stay behind it.
 
@@ -13,15 +13,13 @@ Cloud compose deploys the official relay beside the attested backend so
 users get one default URL, but the relay still receives no plaintext
 status or raw context.
 
-The pattern follows `feedling-mcp-v1` — same shape, different workload.
-
 ## Target platform
 
 **Phala Cloud — `dstack` Intel TDX CVMs.** Not GCP Confidential Space,
 not Nitro. Reasons:
 
-- Same primitives as feedling-mcp-v1 — we already trust this stack and
-  iOS already knows how to verify it.
+- dstack gives us Intel TDX CVMs, app identity, event-log based compose
+  measurements, and enclave-local TLS termination in one deploy target.
 - `dstack-KMS` derives keys from `(kms_root, app_id, path)`, not
   `compose_hash`. Compose updates don't rotate keys, so user envelopes
   survive minor releases.
@@ -33,7 +31,7 @@ not Nitro. Reasons:
   lets us version-gate which builds clients are willing to stream raw
   context to.
 
-## Pieces we need (mirroring feedling's deploy/ tree)
+## Deploy Tree
 
 ```
 mirror/deploy/
@@ -50,7 +48,7 @@ mirror/deploy/
 
 ### 1. Reproducible image
 
-Same shape as `feedling-mcp-v1/deploy/Dockerfile`:
+The deployable image is pinned and reproducible:
 
 ```Dockerfile
 ARG PYTHON_IMAGE=python@sha256:<digest>
@@ -71,9 +69,9 @@ USER fisherman
 CMD ["python", "-u", "-m", "mirror.server"]
 ```
 
-Hash-verified deps via `uv pip compile --generate-hashes` → checked
-into the repo. Reproducible-build script produces back-to-back
-byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.sh`).
+Hash-verified deps via `uv pip compile --generate-hashes` are checked
+into the repo. The reproducible-build script produces back-to-back
+byte-identical OCI tarballs.
 
 ### 2. dstack compose
 
@@ -84,7 +82,8 @@ byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.
   inside the CVM.
 - **cloud** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — public gateway.
   `/health` returns capability state; `/.well-known/attestation` is
-  proxied to mirror; `/ingest` and `/api/*` are proxied to Cloud ingest.
+  proxied to the attestation/query service; `/ingest` and `/api/*` are
+  proxied to Cloud ingest.
 - **postgres** (`postgres:16-alpine@<digest>`) — local persistent Postgres
   for managed Cloud ingest, stored on the CVM volume and not exposed through
   ingress.
@@ -93,8 +92,9 @@ byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.
   generates/persists its Fernet key under `/data/secrets/`, and stores
   encrypted frame blobs under `/data/frames`. R2 and externally injected
   database/key env vars remain supported for a later production profile.
-- **mirror** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
-  `python -m mirror.server`, reads its config from KMS-derived secrets.
+- **query/attestation service** (`ghcr.io/<org>/fisherman-mirror:<sha>`)
+  — runs `python -m mirror.server`, reads its config from KMS-derived
+  secrets. The package name is historical; it is not a user setup mode.
 - **relay** (`ghcr.io/<org>/fisherman-mirror:<sha>`) — runs
   `python -m relay.server` with a SQLite event store. It persists only
   signed ciphertext and is not allowed to decrypt, index, summarize, or
@@ -159,19 +159,16 @@ files. The intended self-serve flow:
    undecryptable until an approved client reconnects and re-grants the
    tenant key. This is the privacy boundary that blocks an unapproved
    malicious deploy from reading old context.
-7. For mirror/RPC pairing, menubar derives a per-pair envelope key from
-   the user's seed and `enclave_content_pk` (returned by `/v1/pair/init`).
-   The user's X25519 priv + `K_blob_at_rest` are encrypted to this
-   enclave-bound key; the enclave decrypts inside the CVM, never on the
-   wire.
+7. Agent Access uses the backend `/api/query`, `/api/transcripts`, and
+   `/api/current_activity` routes when Cloud is active. Local Only still
+   falls back to laptop relay RPC while the Mac is online.
 
-This matches feedling's content-encryption pattern: the key derivation
-path is stable for a given `app_id`, so v1 envelopes survive compose
-rotations without a rewrap dance.
+The key derivation path is stable for a given `app_id`, so v1 envelopes
+survive compose rotations without a rewrap dance.
 
 ### 5. iOS / menubar audit card
 
-Mirror feedling-mcp-v1's `AuditCardView`. A user-visible row per check:
+Settings should render a user-visible row per check:
 
 - Quote chain valid → ✓
 - RTMR3 binds compose_hash → ✓
@@ -182,7 +179,7 @@ Mirror feedling-mcp-v1's `AuditCardView`. A user-visible row per check:
 
 If any row fails, menubar refuses to send the pairing token.
 
-## What's NOT blocking dogfooding
+## Dogfood State
 
 Self-hosted backends can continue to run on a user's VPS. The trust model
 is "you trust your server." Fisherman Cloud is for users who do not want
@@ -222,26 +219,26 @@ Deployment sequence for an existing Cloud tenant:
 
 ## When to revisit
 
-Once we have ≥ 5 dogfooders running 24/7 self-hosted mirrors and we
+Once we have >= 5 dogfooders running 24/7 self-hosted backends and we
 know:
 
 - Average uptime
 - ACL sync correctness over weeks
 - Failover speed under real network conditions
-- How often the mirror actually serves agent traffic vs the laptop
+- How often the backend actually serves agent traffic vs the laptop
 
-Then expand the managed backend from capability wiring into full product
-enrollment: account enablement, billing or invite gates, processor
-scheduling, and user-visible Cloud storage export.
+Then expand from invite/dogfood enrollment into full product enrollment:
+account enablement, billing or invite gates, processor scheduling, and
+Cloud admin tooling for pending-user approval.
 
-## References
+## Context Migration
 
-- `/Users/sxysun/Desktop/suapp/feedling-mcp-v1/deploy/` — the canonical
-  TDX deploy template we're cloning the shape of. Specifically:
-  - `Dockerfile` (pin pattern + build-time metadata)
-  - `docker-compose.phala.yaml` (ingress + service composition)
-  - `build-reproducible.sh` (deterministic OCI tarball)
-  - `BUILD.md` (third-party rebuild recipe)
-  - `DEPLOYMENTS.md` (append-only deployment log with compose_hash + tx)
-- `/Users/sxysun/Desktop/suapp/feedling-mcp-v1/docs/DESIGN_E2E.md` —
-  audit-card replay logic + content-encryption envelope design
+Cloud and self-hosted share the context archive API:
+
+- `GET /api/context/export`
+- `POST /api/context/import`
+- `DELETE /api/context`
+
+The CLI wraps those APIs with `fisherman context export/import/delete`.
+This is the supported path for moving history between Fisherman Cloud,
+self-hosted backends, and Local Only.

@@ -114,7 +114,7 @@ if [ -d "$FISH_DIR/.git" ]; then
             exec "$FISH_DIR/.venv/bin/fisherman" upgrade
         fi
         echo
-        echo "Falling back to legacy git reset (may discard pending local changes)..."
+        echo "Refreshing installed checkout from origin/main..."
     fi
     cd "$FISH_DIR"
     git fetch origin
@@ -129,25 +129,24 @@ fi
 echo "Setting up Python environment..."
 "$UV" sync
 
-# 7. Auto-generate .env if missing
+# 7. Auto-generate .env if missing. New installs start Local Only: capture
+# stays on this Mac, friend status uses the hosted E2EE relay, and users can
+# opt into Fisherman Cloud or Self-hosted later from Settings.
 if [ ! -f "$FISH_DIR/.env" ]; then
     echo
-    echo "--- Configuration ---"
+    echo "--- First-run configuration ---"
     echo
-
-    read -p "Server WebSocket URL [ws://localhost:9999/ingest]: " SERVER_URL
-    SERVER_URL="${SERVER_URL:-ws://localhost:9999/ingest}"
-
-    read -p "Auth token (leave blank to auto-generate): " AUTH_TOKEN
-    if [ -z "$AUTH_TOKEN" ]; then
-        AUTH_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-        echo "  Generated token: $AUTH_TOKEN"
-    fi
+    PRIVATE_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
 
     cat > "$FISH_DIR/.env" <<EOF
-# === Required ===
-FISH_SERVER_URL=$SERVER_URL
-FISH_AUTH_TOKEN=$AUTH_TOKEN
+# === Identity ===
+FISH_PRIVATE_KEY=$PRIVATE_KEY
+
+# === Context home ===
+FISH_BACKEND_MODE=local
+FISH_BACKEND_URL=
+FISH_SERVER_URL=ws://localhost:9999/ingest
+FISH_STATUS_RELAY_URL=https://relay.fisherman.teleport.computer
 
 # === Capture (screenpipe backend) ===
 FISH_CAPTURE_BACKEND=screenpipe
@@ -156,8 +155,10 @@ FISH_SCREENPIPE_POLL_INTERVAL=5.0
 FISH_SCREENPIPE_SEARCH_LIMIT=10
 FISH_CONTROL_PORT=7892
 EOF
+    chmod 600 "$FISH_DIR/.env"
     echo
-    echo "Created .env — edit ~/.fisherman/.env to customize further."
+    echo "Created ~/.fisherman/.env in Local Only mode."
+    echo "Use Settings → Context Home to opt into Fisherman Cloud or Self-hosted."
 else
     echo "Using existing .env"
 fi

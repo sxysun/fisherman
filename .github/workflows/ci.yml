@@ -56,6 +56,7 @@ jobs:
           from fisherman.rpc import build_request, parse_request, encrypt_response, decrypt_response
           from fisherman.friends import encode_code, decode_code
           from fisherman.deputy import encode_setup_token, decode_setup_token
+          from fisherman.context_home import ARCHIVE_FORMAT
           from relay.server import build_app, Router, Endpoint, _pick
           from mirror.server import MirrorServer, _authorize_from_list
           from mirror.cli import _decode_token
@@ -120,6 +121,17 @@ jobs:
         run: |
           cd contracts
           forge test -vvv
+
+  menubar:
+    name: macOS — menu bar build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build Swift menu bar app
+        run: |
+          cd menubar
+          swift build -c release
 
   build-repro:
     name: Reproducible build (single-pass)

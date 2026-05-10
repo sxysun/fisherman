@@ -41,7 +41,7 @@ If you have Hermes / OpenCode / another shell-capable agent on the box, give it 
 Then give it a prompt like:
 
 ```text
-Set up the Fisherman server from this repo. Handle server deployment end-to-end, including environment setup, dependency installation, Postgres, auth token, encryption key, and starting the ingest service. Use the repo-local skills in `skills/fisherman-cli/` and `skills/mind-rolling-summary/`. When done, tell me the server WebSocket URL and the auth token the client should use.
+Set up the Fisherman server from this repo. Handle server deployment end-to-end, including environment setup, dependency installation, Postgres, FishKey identity, encryption key, and starting the ingest service. Use the repo-local skills in `skills/fisherman-cli/` and `skills/mind-rolling-summary/`. When done, tell me the backend URL and how to configure `fisherman backend configure self-hosted`.
 ```
 
 Agent-friendly shell entrypoint:
@@ -51,7 +51,7 @@ cd server
 bash bootstrap-agent.sh --start
 ```
 
-This wraps setup, prints the client auth token, and starts the ingest server in the background.
+This wraps setup and starts the ingest server in the background.
 
 Manual quick start:
 
@@ -166,6 +166,11 @@ should be used for new deployments.
 | `GET` | `/api/activity_history` | Owner, tenant, or `read:status` deputy | Returns recent activity history |
 | `GET` | `/api/query` | Owner, tenant, or `read:captures` deputy | Returns decrypted frame metadata/OCR/window/URLs for one tenant |
 | `GET` | `/api/transcripts` | Owner, tenant, or `read:transcripts` deputy | Returns decrypted meeting transcripts for one tenant |
+| `GET` | `/api/context/export` | Owner or tenant | Returns a context migration archive |
+| `POST` | `/api/context/import` | Owner or tenant | Imports a context migration archive |
+| `DELETE` | `/api/context` | Owner or tenant | Deletes context rows and best-effort image blobs |
+| `GET` | `/api/cloud/account` | Tenant | Returns hosted Cloud enrollment/account state |
+| `POST` | `/api/cloud/access-request` | Tenant | Records or returns a hosted Cloud access request |
 | `GET` | `/api/deputies` | Owner or tenant | Lists deputy ACL rows |
 | `PUT` | `/api/deputies/{pubkey}` | Owner or tenant | Upserts a scoped deputy ACL row |
 | `DELETE` | `/api/deputies/{pubkey}` | Owner or tenant | Revokes a deputy ACL row |
@@ -248,9 +253,9 @@ All returned fields are decrypted for the authorized tenant. The backend
 does not return another user's rows because every query is tenant scoped
 by the owner pubkey and deputy ACL.
 
-## Backup / Restore
+## Operator Database Backup
 
-For production deployments (especially TEE/CVM where disk is ephemeral):
+For backend operators who want off-box database snapshots:
 
 ```bash
 uv run pg-backup backup     # encrypt + upload DB dump to R2

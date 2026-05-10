@@ -3,6 +3,8 @@ CREATE TABLE IF NOT EXISTS users (
     created_at  TIMESTAMPTZ DEFAULT now(),
     disabled_at TIMESTAMPTZ,
     enrollment_state TEXT NOT NULL DEFAULT 'active',
+    enrollment_requested_at TIMESTAMPTZ,
+    enrollment_approved_at TIMESTAMPTZ,
     plan TEXT NOT NULL DEFAULT 'default',
     max_frames_per_hour INT,
     max_storage_mb INT,
@@ -19,6 +21,8 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_state TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_requested_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_approved_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'default';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS max_frames_per_hour INT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS max_storage_mb INT;

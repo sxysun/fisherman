@@ -219,9 +219,8 @@ class FishermanConfig(BaseSettings):
         if self.backend_mode == "self_hosted":
             return bool(self.server_url)
         if self.backend_mode == "cloud":
-            # Current managed TEE deployment exposes attestation/mirror
-            # endpoints. Only stream once a cloud ingest websocket is
-            # explicitly configured.
+            # Only stream once the managed Cloud ingest websocket is
+            # explicitly configured and approved.
             return self.server_url.startswith(("ws://", "wss://")) and self.server_url != DEFAULT_SERVER_URL
         return False
 
