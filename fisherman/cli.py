@@ -953,6 +953,8 @@ def _persist_backend_config(
         _cfg.persist_user_env_var("FISH_STATUS_RELAY_URL", relay_url)
     if cloud_trust_policy is not None:
         _cfg.persist_user_env_var("FISH_CLOUD_TRUST_POLICY", cloud_trust_policy)
+    elif mode != "cloud":
+        _cfg.persist_user_env_var("FISH_CLOUD_TRUST_POLICY", "strict")
     return FishermanConfig()
 
 
@@ -1010,7 +1012,11 @@ def backend_configure_group():
 @click.option("--relay-url", default=None, help="Optional E2EE status relay URL.")
 def backend_configure_local(relay_url: str | None):
     """Keep raw context on this laptop."""
-    cfg = _persist_backend_config(mode="local", relay_url=relay_url)
+    cfg = _persist_backend_config(
+        mode="local",
+        backend_url="",
+        relay_url=relay_url,
+    )
     click.echo("configured backend: Local Only")
     click.echo(f"  ingest: disabled")
     click.echo(f"  relay:  {cfg.status_relay_url}")

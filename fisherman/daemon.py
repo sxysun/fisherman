@@ -16,7 +16,7 @@ from fisherman import storage_config
 from fisherman.audio_store import AudioStore
 from fisherman.blob_store import from_config as blob_store_from_config
 from fisherman.capture import capture_screen
-from fisherman.config import FishermanConfig
+from fisherman.config import FishermanConfig, ingest_url_from_backend_url
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
@@ -122,6 +122,18 @@ class FishermanDaemon:
             except Exception:
                 log.warning("invalid_private_key_for_relay", exc_info=True)
         self._mirror_sync: MirrorSync | None = None
+
+    def _upload_target_url(self) -> str:
+        """Backend URL used to tag durable outbox rows.
+
+        Cloud can be selected while raw ingest is temporarily disabled
+        pending attestation approval. In that state config.server_url is the
+        local placeholder, but queued rows are intended for the configured
+        Cloud endpoint once approval succeeds.
+        """
+        if self._config.backend_mode == "cloud" and self._config.backend_url:
+            return ingest_url_from_backend_url(self._config.backend_url)
+        return self._config.server_url
 
     def _cloud_connect_guard(self) -> bool:
         """Re-check Cloud trust before every websocket connect/reconnect."""
@@ -507,9 +519,12 @@ class FishermanDaemon:
             "upload_queue_pending": (
                 self._streamer.upload_queue_pending
                 if self._streamer is not None
-                else self._upload_queue.count(self._config.server_url)
+                else self._upload_queue.count(self._upload_target_url())
                 if self._upload_queue is not None
                 else 0
+            ),
+            "upload_queue_unbound": (
+                self._upload_queue.count_unbound() if self._upload_queue is not None else 0
             ),
             "connected": self._streamer.connected if self._streamer else False,
             "on_battery": on_battery(),
@@ -810,7 +825,7 @@ class FishermanDaemon:
                                 "audio",
                                 payload,
                                 frame_ts,
-                                target_url=cfg.server_url,
+                                target_url=self._upload_target_url(),
                             )
                         self._audio_sent += 1
 
@@ -847,6 +862,6 @@ class FishermanDaemon:
                 "frame",
                 payload,
                 frame_ts,
-                target_url=self._config.server_url,
+                target_url=self._upload_target_url(),
             )
         self._frames_sent += 1

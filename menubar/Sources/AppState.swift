@@ -88,6 +88,7 @@ final class AppState {
     var framesStreamed: Int = 0
     var framesDropped: Int = 0
     var uploadQueuePending: Int = 0
+    var uploadQueueUnbound: Int = 0
 
     // Pause
     var isPaused = false
@@ -178,11 +179,17 @@ final class AppState {
     }
 
     var secondaryFrameLabel: String {
-        ingestExpected ? "Queued" : "Dropped"
+        if uploadQueueUnbound > 0 {
+            return "Needs review"
+        }
+        return ingestExpected ? "Queued" : "Dropped"
     }
 
     var secondaryFrameCount: Int {
-        ingestExpected ? uploadQueuePending : framesDropped
+        if uploadQueueUnbound > 0 {
+            return uploadQueueUnbound
+        }
+        return ingestExpected ? uploadQueuePending : framesDropped
     }
 
     private var backendStatusDetail: String? {
@@ -211,6 +218,7 @@ final class AppState {
             framesStreamed = s["frames_streamed"] as? Int ?? (streamingEnabled ? framesSent : 0)
             framesDropped = s["frames_dropped"] as? Int ?? 0
             uploadQueuePending = s["upload_queue_pending"] as? Int ?? 0
+            uploadQueueUnbound = s["upload_queue_unbound"] as? Int ?? 0
             isPaused = s["paused"] as? Bool ?? false
             errorDetail = s["error"] as? String
         } else {
@@ -218,6 +226,7 @@ final class AppState {
             fishermanConnected = false
             framesStreamed = 0
             uploadQueuePending = 0
+            uploadQueueUnbound = 0
         }
 
         // Derive overall status

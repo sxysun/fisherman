@@ -132,7 +132,7 @@ struct SettingsView: View {
                         config.serverURL = defaultServerURL
                     }
                     config.statusRelayURL = statusRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                    config.cloudTrustPolicy = dangerouslySkipCloudAttestation ? "dangerously_skip" : "strict"
+                    config.cloudTrustPolicy = (backendMode == "cloud" && dangerouslySkipCloudAttestation) ? "dangerously_skip" : "strict"
                     config.controlPort = controlPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "7892" : controlPort
                     config.displayName = displayName
                     config.save()

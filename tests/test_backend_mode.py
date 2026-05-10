@@ -120,6 +120,35 @@ class BackendModeTests(unittest.TestCase):
             )
             asyncio.run(daemon._publish_frame(frame, 0, "ocr", []))
             self.assertEqual(daemon._get_status()["upload_queue_pending"], 1)
+            rows = daemon._upload_queue.peek(10)
+            self.assertEqual(
+                rows[0].target_url,
+                "wss://fisherman.teleport.computer/ingest",
+            )
+            daemon._upload_queue.close()
+
+    def test_unbound_upload_queue_rows_are_reported_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            missing_project = home / "missing" / ".env"
+            queue_path = str(home / "upload.sqlite")
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = FishermanConfig(
+                    backend_mode="cloud",
+                    backend_url="https://fisherman.teleport.computer",
+                    frames_dir=str(home / "frames"),
+                    audio_dir=str(home / "audio"),
+                    upload_queue_path=queue_path,
+                )
+                daemon = FishermanDaemon(cfg)
+
+            daemon._upload_queue.append("frame", "{}", 1.0)
+            status = daemon._get_status()
+            self.assertEqual(status["upload_queue_pending"], 0)
+            self.assertEqual(status["upload_queue_unbound"], 1)
             daemon._upload_queue.close()
 
 

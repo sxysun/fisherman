@@ -156,6 +156,18 @@ class UploadQueue:
                 ).fetchone()
         return int(row["n"])
 
+    def count_unbound(self) -> int:
+        """Return rows created by older builds before target_url existed.
+
+        These rows intentionally do not auto-drain to an arbitrary newly
+        selected backend because their intended destination is unknowable.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM upload_queue WHERE target_url IS NULL"
+            ).fetchone()
+        return int(row["n"])
+
     def close(self) -> None:
         with self._lock:
             self._db.close()

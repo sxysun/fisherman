@@ -134,6 +134,32 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertNotIn("FISH_SERVER_URL=", written)
             self.assertEqual(cfg.server_url, "ws://new.example:9999/ingest")
 
+    def test_non_cloud_backend_config_resets_dangerous_cloud_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            user_env = self._home_env(home)
+            user_env.write_text(
+                "FISH_BACKEND_MODE=cloud\n"
+                "FISH_BACKEND_URL=https://fisherman.teleport.computer\n"
+                "FISH_CLOUD_TRUST_POLICY=dangerously_skip\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = cli._persist_backend_config(
+                    mode="self_hosted",
+                    backend_url="ws://new.example:9999/ingest",
+                )
+
+            written = user_env.read_text(encoding="utf-8")
+            self.assertIn("FISH_CLOUD_TRUST_POLICY=strict\n", written)
+            self.assertEqual(cfg.backend_mode, "self_hosted")
+            self.assertEqual(cfg.cloud_trust_policy, "strict")
+
     def test_cloud_mode_ignores_stale_self_hosted_server_url(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             home = Path(home_dir)

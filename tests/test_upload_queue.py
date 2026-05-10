@@ -42,6 +42,19 @@ class UploadQueueTests(unittest.TestCase):
             self.assertEqual(q.count(target_url="wss://cloud/ingest"), 1)
             self.assertEqual(q.count(target_url="ws://self/ingest"), 1)
             self.assertEqual(q.count(), 2)
+            self.assertEqual(q.count_unbound(), 0)
+            q.close()
+
+    def test_unbound_legacy_items_are_visible_but_not_targeted(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "upload.sqlite")
+            q = UploadQueue(path, max_items=10)
+            q.append("frame", json.dumps({"n": 1}), 1.0)
+
+            self.assertEqual(q.count(), 1)
+            self.assertEqual(q.count_unbound(), 1)
+            self.assertEqual(q.count(target_url="wss://cloud/ingest"), 0)
+            self.assertEqual(q.peek(10, target_url="wss://cloud/ingest"), [])
             q.close()
 
 
