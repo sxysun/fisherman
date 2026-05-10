@@ -351,21 +351,41 @@ struct ActivityStatusTab: View {
             Text("Activity Status")
                 .font(.system(size: 14, weight: .semibold))
 
-            Text("Controls how Fisherman turns private screen context into the short status shown to you and published to friends. These settings apply to the active context home.")
+            Text("Controls how Fisherman turns private screen context into the short status shown to you and published to friends.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            Picker("Status generation", selection: $mode) {
-                Text("Fisherman-managed").tag("managed")
-                Text("My OpenRouter key").tag("byo")
-                Text("No LLM").tag("none")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Active context home")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(backendSummary)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
             }
-            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Status generation")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Picker("", selection: $mode) {
+                    Text("Fisherman-managed").tag("managed")
+                    Text("My OpenRouter key").tag("byo")
+                    Text("No LLM").tag("none")
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+            }
 
             if mode == "managed" {
                 Text(managedCopy)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Text("Managed key")
                         .font(.system(size: 11, weight: .medium))
@@ -376,9 +396,10 @@ struct ActivityStatusTab: View {
                 }
                 modelField
             } else if mode == "byo" {
-                Text("Use your own OpenRouter-compatible key. Cloud and Self-hosted store it encrypted with that backend's tenant data key; leave it blank to keep the existing key.")
+                Text(byoCopy)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 SecureField(apiKeyConfigured ? "Existing key configured" : "OpenRouter API key", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                 modelField
@@ -386,6 +407,7 @@ struct ActivityStatusTab: View {
                 Text("Fisherman will not call an LLM. Status falls back to private keyword categories like coding, terminal, meeting, or browsing.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
@@ -410,12 +432,19 @@ struct ActivityStatusTab: View {
             }
         }
         .onAppear { load() }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var modelField: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Text("LLM endpoint")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
             TextField("https://openrouter.ai/api/v1", text: $baseURL)
                 .textFieldStyle(.roundedBorder)
+            Text("Model")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
             TextField("openai/gpt-4o-mini", text: $model)
                 .textFieldStyle(.roundedBorder)
         }
@@ -424,11 +453,35 @@ struct ActivityStatusTab: View {
     private var managedCopy: String {
         switch config.backendMode {
         case "cloud":
-            return "Fisherman Cloud uses the managed model inside the Cloud CVM after Cloud trust has been approved."
+            return "Fisherman Cloud uses Fisherman's managed key from inside the Cloud CVM. Selected app, window-title, and OCR snippets are sent to the configured LLM provider for status generation."
         case "self_hosted":
-            return "Your self-hosted server uses the model key configured on that server."
+            return "Your self-hosted server uses the managed key configured in that server's environment. This app does not SSH into the server or edit server env vars."
         default:
-            return "Local Only keeps raw context on this Mac. Managed status is available when a backend is active."
+            return "Local Only keeps raw context on this Mac. Managed status requires a Cloud or self-hosted context home."
+        }
+    }
+
+    private var byoCopy: String {
+        switch config.backendMode {
+        case "cloud":
+            return "Apply sends this key to Fisherman Cloud through signed FishKey auth. Cloud stores it encrypted in your tenant settings and decrypts it only inside the backend runtime to generate status."
+        case "self_hosted":
+            return "Apply sends this key to your self-hosted backend through signed FishKey auth. The backend stores it encrypted in your tenant row and uses it for its own status worker."
+        default:
+            return "Local Only saves the mode, endpoint, and model on this Mac. BYO key storage is only supported when Cloud or Self-hosted is the active context home."
+        }
+    }
+
+    private var backendSummary: String {
+        switch config.backendMode {
+        case "cloud":
+            let url = config.backendURL.isEmpty ? "https://fisherman.teleport.computer" : config.backendURL
+            return "Fisherman Cloud  \(url)"
+        case "self_hosted":
+            let url = config.backendURL.isEmpty ? config.serverURL : config.backendURL
+            return "Self-hosted  \(url)"
+        default:
+            return "Local Only  this Mac"
         }
     }
 
@@ -493,13 +546,26 @@ struct ActivityStatusTab: View {
                     managedKeyConfigured = object["managed_key_configured"] as? Bool ?? managedKeyConfigured
                     externalLLMEnabled = object["external_llm_enabled"] as? Bool ?? externalLLMEnabled
                     apiKey = ""
-                    statusMessage = "Saved. Restart the daemon if you changed context-home settings."
+                    statusMessage = savedMessage(object)
                 } else {
                     let error = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
                     statusMessage = error.isEmpty ? "Could not save activity status settings." : error
                 }
                 applying = false
             }
+        }
+    }
+
+    private func savedMessage(_ object: [String: Any]) -> String {
+        let backendMode = object["backend_mode"] as? String ?? config.backendMode
+        let backendURL = object["backend_url"] as? String ?? config.backendURL
+        switch backendMode {
+        case "cloud":
+            return "Saved on Fisherman Cloud at \(backendURL). The Cloud status worker will use these settings."
+        case "self_hosted":
+            return "Saved on your self-hosted backend at \(backendURL). The server-side status worker will use these settings."
+        default:
+            return "Saved locally in ~/.fisherman/.env. Local Only does not run a remote status worker."
         }
     }
 }

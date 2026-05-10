@@ -99,9 +99,11 @@ class Streamer:
         upload_queue: UploadQueue | None = None,
         connect_guard: Callable[[], bool] | None = None,
         connect_guard_interval: float = 300.0,
+        tenant_data_key: str | None = None,
     ):
         self._url = url
         self._priv_key, self._pub_hex = _load_signing_key(private_key_hex)
+        self._tenant_data_key = tenant_data_key
         self._connect_guard = connect_guard
         self._connect_guard_interval = max(30.0, float(connect_guard_interval))
         self._ws: websockets.WebSocketClientProtocol | None = None
@@ -302,6 +304,8 @@ class Streamer:
                 headers = {}
                 if self._priv_key:
                     headers["Authorization"] = _sign_fishkey(self._priv_key, self._pub_hex)
+                if self._tenant_data_key:
+                    headers["X-Fisherman-Tenant-Data-Key"] = self._tenant_data_key
                 self._ws = await websockets.connect(
                     self._url,
                     additional_headers=headers,

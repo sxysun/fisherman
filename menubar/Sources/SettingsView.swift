@@ -12,8 +12,10 @@ struct SettingsView: View {
     @State private var statusRelayURL: String = ""
     @State private var controlPort: String = ""
     @State private var showAdvancedBackend = false
+    @State private var dangerouslySkipCloudAttestation = false
     @State private var selectedTab: SettingsTab = .server
     @State private var cloudApprovalStatus: String?
+    @State private var cloudTrustSummary: String?
     @State private var approvingCloud = false
 
     @State private var displayName: String = ""
@@ -38,7 +40,6 @@ struct SettingsView: View {
         case identity = "Identity"
         case friends = "Friends"
         case deputies = "Agent Access"
-        case storage = "Backup"
         case agent = "Activity Status"
         case diagnostics = "Diagnostics"
     }
@@ -85,8 +86,6 @@ struct SettingsView: View {
                         friendsTab
                     case .deputies:
                         DeputiesTab()
-                    case .storage:
-                        BackupTab()
                     case .agent:
                         ActivityStatusTab(config: config)
                     case .diagnostics:
@@ -133,6 +132,7 @@ struct SettingsView: View {
                         config.serverURL = defaultServerURL
                     }
                     config.statusRelayURL = statusRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    config.cloudTrustPolicy = dangerouslySkipCloudAttestation ? "dangerously_skip" : "strict"
                     config.controlPort = controlPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "7892" : controlPort
                     config.displayName = displayName
                     config.save()
@@ -151,8 +151,10 @@ struct SettingsView: View {
             statusRelayURL = config.statusRelayURL
             serverURL = config.serverURL
             controlPort = config.controlPort
+            dangerouslySkipCloudAttestation = config.cloudTrustPolicy == "dangerously_skip"
             displayName = config.displayName
             config.refreshRelayFriends()
+            loadCloudTrustSummary()
         }
     }
 
@@ -173,17 +175,30 @@ struct SettingsView: View {
                 hintText("New context is stored and processed by Fisherman Cloud. Changing homes affects new uploads only; history is not copied automatically.")
                 hintText("Raw context is processed inside the attested Cloud CVM and encrypted at rest with a CVM-held key. This is not client-held end-to-end encryption from the Fisherman operator yet.")
                 hintText("Friend status uses separate end-to-end encryption to each friend; the relay does not receive plaintext status.")
-                HStack(spacing: 8) {
-                    Button(approvingCloud ? "Reviewing..." : "Review & Approve Cloud") {
-                        approveCloud()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Button(approvingCloud ? "Reviewing Cloud..." : "Review Cloud Attestation") {
+                            approveCloud()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(approvingCloud)
+                        Text(cloudApprovalBadge)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(cloudTrustSummary == nil ? .orange : .green)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(approvingCloud)
+                    hintText("Approval verifies the live TEE quote, allowed compose hash, release git identity, image digest, and TLS binding. If any of those change later, raw Cloud uploads queue locally until you approve the new release.")
+                    if let cloudTrustSummary {
+                        Text(cloudTrustSummary)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .lineLimit(4)
+                    }
                     if let cloudApprovalStatus {
                         Text(cloudApprovalStatus)
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                            .lineLimit(5)
                     }
                 }
             } else if backendMode == "self_hosted" {
@@ -197,6 +212,14 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     if backendMode == "cloud" {
                         fieldRow("Fisherman Cloud URL", placeholder: defaultCloudURL, text: $cloudURL)
+                        Toggle("Dangerously skip Cloud attestation", isOn: $dangerouslySkipCloudAttestation)
+                            .font(.system(size: 11, weight: .medium))
+                        if dangerouslySkipCloudAttestation {
+                            Text("Unsafe. Raw uploads may continue even when the live Cloud release is unapproved or cannot be verified. Historical Cloud decrypt privacy is not protected in this mode.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.red)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     fieldRow("Status relay", placeholder: "https://relay.fisherman.teleport.computer", text: $statusRelayURL)
                     if backendMode != "cloud" {
@@ -210,7 +233,7 @@ struct SettingsView: View {
             }
             .font(.system(size: 12, weight: .medium))
 
-            hintText("Backup is only for laptop-local copies. Agent access and activity status use whichever context home is active.")
+            hintText("Agent access and activity status use whichever context home is active. Switching homes affects new uploads only; it does not sync old history between homes.")
         }
     }
 
@@ -419,6 +442,10 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
+                    Text(friendPolicyPreview(friend))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
                 }
                 Spacer()
 
@@ -482,6 +509,11 @@ struct SettingsView: View {
                 hintText("Optional. Used by the status agent after hard privacy filters.")
             }
 
+            Text(editingPolicyPreview(friend))
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
             if let error = friendPolicyError {
                 Text(error)
                     .font(.system(size: 11))
@@ -504,6 +536,37 @@ struct SettingsView: View {
         .padding(10)
         .background(Color.secondary.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func friendPolicyPreview(_ friend: RelayFriend) -> String {
+        policyPreview(
+            name: friend.name,
+            audience: friend.audience,
+            prompt: friend.policyPrompt ?? "",
+            encryptionPubkey: friend.encryptionPubkeyHex
+        )
+    }
+
+    private func editingPolicyPreview(_ friend: RelayFriend) -> String {
+        policyPreview(
+            name: friend.name,
+            audience: editingFriendAudience,
+            prompt: editingFriendPolicyPrompt,
+            encryptionPubkey: friend.encryptionPubkeyHex
+        )
+    }
+
+    private func policyPreview(
+        name: String,
+        audience: String,
+        prompt: String,
+        encryptionPubkey: String
+    ) -> String {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let promptPart = trimmedPrompt.isEmpty
+            ? "default privacy filters"
+            : "custom instruction plus privacy filters"
+        return "Preview: \(name) gets a separate \(audience) status using \(promptPart), then encrypted to \(encryptionPubkey.prefix(12))..."
     }
 
     private func fieldRow(_ label: String, placeholder: String, text: Binding<String>) -> some View {
@@ -679,14 +742,60 @@ struct SettingsView: View {
                         : defaultCloudURL
                     statusRelayURL = config.statusRelayURL
                     serverURL = config.serverURL
-                    cloudApprovalStatus = "Approved"
-                    onSave()
+                    loadCloudTrustSummary()
+                    cloudApprovalStatus = "Approved. Raw Cloud uploads are allowed for this release; restart the daemon if it was already running."
                 } else {
                     let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
                     cloudApprovalStatus = detail.isEmpty ? "Approval failed" : detail
                 }
             }
         }
+    }
+
+    private var cloudApprovalBadge: String {
+        if approvingCloud {
+            return "Checking attestation"
+        }
+        if cloudTrustSummary != nil {
+            return "Approved"
+        }
+        return "Not approved"
+    }
+
+    private func loadCloudTrustSummary() {
+        let trustURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".fisherman/cloud-trust.json")
+        guard let data = try? Data(contentsOf: trustURL),
+              let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            cloudTrustSummary = nil
+            return
+        }
+
+        let url = raw["cloud_url"] as? String ?? defaultCloudURL
+        let compose = shortHash(raw["compose_hash"] as? String, prefix: "0x")
+        let git = shortHash(raw["git_commit"] as? String)
+        let image = shortImageDigest(raw["image_digest"] as? String)
+        let approvedAt = raw["approved_at"] as? String ?? "unknown time"
+        cloudTrustSummary = """
+        \(url)
+        approved \(approvedAt)
+        compose \(compose)  git \(git)  image \(image)
+        """
+    }
+
+    private func shortHash(_ value: String?, prefix: String = "") -> String {
+        let trimmed = (value ?? "").replacingOccurrences(of: "0x", with: "")
+        guard !trimmed.isEmpty else { return "unknown" }
+        return prefix + String(trimmed.prefix(12))
+    }
+
+    private func shortImageDigest(_ value: String?) -> String {
+        guard let value, !value.isEmpty else { return "unknown" }
+        if value.hasPrefix("sha256:") {
+            return "sha256:" + String(value.dropFirst("sha256:".count).prefix(12))
+        }
+        return String(value.prefix(19))
     }
 
     private func ingestURL(from raw: String) -> String {

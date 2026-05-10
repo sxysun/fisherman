@@ -13,6 +13,7 @@ All subkeys derived via HKDF-SHA256 with versioned info strings.
 from __future__ import annotations
 
 import os
+import base64
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -29,6 +30,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 _INFO_BLOB_AT_REST = b"fisherman/blob-at-rest/v1"
 _INFO_INDEX_COLUMNS = b"fisherman/index-columns/v1"
 _INFO_X25519 = b"fisherman/x25519/v1"
+_INFO_CLOUD_TENANT_DATA = b"fisherman/cloud-tenant-data-key/v1"
 
 
 class KeyError(RuntimeError):
@@ -70,6 +72,20 @@ def blob_at_rest_key(seed: bytes) -> bytes:
 
 def index_columns_key(seed: bytes) -> bytes:
     return _derive(seed, _INFO_INDEX_COLUMNS, 32)
+
+
+def cloud_tenant_data_key(seed: bytes) -> str:
+    """Stable Fernet key used for Fisherman Cloud tenant data encryption.
+
+    This key is derived on the user's device and sent only to an
+    attestation-approved Cloud runtime. The managed Cloud backend must not
+    persist it under a Cloud-held wrapping key; losing the in-memory key
+    after a deploy is what prevents unapproved future code from decrypting
+    historical ciphertext.
+    """
+    return base64.urlsafe_b64encode(
+        _derive(seed, _INFO_CLOUD_TENANT_DATA, 32)
+    ).decode("ascii")
 
 
 def encryption_keypair(seed: bytes) -> tuple[X25519PrivateKey, bytes]:

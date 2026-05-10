@@ -150,7 +150,16 @@ files. The intended self-serve flow:
    that websocket, the daemon re-runs the Cloud audit and compares it to
    the persisted trust record; if it does not match, capture continues
    but frames stay in the local durable upload outbox.
-6. For mirror/RPC pairing, menubar derives a per-pair envelope key from
+6. After audit approval, the daemon derives a tenant data key from the
+   user's persistent Fish key and sends it in the approved runtime
+   session. The Cloud runtime keeps that key in memory only. New rows are
+   encrypted with `data_key_source=client_provided`; the database must
+   not contain a Cloud-operator-wrapped tenant key for new Cloud data.
+   After a deploy/restart, historical Cloud ciphertext remains
+   undecryptable until an approved client reconnects and re-grants the
+   tenant key. This is the privacy boundary that blocks an unapproved
+   malicious deploy from reading old context.
+7. For mirror/RPC pairing, menubar derives a per-pair envelope key from
    the user's seed and `enclave_content_pk` (returned by `/v1/pair/init`).
    The user's X25519 priv + `K_blob_at_rest` are encrypted to this
    enclave-bound key; the enclave decrypts inside the CVM, never on the
@@ -183,6 +192,33 @@ The Cloud gateway can deploy before managed storage is provisioned. In
 that state `/health` is expected to be HTTP 200 with `status=degraded`
 and `ingest.ready=false`; this keeps attestation and relay dogfooding
 live without silently accepting raw context.
+
+Existing server-wrapped Cloud data is intentionally not readable in
+client-held-key mode unless a migration runtime is started with explicit
+legacy decrypt enabled and the old wrapping key. That path should only
+exist long enough to re-encrypt rows to `data_key_source=client_provided`.
+The migration command is:
+
+```bash
+fisherman cloud migrate-client-key --limit 1000
+```
+
+Run it repeatedly until all remaining counts are zero, then redeploy a
+strict compose with `FISH_CLOUD_LEGACY_DECRYPT_ENABLED=0`. The final batch removes
+`users.wrapped_data_key` for that tenant.
+
+Deployment sequence for an existing Cloud tenant:
+
+1. If old server-wrapped data must be migrated, create an explicit
+   migration commit that changes the compose literal to
+   `FISH_CLOUD_LEGACY_DECRYPT_ENABLED=1`. This must be a compose-hash
+   change, not an unattested runtime env override.
+2. Approve/reconnect the client so the runtime receives the client-held
+   tenant key.
+3. Run `fisherman cloud migrate-client-key --limit 1000` until remaining
+   counts are zero.
+4. Revert the compose literal to `FISH_CLOUD_LEGACY_DECRYPT_ENABLED=0`
+   and redeploy strict mode.
 
 ## When to revisit
 

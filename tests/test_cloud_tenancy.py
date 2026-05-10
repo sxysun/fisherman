@@ -103,10 +103,12 @@ class RecordingConn:
                     "enrollment_state": "active",
                     "max_frames_per_hour": args[1] if len(args) > 1 else None,
                     "wrapped_data_key": args[2] if len(args) > 2 else None,
+                    "data_key_source": args[3] if len(args) > 3 else "server_wrapped",
                     "status_llm_mode": "managed",
                     "status_llm_base_url": None,
                     "status_llm_model": None,
                     "status_llm_api_key": None,
+                    "status_llm_key_source": "server_wrapped",
                 },
             )
         elif normalized.startswith("UPDATE users"):
@@ -117,22 +119,52 @@ class RecordingConn:
                     "enrollment_state": "active",
                     "max_frames_per_hour": None,
                     "wrapped_data_key": None,
+                    "data_key_source": "server_wrapped",
                     "status_llm_mode": "managed",
                     "status_llm_base_url": None,
                     "status_llm_model": None,
                     "status_llm_api_key": None,
+                    "status_llm_key_source": "server_wrapped",
                 },
             )
-            if "status_llm_mode" in normalized:
+            if "wrapped_data_key = NULL" in normalized:
+                row["wrapped_data_key"] = None
+                row["data_key_source"] = args[1]
+            elif "status_llm_mode" in normalized:
                 row["status_llm_mode"] = args[1]
                 row["status_llm_base_url"] = args[2]
                 row["status_llm_model"] = args[3]
                 if len(args) > 4:
                     row["status_llm_api_key"] = args[4]
+                if len(args) > 5:
+                    row["status_llm_key_source"] = args[5]
+            elif "status_llm_api_key" in normalized and "status_llm_key_source" in normalized:
+                row["status_llm_api_key"] = args[1]
+                row["status_llm_key_source"] = args[2]
             elif "SET wrapped_data_key" in normalized:
                 row["wrapped_data_key"] = args[1]
+                if len(args) > 2:
+                    row["data_key_source"] = args[2]
+            elif "SET data_key_source" in normalized:
+                row["data_key_source"] = args[1]
             elif "SET max_frames_per_hour" in normalized:
                 row["max_frames_per_hour"] = args[1]
+        elif normalized.startswith("UPDATE frames"):
+            for row in self._pool.frames:
+                if row.get("id") == args[0]:
+                    row["window"] = args[1]
+                    row["ocr_text"] = args[2]
+                    row["urls"] = args[3]
+                    row["activity"] = args[4]
+                    row["image_key"] = args[5]
+                    row["data_key_source"] = args[6]
+                    break
+        elif normalized.startswith("UPDATE audio_transcripts"):
+            for row in self._pool.transcript_rows:
+                if row.get("id") == args[0]:
+                    row["transcript"] = args[1]
+                    row["data_key_source"] = args[2]
+                    break
         elif normalized.startswith("INSERT INTO devices"):
             self._pool.devices[(args[0], args[1])] = {
                 "user_pubkey": args[0],
@@ -151,6 +183,7 @@ class RecordingConn:
                     "ocr_text": args[6],
                     "urls": args[7],
                     "image_key": args[8],
+                    "data_key_source": args[13] if len(args) > 13 else "server_wrapped",
                 }
             )
         elif normalized.startswith("INSERT INTO deputies"):
@@ -206,15 +239,45 @@ class RecordingConn:
             )
         if "FROM frames" in normalized:
             user = args[0]
+            if "data_key_source <>" in normalized:
+                return sum(
+                    1 for row in self._pool.frames
+                    if row.get("user_pubkey") == user and row.get("data_key_source") != args[1]
+                )
             return sum(1 for row in self._pool.frames if row["user_pubkey"] == user)
+        if "FROM audio_transcripts" in normalized:
+            user = args[0]
+            return sum(
+                1 for row in self._pool.transcript_rows
+                if row.get("user_pubkey") == user and row.get("data_key_source") != args[1]
+            )
+        if "FROM users" in normalized and "status_llm_key_source <>" in normalized:
+            row = self._pool.users.get(args[0])
+            return int(
+                bool(row)
+                and row.get("status_llm_api_key") is not None
+                and row.get("status_llm_key_source") != args[1]
+            )
         return 0
 
     async def fetch(self, sql: str, *args):
         normalized = " ".join(sql.split())
         self._pool.fetches.append(("fetch", normalized, args))
         if "FROM frames" in normalized:
+            if "data_key_source <>" in normalized:
+                return [
+                    row for row in self._pool.frames
+                    if row.get("user_pubkey") == args[0]
+                    and row.get("data_key_source") != args[1]
+                ][:args[2]]
             return self._pool.query_rows
         if "FROM audio_transcripts" in normalized:
+            if "data_key_source <>" in normalized:
+                return [
+                    row for row in self._pool.transcript_rows
+                    if row.get("user_pubkey") == args[0]
+                    and row.get("data_key_source") != args[1]
+                ][:args[2]]
             return self._pool.transcript_rows
         if "FROM deputies" in normalized:
             return [
@@ -265,6 +328,12 @@ class RecordingPool:
 class FakeStorage:
     def __init__(self):
         self.uploads = []
+        self.downloads = []
+        self.download_bytes = b"legacy-jpeg"
+
+    def download(self, key: str, data_key: str | bytes | None = None) -> bytes:
+        self.downloads.append({"key": key, "data_key": data_key})
+        return self.download_bytes
 
     def upload(
         self,
@@ -297,10 +366,11 @@ class FakeRequest:
         query: dict | None = None,
         match_info: dict | None = None,
         body: dict | None = None,
+        storage: FakeStorage | None = None,
     ):
         self.headers = {"Authorization": auth_header, **(headers or {})}
         self.remote = "127.0.0.1"
-        self.app = {"db": db}
+        self.app = {"db": db, "storage": storage or FakeStorage()}
         self.query = query or {}
         self.match_info = match_info or {}
         self._body = body or {}
@@ -487,6 +557,120 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(Exception):
             crypto.decrypt_text(db.frames[0]["ocr_text"])
+
+    async def test_client_key_mode_never_persists_cloud_wrapped_tenant_key(self):
+        os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "open"
+        os.environ["FISH_CLOUD_KEY_MODE"] = "client_provided"
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        storage = FakeStorage()
+        loop = asyncio.get_running_loop()
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            role="tenant",
+        )
+        client_key = Fernet.generate_key().decode()
+
+        tenant_key = await ingest._ensure_tenant(db, ctx_a, client_key)
+        self.assertEqual(tenant_key, client_key)
+        self.assertIsNone(db.users[_pub_hex(SEED_A)]["wrapped_data_key"])
+        self.assertEqual(db.users[_pub_hex(SEED_A)]["data_key_source"], "client_provided")
+
+        await ingest._handle_frame(
+            {
+                "type": "frame",
+                "ts": 1710000000.0,
+                "app": "Code",
+                "bundle": "com.example.code",
+                "window": "Tenant A",
+                "ocr_text": "client-held-key",
+                "urls": [],
+                "image": base64.b64encode(b"jpeg").decode("ascii"),
+            },
+            db,
+            storage,
+            loop,
+            ctx_a,
+            tenant_key,
+            "client_provided",
+        )
+
+        self.assertEqual(db.frames[0]["data_key_source"], "client_provided")
+        crypto = sys.modules["crypto"]
+        self.assertEqual(
+            crypto.decrypt_text(db.frames[0]["ocr_text"], client_key),
+            "client-held-key",
+        )
+        with self.assertRaises(Exception):
+            crypto.decrypt_text(db.frames[0]["ocr_text"])
+
+    async def test_cloud_migration_reencrypts_legacy_rows_and_removes_wrapped_key(self):
+        os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "open"
+        os.environ["FISH_CLOUD_KEY_MODE"] = "client_provided"
+        os.environ["FISH_CLOUD_LEGACY_DECRYPT_ENABLED"] = "1"
+        ingest = _load_ingest_module()
+        crypto = sys.modules["crypto"]
+        db = RecordingPool()
+        storage = FakeStorage()
+        pub_a = _pub_hex(SEED_A)
+        legacy_key = crypto.generate_data_key()
+        client_key = __import__("fisherman.keys", fromlist=["cloud_tenant_data_key"]).cloud_tenant_data_key(SEED_A)
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        db.users[pub_a] = {
+            "disabled_at": None,
+            "enrollment_state": "active",
+            "max_frames_per_hour": None,
+            "wrapped_data_key": crypto.wrap_data_key(legacy_key),
+            "data_key_source": "server_wrapped",
+            "status_llm_mode": "byo",
+            "status_llm_base_url": None,
+            "status_llm_model": None,
+            "status_llm_api_key": crypto.encrypt_text("sk-old", legacy_key),
+            "status_llm_key_source": "server_wrapped",
+        }
+        db.frames.append({
+            "id": 1,
+            "user_pubkey": pub_a,
+            "device_pubkey": pub_a,
+            "ts": now,
+            "window": crypto.encrypt_text("legacy window", legacy_key),
+            "ocr_text": crypto.encrypt_text("legacy ocr", legacy_key),
+            "urls": crypto.encrypt_json(["https://old.example"], legacy_key),
+            "activity": crypto.encrypt_json({"status": "legacy"}, legacy_key),
+            "image_key": "users/old/frame.jpg.enc",
+            "data_key_source": "server_wrapped",
+        })
+
+        resp = await ingest._http_migrate_client_key(FakeRequest(
+            _fishkey(SEED_A),
+            db,
+            headers={"X-Fisherman-Tenant-Data-Key": client_key},
+            query={"limit": "10"},
+            storage=storage,
+        ))
+        body = json.loads(resp.text)
+
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["migrated_frames"], 1)
+        self.assertEqual(body["remaining_frames"], 0)
+        self.assertTrue(body["migrated_status_llm_key"])
+        self.assertTrue(body["wrapped_data_key_removed"])
+        self.assertIsNone(db.users[pub_a]["wrapped_data_key"])
+        self.assertEqual(db.frames[0]["data_key_source"], "client_provided")
+        self.assertEqual(db.users[pub_a]["status_llm_key_source"], "client_provided")
+        self.assertEqual(storage.downloads[0]["data_key"], legacy_key)
+        self.assertEqual(storage.uploads[0]["data_key"], client_key)
+        self.assertEqual(
+            crypto.decrypt_text(db.frames[0]["ocr_text"], client_key),
+            "legacy ocr",
+        )
+        self.assertEqual(
+            crypto.decrypt_text(db.users[pub_a]["status_llm_api_key"], client_key),
+            "sk-old",
+        )
 
     async def test_cloud_rejects_oversized_frame_image(self):
         ingest = _load_ingest_module()

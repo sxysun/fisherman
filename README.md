@@ -71,11 +71,19 @@ upgrades the Phala CVM, exposes the hosted relay, publishes compose
 hashes, and runs hourly attestation monitoring.
 
 Cloud multi-tenant ingest is intentionally fail-closed. If required
-storage or encryption env is missing, the CVM reports
+storage or database config is missing, the CVM reports
 `ingest.ready=false` and refuses `/ingest` instead of accepting raw
 context into a half-configured service. `fisherman backend configure
 cloud` only persists the Cloud ingest WebSocket after that health
 manifest reports `ingest.ready=true`.
+
+Cloud uses client-held tenant data keys. After the user approves a Cloud
+attestation, the daemon derives a tenant key from the user's persistent
+Fish key and sends it only to that approved runtime session. The Cloud
+database stores ciphertext plus `data_key_source=client_provided`; it
+does not persist a Cloud-operator-wrapped tenant key for new data. After
+a Cloud deploy/restart, the runtime must be re-approved/reconnected
+before it can decrypt historical context or run status/deputy compute.
 
 ### Self-Hosted
 
@@ -189,7 +197,10 @@ fisherman version
 - Local Only: raw context stays on your laptop.
 - Fisherman Cloud: private-context processing must happen inside the
   attested TDX CVM. The operator should not be able to inspect decrypted
-  context when attestation passes and clients enforce it.
+  context when attestation passes and clients enforce it. New Cloud data
+  is encrypted under a client-held tenant key, so an unapproved new Cloud
+  deploy cannot decrypt old Cloud ciphertext unless a device re-grants
+  the key or the user enables the dangerous attestation bypass.
 - Self-Hosted: you trust your own server/operator.
 - Friend status relay: low-trust by design; payloads are encrypted
   client-side to each recipient and signed by the author.

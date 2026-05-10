@@ -309,6 +309,12 @@ def _ensure_cloud_trust_or_disable(config: FishermanConfig) -> None:
     """
     if config.backend_mode != "cloud" or not config.streaming_enabled:
         return
+    if config.cloud_trust_policy == "dangerously_skip":
+        click.echo(
+            "  Cloud trust: DANGEROUSLY SKIPPED — raw ingest is not attestation-gated",
+            err=True,
+        )
+        return
 
     from fisherman import cloud_trust
     from fisherman.config import (
@@ -344,6 +350,43 @@ def _ensure_cloud_trust_or_disable(config: FishermanConfig) -> None:
     for failure in result.failures[:5]:
         click.echo(f"    - {failure}", err=True)
     config.server_url = DEFAULT_SERVER_URL
+
+
+def _ensure_cloud_trust_for_secret_request(config: FishermanConfig, purpose: str) -> None:
+    """Refuse to send client-held tenant secrets to an unapproved Cloud deploy."""
+    if config.backend_mode != "cloud":
+        return
+    if config.cloud_trust_policy == "dangerously_skip":
+        return
+
+    from fisherman import cloud_trust
+    from fisherman.config import (
+        DEFAULT_APP_AUTH_CONTRACT,
+        DEFAULT_APP_AUTH_RPC_URL,
+    )
+
+    timeout = float(os.environ.get("FISH_CLOUD_TRUST_TIMEOUT", "15") or "15")
+    result = cloud_trust.verify_or_approve(
+        config.backend_url,
+        timeout=timeout,
+        allow_bootstrap=False,
+        rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or DEFAULT_APP_AUTH_RPC_URL,
+        contract_address=(
+            os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
+            or DEFAULT_APP_AUTH_CONTRACT
+        ),
+        live_tls_fingerprint_func=lambda url, t: _live_tls_fingerprint(
+            url, t, quiet=True
+        ),
+    )
+    if result.ok:
+        return
+    failures = "; ".join(result.failures[:3])
+    detail = f": {failures}" if failures else ""
+    raise click.ClickException(
+        f"refusing to send Cloud tenant key for {purpose}; "
+        f"approve the current Cloud deployment first ({result.reason}{detail})"
+    )
 
 
 @main.command(hidden=True)
@@ -888,6 +931,7 @@ def _persist_backend_config(
     backend_url: str | None = None,
     relay_url: str | None = None,
     server_url: str | None = None,
+    cloud_trust_policy: str | None = None,
 ) -> FishermanConfig:
     from fisherman import config as _cfg
 
@@ -900,6 +944,8 @@ def _persist_backend_config(
         _cfg.remove_user_env_var("FISH_SERVER_URL")
     if relay_url is not None:
         _cfg.persist_user_env_var("FISH_STATUS_RELAY_URL", relay_url)
+    if cloud_trust_policy is not None:
+        _cfg.persist_user_env_var("FISH_CLOUD_TRUST_POLICY", cloud_trust_policy)
     return FishermanConfig()
 
 
@@ -916,6 +962,7 @@ def backend_status(as_json: bool):
     out = {
         "mode": cfg.backend_mode,
         "backend_url": cfg.backend_url,
+        "cloud_trust_policy": cfg.cloud_trust_policy,
         "ingest_url": cfg.server_url if cfg.streaming_enabled else None,
         "streaming_enabled": cfg.streaming_enabled,
         "status_relay_url": cfg.status_relay_url,
@@ -929,6 +976,8 @@ def backend_status(as_json: bool):
 
     click.echo(f"mode:       {cfg.backend_mode}")
     click.echo(f"backend:    {cfg.backend_summary}")
+    if cfg.backend_mode == "cloud":
+        click.echo(f"trust:      {cfg.cloud_trust_policy}")
     click.echo(f"ingest:     {out['ingest_url'] or 'disabled'}")
     click.echo(f"relay:      {cfg.status_relay_url}")
     click.echo(f"identity:   {'yes' if cfg.private_key else 'NO'}")
@@ -985,11 +1034,14 @@ def backend_configure_self_hosted(backend_url: str, relay_url: str | None):
 @click.option("--relay-url", default=None, help="Optional E2EE status relay URL.")
 @click.option("--skip-audit", is_flag=True,
               help="Persist config without checking TEE attestation.")
+@click.option("--dangerously-allow-unaudited-ingest", is_flag=True,
+              help="Allow Cloud raw ingest without attestation. Unsafe; use only for development.")
 @click.option("--timeout", default=15.0, show_default=True)
 def backend_configure_cloud(
     backend_url: str | None,
     relay_url: str | None,
     skip_audit: bool,
+    dangerously_allow_unaudited_ingest: bool,
     timeout: float,
 ):
     """Use Fisherman Cloud."""
@@ -1052,6 +1104,7 @@ def backend_configure_cloud(
         backend_url=url,
         relay_url=relay_url,
         server_url=ingest_url_from_backend_url(url) if ingest_ready and account_ready else None,
+        cloud_trust_policy="dangerously_skip" if dangerously_allow_unaudited_ingest else "strict",
     )
     click.echo("configured backend: Fisherman Cloud")
     click.echo(f"  backend: {cfg.backend_url}")
@@ -1064,6 +1117,11 @@ def backend_configure_cloud(
         click.echo(f"  trust:   approved compose=0x{compose[:12]} git={git[:12]}")
     elif skip_audit:
         click.echo("  trust:   skipped; raw ingest will stay disabled until Cloud is approved")
+    if dangerously_allow_unaudited_ingest:
+        click.echo(
+            "  trust:   DANGEROUSLY SKIPPED; raw ingest may continue without attestation",
+            err=True,
+        )
     if isinstance(capabilities, dict):
         att_ready = (capabilities.get("attestation") or {}).get("ready")
         relay_ready = (capabilities.get("relay") or {}).get("ready")
@@ -1096,6 +1154,12 @@ def _status_llm_backend_request(
     auth, _pub = _fishkey_header(seed_hex)
     data = None
     headers = {"Authorization": auth}
+    if cfg.backend_mode == "cloud":
+        _ensure_cloud_trust_for_secret_request(cfg, "activity status settings")
+        from fisherman import keys as _keys
+        headers["X-Fisherman-Tenant-Data-Key"] = _keys.cloud_tenant_data_key(
+            bytes.fromhex(seed_hex)
+        )
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
@@ -1113,6 +1177,20 @@ def _status_llm_backend_request(
         raise click.ClickException(f"backend returned HTTP {e.code}: {detail}") from e
     except Exception as e:
         raise click.ClickException(f"backend status LLM request failed: {e}") from e
+
+
+def _backend_owner_headers(cfg: FishermanConfig, *, content_type: str | None = None) -> dict[str, str]:
+    auth, _pub = _fishkey_header(cfg.private_key)
+    headers = {"Authorization": auth}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if cfg.backend_mode == "cloud" and cfg.private_key:
+        _ensure_cloud_trust_for_secret_request(cfg, "backend owner request")
+        from fisherman import keys as _keys
+        headers["X-Fisherman-Tenant-Data-Key"] = _keys.cloud_tenant_data_key(
+            bytes.fromhex(cfg.private_key)
+        )
+    return headers
 
 
 def _local_status_llm_settings() -> dict:
@@ -1275,6 +1353,54 @@ def cloud_audit(cloud_url, rpc_url, contract_address, as_json, timeout):
         for failure in cloud_failures:
             click.echo(f"    - {failure}")
     sys.exit(0 if not cloud_failures else 1)
+
+
+@cloud_group.command(name="migrate-client-key")
+@click.option("--limit", default=500, show_default=True, help="Rows to migrate in this batch.")
+@click.option("--json", "as_json", is_flag=True)
+@click.option("--timeout", default=60.0, show_default=True)
+def cloud_migrate_client_key(limit, as_json, timeout):
+    """Re-encrypt legacy Cloud rows to the client-held tenant key.
+
+    The Cloud runtime must be temporarily started with
+    FISH_CLOUD_LEGACY_DECRYPT_ENABLED=1 and the old wrapping key. Run this
+    repeatedly until remaining_* are all zero, then redeploy with legacy
+    decrypt disabled.
+    """
+    cfg = FishermanConfig()
+    if cfg.backend_mode != "cloud":
+        raise click.ClickException("active backend mode is not Fisherman Cloud")
+    if not cfg.private_key:
+        _load_keys()
+        cfg = FishermanConfig()
+    headers = _backend_owner_headers(cfg)
+    url = _backend_api_url(
+        cfg.backend_url,
+        f"/api/cloud/migrate-client-key?limit={max(1, int(limit))}",
+    )
+    req = urllib.request.Request(url, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            out = json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise click.ClickException(f"cloud migration returned HTTP {e.code}: {detail}") from e
+    except Exception as e:
+        raise click.ClickException(f"cloud migration failed: {e}") from e
+
+    if as_json:
+        click.echo(json.dumps(out, indent=2))
+        return
+    click.echo("cloud client-key migration batch:")
+    click.echo(f"  frames:     {out.get('migrated_frames', 0)} migrated, {out.get('remaining_frames', 0)} remaining")
+    click.echo(f"  audio:      {out.get('migrated_audio', 0)} migrated, {out.get('remaining_audio', 0)} remaining")
+    click.echo(f"  status key: {'migrated' if out.get('migrated_status_llm_key') else 'unchanged'}, {out.get('remaining_status_llm_key', 0)} remaining")
+    if out.get("image_errors"):
+        click.echo(f"  image errors: {out.get('image_errors')}", err=True)
+    if out.get("wrapped_data_key_removed"):
+        click.echo("  old wrapped tenant key removed")
+    else:
+        click.echo("  run again until all remaining counts are zero")
 
 
 @main.command()
@@ -2301,7 +2427,6 @@ def _sync_deputy_to_backend(record: dict) -> str | None:
     if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
         return None
     try:
-        auth, _pub = _fishkey_header(cfg.private_key)
         body = json.dumps({
             "name": record.get("name"),
             "scopes": record.get("scopes") or [],
@@ -2312,10 +2437,7 @@ def _sync_deputy_to_backend(record: dict) -> str | None:
             _backend_api_url(cfg.backend_url, f"/api/deputies/{record['pubkey']}"),
             data=body,
             method="PUT",
-            headers={
-                "Authorization": auth,
-                "Content-Type": "application/json",
-            },
+            headers=_backend_owner_headers(cfg, content_type="application/json"),
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             if not (200 <= resp.status < 300):
@@ -2330,11 +2452,10 @@ def _revoke_deputy_from_backend(pubkey_hex: str) -> str | None:
     if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
         return None
     try:
-        auth, _pub = _fishkey_header(cfg.private_key)
         req = urllib.request.Request(
             _backend_api_url(cfg.backend_url, f"/api/deputies/{pubkey_hex}"),
             method="DELETE",
-            headers={"Authorization": auth},
+            headers=_backend_owner_headers(cfg),
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             if not (200 <= resp.status < 300):

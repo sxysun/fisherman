@@ -26,6 +26,7 @@ final class ConfigManager {
 
     var backendMode: String = "local"
     var backendURL: String = ""
+    var cloudTrustPolicy: String = "strict"
     var statusRelayURL: String = "https://relay.fisherman.teleport.computer"
     var serverURL: String = "ws://localhost:9999/ingest"
     var controlPort: String = "7892"
@@ -124,6 +125,13 @@ final class ConfigManager {
                     loadedAnyManagedValue = true
                 }
                 if trackLines { knownKeyLines["FISH_BACKEND_URL", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_CLOUD_TRUST_POLICY") {
+                if shouldLoad("FISH_CLOUD_TRUST_POLICY", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    cloudTrustPolicy = value
+                    loadedKeys.insert("FISH_CLOUD_TRUST_POLICY")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_CLOUD_TRUST_POLICY", default: []].append(i) }
             } else if let value = extractValue(trimmed, key: "FISH_STATUS_RELAY_URL") {
                 if shouldLoad("FISH_STATUS_RELAY_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
                     statusRelayURL = value
@@ -234,6 +242,7 @@ final class ConfigManager {
         var updates: [(String, String)] = [
             ("FISH_BACKEND_MODE", backendMode),
             ("FISH_BACKEND_URL", backendURL),
+            ("FISH_CLOUD_TRUST_POLICY", cloudTrustPolicy),
             ("FISH_STATUS_RELAY_URL", statusRelayURL),
             ("FISH_CONTROL_PORT", controlPort),
             ("FISH_STATUS_LLM_MODE", statusLLMMode),

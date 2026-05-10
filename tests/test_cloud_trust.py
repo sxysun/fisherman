@@ -180,6 +180,26 @@ class CloudTrustTests(unittest.TestCase):
         self.assertEqual(cfg.server_url, DEFAULT_SERVER_URL)
         self.assertFalse(cfg.streaming_enabled)
 
+    def test_cli_dangerous_policy_skips_cloud_trust_guard(self) -> None:
+        from fisherman import cli
+        from fisherman.config import FishermanConfig
+
+        cfg = FishermanConfig(
+            backend_mode="cloud",
+            backend_url="https://fisherman.teleport.computer",
+            server_url="wss://fisherman.teleport.computer/ingest",
+            cloud_trust_policy="dangerously_skip",
+            _env_file=(),
+        )
+        with mock.patch(
+            "fisherman.cloud_trust.verify_or_approve",
+        ) as verify_mock, mock.patch("click.echo"):
+            cli._ensure_cloud_trust_or_disable(cfg)
+
+        verify_mock.assert_not_called()
+        self.assertEqual(cfg.server_url, "wss://fisherman.teleport.computer/ingest")
+        self.assertTrue(cfg.streaming_enabled)
+
     def test_cli_cloud_start_requires_explicit_trust_record(self) -> None:
         from fisherman import cli
         from fisherman.config import FishermanConfig
@@ -205,6 +225,47 @@ class CloudTrustTests(unittest.TestCase):
             cli._ensure_cloud_trust_or_disable(cfg)
 
         self.assertFalse(verify_mock.call_args.kwargs["allow_bootstrap"])
+
+    def test_cli_secret_cloud_requests_require_explicit_trust_record(self) -> None:
+        from click import ClickException
+        from fisherman import cli
+        from fisherman.config import FishermanConfig
+
+        cfg = FishermanConfig(
+            backend_mode="cloud",
+            backend_url="https://fisherman.teleport.computer",
+            server_url="wss://fisherman.teleport.computer/ingest",
+            _env_file=(),
+        )
+        failure = cloud_trust.CloudTrustVerification(
+            ok=False,
+            reason="live deploy changed",
+            failures=("compose_hash changed",),
+        )
+        with mock.patch(
+            "fisherman.cloud_trust.verify_or_approve",
+            return_value=failure,
+        ) as verify_mock:
+            with self.assertRaises(ClickException):
+                cli._ensure_cloud_trust_for_secret_request(cfg, "test")
+
+        self.assertFalse(verify_mock.call_args.kwargs["allow_bootstrap"])
+
+    def test_cli_secret_cloud_requests_allow_dangerous_skip(self) -> None:
+        from fisherman import cli
+        from fisherman.config import FishermanConfig
+
+        cfg = FishermanConfig(
+            backend_mode="cloud",
+            backend_url="https://fisherman.teleport.computer",
+            server_url="wss://fisherman.teleport.computer/ingest",
+            cloud_trust_policy="dangerously_skip",
+            _env_file=(),
+        )
+        with mock.patch("fisherman.cloud_trust.verify_or_approve") as verify_mock:
+            cli._ensure_cloud_trust_for_secret_request(cfg, "test")
+
+        verify_mock.assert_not_called()
 
 
 if __name__ == "__main__":

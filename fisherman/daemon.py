@@ -60,6 +60,14 @@ class FishermanDaemon:
         self._differ = FrameDiffer(threshold=config.diff_threshold)
         self._privacy = PrivacyFilter(config)
         self._router = TierRouter(config)
+        self._cloud_tenant_data_key: str | None = None
+        if config.backend_mode == "cloud" and config.private_key:
+            try:
+                self._cloud_tenant_data_key = fkeys.cloud_tenant_data_key(
+                    bytes.fromhex(config.private_key)
+                )
+            except Exception:
+                log.warning("invalid_private_key_for_cloud_tenant_key", exc_info=True)
         self._upload_queue: UploadQueue | None = (
             UploadQueue(config.upload_queue_path, config.upload_queue_max)
             if config.upload_queue_enabled and config.backend_mode in {"cloud", "self_hosted"}
@@ -71,6 +79,7 @@ class FishermanDaemon:
                 config.private_key,
                 upload_queue=self._upload_queue,
                 connect_guard=self._cloud_connect_guard if config.backend_mode == "cloud" else None,
+                tenant_data_key=self._cloud_tenant_data_key,
             )
             if config.streaming_enabled else None
         )
@@ -117,6 +126,9 @@ class FishermanDaemon:
     def _cloud_connect_guard(self) -> bool:
         """Re-check Cloud trust before every websocket connect/reconnect."""
         if self._config.backend_mode != "cloud":
+            return True
+        if self._config.cloud_trust_policy == "dangerously_skip":
+            log.warning("cloud_trust_dangerously_skipped")
             return True
         try:
             from fisherman import cloud_trust

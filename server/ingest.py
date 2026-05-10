@@ -41,6 +41,7 @@ from crypto import (
     decrypt_text,
     encrypt_json,
     encrypt_text,
+    fernet_for_data_key,
     generate_data_key,
     unwrap_data_key,
     wrap_data_key,
@@ -92,6 +93,9 @@ _DEFAULT_MAX_URLS = 200
 _DEFAULT_STATUS_LLM_BASE_URL = "https://openrouter.ai/api/v1"
 _DEFAULT_STATUS_LLM_MODEL = "openai/gpt-4o-mini"
 _STATUS_LLM_MODES = {"managed", "byo", "none"}
+_KEY_SOURCE_CLIENT = "client_provided"
+_KEY_SOURCE_SERVER = "server_wrapped"
+_SESSION_DATA_KEYS: dict[str, str] = {}
 
 
 def serve(*args, **kwargs):
@@ -128,6 +132,10 @@ class DeputyRateLimitError(RuntimeError):
     """Raised when a deputy exceeds its configured request rate."""
 
 
+class TenantKeyUnavailableError(RuntimeError):
+    """Raised when ciphertext exists but the tenant data key is not in this runtime."""
+
+
 class PayloadValidationError(RuntimeError):
     """Raised when an ingest payload is malformed or exceeds safety limits."""
 
@@ -145,6 +153,23 @@ def _env_int(name: str, default: int | None = None) -> int | None:
 def _cloud_enrollment_mode() -> str:
     mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "closed").strip().lower()
     return mode if mode in {"open", "allowlist", "closed"} else "closed"
+
+
+def _cloud_key_mode() -> str:
+    """Return Cloud tenant-key mode.
+
+    server_wrapped is the legacy/self-hosted behavior. client_provided is
+    the managed Cloud privacy mode: the tenant key arrives only from an
+    attestation-approved client session and is kept in memory.
+    """
+    mode = os.environ.get("FISH_CLOUD_KEY_MODE", "").strip().lower()
+    if mode in {_KEY_SOURCE_CLIENT, "client", "client-held", "client_held"}:
+        return _KEY_SOURCE_CLIENT
+    return _KEY_SOURCE_SERVER
+
+
+def _client_keys_required() -> bool:
+    return is_multi_tenant_enabled() and _cloud_key_mode() == _KEY_SOURCE_CLIENT
 
 
 def _allowed_tenant_pubkeys() -> set[str]:
@@ -238,7 +263,42 @@ def _auth_header_from_ws(ws: websockets.WebSocketServerProtocol) -> str:
     return ""
 
 
-async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
+def _header_from_ws(ws: websockets.WebSocketServerProtocol, name: str) -> str:
+    request = getattr(ws, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        return headers.get(name, "")
+    headers = getattr(ws, "request_headers", None)
+    if headers is not None:
+        return headers.get(name, "")
+    return ""
+
+
+def _validate_client_data_key(value: str | None) -> str | None:
+    key = (value or "").strip()
+    if not key:
+        return None
+    try:
+        # Constructing Fernet validates the base64url-encoded 32-byte key.
+        fernet_for_data_key(key)
+    except Exception as e:
+        raise TenantKeyUnavailableError("invalid tenant data key") from e
+    return key
+
+
+def _remember_client_data_key(ctx: AuthContext, value: str | None) -> str | None:
+    key = _validate_client_data_key(value)
+    if key:
+        _SESSION_DATA_KEYS[ctx.user_hex] = key
+        return key
+    return _SESSION_DATA_KEYS.get(ctx.user_hex)
+
+
+async def _ensure_tenant(
+    db: asyncpg.Pool,
+    ctx: AuthContext,
+    client_data_key: str | None = None,
+) -> str | None:
     """Ensure a user/device row exists and return the tenant data key.
 
     In Cloud mode this is the tenant enrollment gate. New tenants can be
@@ -246,11 +306,18 @@ async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
     remain active. The returned data key is used for new encrypted columns;
     reads still fall back to the legacy master key for pre-migration rows.
     """
+    client_data_key = _remember_client_data_key(ctx, client_data_key)
+    client_key_mode = _client_keys_required()
+    if client_key_mode and not client_data_key:
+        raise TenantKeyUnavailableError(
+            "tenant data key unavailable; approve Cloud and reconnect this device"
+        )
+
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT disabled_at, enrollment_state, wrapped_data_key,
-                   max_frames_per_hour
+                   max_frames_per_hour, data_key_source
             FROM users
             WHERE user_pubkey = $1
             """,
@@ -260,47 +327,25 @@ async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
         if row is None:
             if not _can_auto_enroll(ctx.user_hex):
                 raise TenantEnrollmentError("tenant is not enrolled")
-            tenant_key = generate_data_key()
+            tenant_key = client_data_key if client_key_mode else generate_data_key()
+            wrapped_key = None if client_key_mode else wrap_data_key(tenant_key)
+            key_source = _KEY_SOURCE_CLIENT if client_key_mode else _KEY_SOURCE_SERVER
             await conn.execute(
                 """
                 INSERT INTO users
                     (user_pubkey, enrollment_state, max_frames_per_hour,
-                     wrapped_data_key, data_key_created_at)
-                VALUES ($1, 'active', $2, $3, now())
+                     wrapped_data_key, data_key_source, client_key_last_seen_at,
+                     data_key_created_at)
+                VALUES ($1, 'active', $2, $3, $4, $5, now())
                 ON CONFLICT (user_pubkey) DO NOTHING
                 """,
                 ctx.user_hex,
                 _default_max_frames_per_hour(),
-                wrap_data_key(tenant_key),
+                wrapped_key,
+                key_source,
+                datetime.datetime.now(datetime.timezone.utc) if client_key_mode else None,
             )
-            stored = await conn.fetchrow(
-                "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
-                ctx.user_hex,
-            )
-            stored_wrapped = _row_get(stored, "wrapped_data_key")
-            if stored_wrapped:
-                tenant_key = unwrap_data_key(bytes(stored_wrapped))
-        else:
-            if _row_get(row, "disabled_at") is not None:
-                raise TenantEnrollmentError("tenant is disabled")
-            if (_row_get(row, "enrollment_state") or "active") != "active":
-                raise TenantEnrollmentError("tenant is not active")
-            wrapped = _row_get(row, "wrapped_data_key")
-            if wrapped:
-                tenant_key = unwrap_data_key(bytes(wrapped))
-            else:
-                tenant_key = generate_data_key()
-                await conn.execute(
-                    """
-                    UPDATE users
-                    SET wrapped_data_key = $2,
-                        data_key_created_at = COALESCE(data_key_created_at, now())
-                    WHERE user_pubkey = $1
-                      AND wrapped_data_key IS NULL
-                    """,
-                    ctx.user_hex,
-                    wrap_data_key(tenant_key),
-                )
+            if not client_key_mode:
                 stored = await conn.fetchrow(
                     "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
                     ctx.user_hex,
@@ -308,6 +353,51 @@ async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
                 stored_wrapped = _row_get(stored, "wrapped_data_key")
                 if stored_wrapped:
                     tenant_key = unwrap_data_key(bytes(stored_wrapped))
+        else:
+            if _row_get(row, "disabled_at") is not None:
+                raise TenantEnrollmentError("tenant is disabled")
+            if (_row_get(row, "enrollment_state") or "active") != "active":
+                raise TenantEnrollmentError("tenant is not active")
+
+            if client_key_mode:
+                tenant_key = client_data_key
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET data_key_source = $2,
+                        client_key_last_seen_at = now(),
+                        data_key_created_at = COALESCE(data_key_created_at, now())
+                    WHERE user_pubkey = $1
+                    """,
+                    ctx.user_hex,
+                    _KEY_SOURCE_CLIENT,
+                )
+            else:
+                wrapped = _row_get(row, "wrapped_data_key")
+                if wrapped:
+                    tenant_key = unwrap_data_key(bytes(wrapped))
+                else:
+                    tenant_key = generate_data_key()
+                    await conn.execute(
+                        """
+                        UPDATE users
+                        SET wrapped_data_key = $2,
+                            data_key_source = $3,
+                            data_key_created_at = COALESCE(data_key_created_at, now())
+                        WHERE user_pubkey = $1
+                          AND wrapped_data_key IS NULL
+                        """,
+                        ctx.user_hex,
+                        wrap_data_key(tenant_key),
+                        _KEY_SOURCE_SERVER,
+                    )
+                    stored = await conn.fetchrow(
+                        "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
+                        ctx.user_hex,
+                    )
+                    stored_wrapped = _row_get(stored, "wrapped_data_key")
+                    if stored_wrapped:
+                        tenant_key = unwrap_data_key(bytes(stored_wrapped))
             if _row_get(row, "max_frames_per_hour") is None:
                 default_limit = _default_max_frames_per_hour()
                 if default_limit:
@@ -346,9 +436,42 @@ async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
     return tenant_key
 
 
-async def _tenant_data_key(db: asyncpg.Pool, user_hex: str | None) -> str | None:
+async def _tenant_data_key(
+    db: asyncpg.Pool,
+    user_hex: str | None,
+    key_source: str | None = None,
+) -> str | None:
     if not user_hex:
         return None
+    source = key_source or _KEY_SOURCE_SERVER
+    if source == _KEY_SOURCE_CLIENT:
+        key = _SESSION_DATA_KEYS.get(user_hex)
+        if key:
+            return key
+        raise TenantKeyUnavailableError(
+            "tenant data key unavailable in this Cloud runtime; approve/reconnect a device"
+        )
+    if _client_keys_required() and not os.environ.get("ENCRYPTION_KEY"):
+        raise TenantKeyUnavailableError(
+            "legacy server-wrapped data is unavailable until it is migrated to client-held keys"
+        )
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
+            user_hex,
+        )
+    wrapped = _row_get(row, "wrapped_data_key")
+    return unwrap_data_key(bytes(wrapped)) if wrapped else None
+
+
+async def _legacy_server_data_key(db: asyncpg.Pool, user_hex: str) -> str | None:
+    """Return the old server-wrapped tenant key without client-mode gating.
+
+    This is only used by the explicit Cloud migration endpoint while
+    FISH_CLOUD_LEGACY_DECRYPT_ENABLED is set. It lets an approved runtime
+    decrypt old server-wrapped rows once, re-encrypt them to the client-held
+    tenant key, and then remove the persisted wrapped key.
+    """
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
@@ -387,7 +510,7 @@ async def _status_llm_settings(
         row = await conn.fetchrow(
             """
             SELECT status_llm_mode, status_llm_base_url, status_llm_model,
-                   status_llm_api_key
+                   status_llm_api_key, status_llm_key_source
             FROM users
             WHERE user_pubkey = $1
             """,
@@ -409,7 +532,13 @@ async def _status_llm_settings(
         encrypted_key = _row_get(row, "status_llm_api_key")
         if encrypted_key:
             try:
-                settings["api_key"] = _decrypt_text_for_user(bytes(encrypted_key), data_key)
+                api_key_data_key = data_key
+                key_source = _row_get(row, "status_llm_key_source")
+                if key_source and key_source != (
+                    _KEY_SOURCE_CLIENT if _client_keys_required() else _KEY_SOURCE_SERVER
+                ):
+                    api_key_data_key = None
+                settings["api_key"] = _decrypt_text_for_user(bytes(encrypted_key), api_key_data_key)
             except Exception:
                 settings["api_key"] = ""
         settings["api_key_configured"] = bool(settings["api_key"])
@@ -577,12 +706,62 @@ def _row_get(row, key: str, default=None):
         return default
 
 
+async def _record_access_event(
+    db: asyncpg.Pool,
+    *,
+    action: str,
+    scope: str | None = None,
+    ctx: AuthContext | None = None,
+    user_hex: str | None = None,
+    actor_hex: str | None = None,
+    actor_role: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Write a metadata-only audit event.
+
+    Do not pass raw OCR, transcripts, window titles, prompts, model output,
+    URLs, or image keys in metadata.
+    """
+    resolved_user = user_hex or (ctx.user_hex if ctx is not None else None)
+    if not resolved_user or resolved_user == "unscoped":
+        return
+    resolved_actor = actor_hex or (ctx.actor_hex if ctx is not None else None)
+    resolved_role = actor_role or (ctx.role if ctx is not None else "system")
+    safe_metadata = metadata or {}
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO access_audit_events
+                    (user_pubkey, actor_pubkey, actor_role, action, scope, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                """,
+                resolved_user,
+                resolved_actor,
+                resolved_role,
+                action,
+                scope,
+                json.dumps(safe_metadata),
+            )
+    except Exception:
+        log.warning(
+            "access_audit_write_failed",
+            action=action,
+            user=str(resolved_user)[:16],
+            exc_info=True,
+        )
+
+
 def _tenant_error_response(exc: Exception) -> "web.Response":
     return web.json_response({"error": str(exc)}, status=403)
 
 
 def _rate_error_response(exc: Exception) -> "web.Response":
     return web.json_response({"error": str(exc)}, status=429)
+
+
+def _tenant_key_error_response(exc: Exception) -> "web.Response":
+    return web.json_response({"error": str(exc), "code": "tenant_key_unavailable"}, status=428)
 
 
 async def _require_scoped_context(
@@ -602,7 +781,11 @@ async def _require_scoped_context(
         # candidate and must pass that user's ACL instead of becoming owner of
         # its own empty namespace.
         if not requested_user_hex or requested_user_hex == owner_ctx.user_hex:
-            await _ensure_tenant(db, owner_ctx)
+            await _ensure_tenant(
+                db,
+                owner_ctx,
+                request.headers.get("X-Fisherman-Tenant-Data-Key"),
+            )
             return owner_ctx
         actor_pubkey = owner_ctx.actor_pubkey
     else:
@@ -706,6 +889,7 @@ async def _handle_frame(
     loop: asyncio.AbstractEventLoop,
     ctx: AuthContext,
     tenant_data_key: str | None = None,
+    data_key_source: str = _KEY_SOURCE_SERVER,
 ) -> None:
     """Process a single frame: encrypt sensitive fields, upload image, store to Postgres."""
     ts = _coerce_ts(msg)
@@ -745,9 +929,10 @@ async def _handle_frame(
             """
             INSERT INTO frames (user_pubkey, device_pubkey, ts, app, bundle_id,
                                 "window", ocr_text, urls,
-                                image_key, width, height, tier_hint, routing)
+                                image_key, width, height, tier_hint, routing,
+                                data_key_source)
             VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8,
-                    $9, $10, $11, $12, $13::jsonb)
+                    $9, $10, $11, $12, $13::jsonb, $14)
             """,
             ctx.user_hex,
             ctx.actor_hex,
@@ -762,6 +947,7 @@ async def _handle_frame(
             msg.get("h"),
             tier_hint,
             routing,
+            data_key_source,
         )
 
     log.info(
@@ -780,6 +966,7 @@ async def _handle_audio(
     loop: asyncio.AbstractEventLoop,
     ctx: AuthContext,
     tenant_data_key: str | None = None,
+    data_key_source: str = _KEY_SOURCE_SERVER,
 ) -> None:
     """Store a meeting audio transcript (encrypted)."""
     ts = _coerce_ts(msg)
@@ -799,8 +986,8 @@ async def _handle_audio(
             """
             INSERT INTO audio_transcripts
                 (user_pubkey, device_pubkey, ts, meeting_app, device_name,
-                 is_input_device, transcript)
-            VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7)
+                 is_input_device, transcript, data_key_source)
+            VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8)
             """,
             ctx.user_hex,
             ctx.actor_hex,
@@ -809,6 +996,7 @@ async def _handle_audio(
             device_name,
             bool(msg.get("is_input_device")),
             enc_transcript,
+            data_key_source,
         )
 
     log.info(
@@ -1052,6 +1240,8 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
         ctx = await _require_scoped_context(request, db, "read:status")
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except DeputyRateLimitError as e:
         return _rate_error_response(e)
     if ctx is None:
@@ -1062,11 +1252,10 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
     user_hex = ctx.user_hex
 
     try:
-        data_key = await _tenant_data_key(db, user_hex)
         async with db.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
-                SELECT ts, activity
+                SELECT ts, activity, data_key_source
                 FROM frames
                 WHERE {_tenant_predicate()} AND activity IS NOT NULL
                 ORDER BY ts DESC
@@ -1082,6 +1271,11 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
             })
 
         ts = row["ts"]
+        data_key = await _tenant_data_key(
+            db,
+            user_hex,
+            _row_get(row, "data_key_source"),
+        )
         age_seconds = time.time() - ts.timestamp()
         if age_seconds > 300:
             return web.json_response({
@@ -1106,7 +1300,7 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
             async with db.acquire() as conn:
                 flow_rows = await conn.fetch(
                     f"""
-                    SELECT ts, activity FROM frames
+                    SELECT ts, activity, data_key_source FROM frames
                     WHERE {_tenant_predicate()}
                       AND activity IS NOT NULL
                       AND ts > now() - interval '45 minutes'
@@ -1126,7 +1320,15 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
                             break  # disconnect detected, flow chain breaks
                         fa = await loop.run_in_executor(
                             _pool,
-                            partial(_decrypt_json_for_user, fr["activity"], data_key),
+                            partial(
+                                _decrypt_json_for_user,
+                                fr["activity"],
+                                await _tenant_data_key(
+                                    db,
+                                    user_hex,
+                                    _row_get(fr, "data_key_source"),
+                                ),
+                            ),
                         )
                         if fa.get("category") == current_cat:
                             earliest_match = fr["ts"]
@@ -1147,6 +1349,8 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
             "flow": flow,
         })
 
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_current_activity_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1165,6 +1369,7 @@ async def _http_health(request: "web.Request") -> "web.Response":
         "ingest_ready": True,
         "multi_tenant": is_multi_tenant_enabled(),
         "enrollment_mode": _cloud_enrollment_mode() if is_multi_tenant_enabled() else None,
+        "tenant_key_mode": _cloud_key_mode() if is_multi_tenant_enabled() else _KEY_SOURCE_SERVER,
         "storage": storage_backend,
         "external_llm_enabled": _external_llm_enabled(),
         "managed_llm_configured": bool(_managed_status_llm_api_key()),
@@ -1196,11 +1401,17 @@ async def _http_get_status_llm(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     try:
-        data_key = await _ensure_tenant(db, ctx)
+        data_key = await _ensure_tenant(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
         settings = await _status_llm_settings(db, ctx.user_hex, data_key)
         return web.json_response(_public_status_llm_settings(settings))
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_get_status_llm_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1242,8 +1453,13 @@ async def _http_put_status_llm(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "api_key too long"}, status=400)
 
     try:
-        data_key = await _ensure_tenant(db, ctx)
+        data_key = await _ensure_tenant(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
         encrypted_api_key = encrypt_text(api_key_value, data_key) if api_key_value else None
+        key_source = _KEY_SOURCE_CLIENT if _client_keys_required() else _KEY_SOURCE_SERVER
         async with db.acquire() as conn:
             if encrypted_api_key is not None or clear_api_key:
                 await conn.execute(
@@ -1252,7 +1468,8 @@ async def _http_put_status_llm(request: "web.Request") -> "web.Response":
                     SET status_llm_mode = $2,
                         status_llm_base_url = $3,
                         status_llm_model = $4,
-                        status_llm_api_key = $5
+                        status_llm_api_key = $5,
+                        status_llm_key_source = $6
                     WHERE user_pubkey = $1
                     """,
                     ctx.user_hex,
@@ -1260,6 +1477,7 @@ async def _http_put_status_llm(request: "web.Request") -> "web.Response":
                     base_url or None,
                     model or None,
                     encrypted_api_key,
+                    key_source,
                 )
             else:
                 await conn.execute(
@@ -1279,8 +1497,289 @@ async def _http_put_status_llm(request: "web.Request") -> "web.Response":
         return web.json_response({"ok": True, **_public_status_llm_settings(settings)})
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_put_status_llm_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+def _row_ts_seconds(value) -> float:
+    if isinstance(value, datetime.datetime):
+        return value.timestamp()
+    return float(value)
+
+
+async def _http_migrate_client_key(request: "web.Request") -> "web.Response":
+    """Re-encrypt legacy Cloud rows to the approved client-held tenant key.
+
+    This endpoint is deliberately owner-only and only works when the runtime
+    is started in client-key mode with FISH_CLOUD_LEGACY_DECRYPT_ENABLED=1.
+    It is the controlled bridge from the old Cloud-wrapped model to the
+    stricter "no persisted Cloud tenant key" model.
+    """
+    db: asyncpg.Pool = request.app["db"]
+    storage = request.app["storage"]
+    if not _client_keys_required():
+        return web.json_response({"error": "client-held key mode is not enabled"}, status=400)
+    if not _truthy("FISH_CLOUD_LEGACY_DECRYPT_ENABLED"):
+        return web.json_response({"error": "legacy decrypt is not enabled for this runtime"}, status=400)
+    if not os.environ.get("ENCRYPTION_KEY"):
+        return web.json_response({"error": "legacy ENCRYPTION_KEY is not available"}, status=400)
+
+    try:
+        ctx = await _require_scoped_context(request, db, "read:captures")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+    if ctx.role not in {"owner", "tenant"}:
+        return web.json_response({"error": "owner credentials required"}, status=403)
+
+    client_key = _SESSION_DATA_KEYS.get(ctx.user_hex)
+    if not client_key:
+        return _tenant_key_error_response(
+            TenantKeyUnavailableError("approved client tenant key is not available")
+        )
+    try:
+        limit = max(1, min(int(request.query.get("limit", "500")), 2000))
+    except ValueError:
+        limit = 500
+
+    loop = asyncio.get_running_loop()
+    migrated_frames = 0
+    migrated_audio = 0
+    migrated_status_llm_key = False
+    image_errors = 0
+
+    try:
+        legacy_key = await _legacy_server_data_key(db, ctx.user_hex)
+
+        async with db.acquire() as conn:
+            frame_rows = await conn.fetch(
+                """
+                SELECT id, ts, "window", ocr_text, urls, activity, image_key
+                FROM frames
+                WHERE user_pubkey = $1
+                  AND data_key_source <> $2
+                ORDER BY ts ASC
+                LIMIT $3
+                """,
+                ctx.user_hex,
+                _KEY_SOURCE_CLIENT,
+                limit,
+            )
+
+        for row in frame_rows:
+            enc_window = None
+            enc_ocr = None
+            enc_urls = None
+            enc_activity = None
+            if row["window"]:
+                window = _decrypt_text_for_user(bytes(row["window"]), legacy_key)
+                enc_window = encrypt_text(window, client_key)
+            if row["ocr_text"]:
+                ocr_text = _decrypt_text_for_user(bytes(row["ocr_text"]), legacy_key)
+                enc_ocr = encrypt_text(ocr_text, client_key)
+            if row["urls"]:
+                urls = _decrypt_json_for_user(bytes(row["urls"]), legacy_key)
+                enc_urls = encrypt_json(urls, client_key)
+            if row["activity"]:
+                activity = _decrypt_json_for_user(bytes(row["activity"]), legacy_key)
+                enc_activity = encrypt_json(activity, client_key)
+
+            image_key = row["image_key"]
+            if image_key:
+                try:
+                    jpeg_data = await loop.run_in_executor(
+                        _pool,
+                        partial(storage.download, image_key, legacy_key),
+                    )
+                    image_key = await loop.run_in_executor(
+                        _pool,
+                        partial(
+                            storage.upload,
+                            jpeg_data,
+                            _row_ts_seconds(row["ts"]),
+                            user_pubkey=ctx.user_hex,
+                            data_key=client_key,
+                        ),
+                    )
+                except Exception:
+                    image_errors += 1
+                    log.warning(
+                        "cloud_client_key_migration_image_failed",
+                        user=ctx.user_hex[:16],
+                        frame_id=row["id"],
+                        exc_info=True,
+                    )
+
+            async with db.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE frames
+                    SET "window" = $2,
+                        ocr_text = $3,
+                        urls = $4,
+                        activity = $5,
+                        image_key = $6,
+                        data_key_source = $7
+                    WHERE id = $1
+                    """,
+                    row["id"],
+                    enc_window,
+                    enc_ocr,
+                    enc_urls,
+                    enc_activity,
+                    image_key,
+                    _KEY_SOURCE_CLIENT,
+                )
+            migrated_frames += 1
+
+        remaining_limit = max(1, limit - migrated_frames)
+        async with db.acquire() as conn:
+            audio_rows = await conn.fetch(
+                """
+                SELECT id, transcript
+                FROM audio_transcripts
+                WHERE user_pubkey = $1
+                  AND data_key_source <> $2
+                ORDER BY ts ASC
+                LIMIT $3
+                """,
+                ctx.user_hex,
+                _KEY_SOURCE_CLIENT,
+                remaining_limit,
+            )
+
+        for row in audio_rows:
+            enc_transcript = None
+            if row["transcript"]:
+                transcript = _decrypt_text_for_user(bytes(row["transcript"]), legacy_key)
+                enc_transcript = encrypt_text(transcript, client_key)
+            async with db.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE audio_transcripts
+                    SET transcript = $2,
+                        data_key_source = $3
+                    WHERE id = $1
+                    """,
+                    row["id"],
+                    enc_transcript,
+                    _KEY_SOURCE_CLIENT,
+                )
+            migrated_audio += 1
+
+        async with db.acquire() as conn:
+            user_row = await conn.fetchrow(
+                """
+                SELECT status_llm_api_key, status_llm_key_source
+                FROM users
+                WHERE user_pubkey = $1
+                """,
+                ctx.user_hex,
+            )
+        if (
+            _row_get(user_row, "status_llm_api_key")
+            and _row_get(user_row, "status_llm_key_source") != _KEY_SOURCE_CLIENT
+        ):
+            api_key = _decrypt_text_for_user(
+                bytes(_row_get(user_row, "status_llm_api_key")),
+                legacy_key,
+            )
+            async with db.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET status_llm_api_key = $2,
+                        status_llm_key_source = $3
+                    WHERE user_pubkey = $1
+                    """,
+                    ctx.user_hex,
+                    encrypt_text(api_key, client_key),
+                    _KEY_SOURCE_CLIENT,
+                )
+            migrated_status_llm_key = True
+
+        async with db.acquire() as conn:
+            remaining_frames = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM frames
+                WHERE user_pubkey = $1
+                  AND data_key_source <> $2
+                """,
+                ctx.user_hex,
+                _KEY_SOURCE_CLIENT,
+            )
+            remaining_audio = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM audio_transcripts
+                WHERE user_pubkey = $1
+                  AND data_key_source <> $2
+                """,
+                ctx.user_hex,
+                _KEY_SOURCE_CLIENT,
+            )
+            remaining_status_key = await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM users
+                WHERE user_pubkey = $1
+                  AND status_llm_api_key IS NOT NULL
+                  AND status_llm_key_source <> $2
+                """,
+                ctx.user_hex,
+                _KEY_SOURCE_CLIENT,
+            )
+            if not remaining_frames and not remaining_audio and not remaining_status_key:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET wrapped_data_key = NULL,
+                        data_key_source = $2,
+                        client_key_last_seen_at = now()
+                    WHERE user_pubkey = $1
+                    """,
+                    ctx.user_hex,
+                    _KEY_SOURCE_CLIENT,
+                )
+
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="migrate_client_key",
+            metadata={
+                "migrated_frames": migrated_frames,
+                "migrated_audio": migrated_audio,
+                "migrated_status_llm_key": migrated_status_llm_key,
+                "remaining_frames": int(remaining_frames or 0),
+                "remaining_audio": int(remaining_audio or 0),
+                "remaining_status_llm_key": int(remaining_status_key or 0),
+                "image_errors": image_errors,
+            },
+        )
+        return web.json_response({
+            "ok": True,
+            "migrated_frames": migrated_frames,
+            "migrated_audio": migrated_audio,
+            "migrated_status_llm_key": migrated_status_llm_key,
+            "remaining_frames": int(remaining_frames or 0),
+            "remaining_audio": int(remaining_audio or 0),
+            "remaining_status_llm_key": int(remaining_status_key or 0),
+            "image_errors": image_errors,
+            "wrapped_data_key_removed": not remaining_frames and not remaining_audio and not remaining_status_key,
+        })
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except Exception:
+        log.error("http_migrate_client_key_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
@@ -1295,6 +1794,8 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
         ctx = await _require_scoped_context(request, db, "read:status")
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except DeputyRateLimitError as e:
         return _rate_error_response(e)
     if ctx is None:
@@ -1306,11 +1807,17 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
     loop = asyncio.get_running_loop()
 
     try:
-        data_key = await _tenant_data_key(db, ctx.user_hex)
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="read_activity_history",
+            scope="read:status",
+            metadata={"limit": limit},
+        )
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT ts, activity
+                SELECT ts, activity, data_key_source
                 FROM frames
                 WHERE {_tenant_predicate()} AND activity IS NOT NULL
                 ORDER BY ts DESC
@@ -1325,6 +1832,11 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
 
         entries = []
         for row in rows:
+            data_key = await _tenant_data_key(
+                db,
+                ctx.user_hex,
+                _row_get(row, "data_key_source"),
+            )
             activity = await loop.run_in_executor(
                 _pool,
                 partial(_decrypt_json_for_user, row["activity"], data_key),
@@ -1338,6 +1850,8 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
 
         return web.json_response({"entries": entries})
 
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_activity_history_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1362,6 +1876,7 @@ def _decrypted_frame_row(row, data_key: str | None = None) -> dict:
         if isinstance(d.get(field), datetime.datetime):
             d[field] = d[field].isoformat()
     d.pop("activity", None)
+    d.pop("data_key_source", None)
     return d
 
 
@@ -1376,6 +1891,7 @@ def _decrypted_audio_row(row, data_key: str | None = None) -> dict:
     for field in ("ts", "created_at"):
         if isinstance(d.get(field), datetime.datetime):
             d[field] = d[field].isoformat()
+    d.pop("data_key_source", None)
     return d
 
 
@@ -1386,6 +1902,8 @@ async def _http_query(request: "web.Request") -> "web.Response":
         ctx = await _require_scoped_context(request, db, "read:captures")
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except DeputyRateLimitError as e:
         return _rate_error_response(e)
     if ctx is None:
@@ -1397,7 +1915,6 @@ async def _http_query(request: "web.Request") -> "web.Response":
         limit = 50
 
     try:
-        data_key = await _tenant_data_key(db, ctx.user_hex)
         clauses = [_tenant_predicate()]
         params: list[object] = [ctx.user_hex]
         idx = 2
@@ -1423,13 +1940,27 @@ async def _http_query(request: "web.Request") -> "web.Response":
             params.append(bundle)
             idx += 1
         params.append(limit)
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="read_captures",
+            scope="read:captures",
+            metadata={
+                "limit": limit,
+                "has_since": since is not None,
+                "has_until": until is not None,
+                "has_app": bool(app),
+                "has_bundle": bool(bundle),
+                "has_search": bool(search),
+            },
+        )
 
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
                 SELECT id, user_pubkey, device_pubkey, ts, app, bundle_id,
                        "window", ocr_text, urls, image_key, width, height,
-                       tier_hint, routing, created_at
+                       tier_hint, routing, data_key_source, created_at
                 FROM frames
                 WHERE {" AND ".join(clauses)}
                 ORDER BY ts DESC
@@ -1438,7 +1969,13 @@ async def _http_query(request: "web.Request") -> "web.Response":
                 *params,
             )
 
-        out = [_decrypted_frame_row(row, data_key) for row in rows]
+        out = [
+            _decrypted_frame_row(
+                row,
+                await _tenant_data_key(db, ctx.user_hex, _row_get(row, "data_key_source")),
+            )
+            for row in rows
+        ]
         if search:
             needle = search.lower()
             out = [
@@ -1447,6 +1984,8 @@ async def _http_query(request: "web.Request") -> "web.Response":
                 or needle in str(row.get("window") or "").lower()
             ]
         return web.json_response(out)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_query_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1458,6 +1997,8 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
         ctx = await _require_scoped_context(request, db, "read:transcripts")
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except DeputyRateLimitError as e:
         return _rate_error_response(e)
     if ctx is None:
@@ -1469,7 +2010,6 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
         limit = 200
 
     try:
-        data_key = await _tenant_data_key(db, ctx.user_hex)
         clauses = [_tenant_predicate()]
         params: list[object] = [ctx.user_hex]
         idx = 2
@@ -1490,12 +2030,26 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
             params.append(f"%{meeting_app}%")
             idx += 1
         params.append(limit)
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="read_transcripts",
+            scope="read:transcripts",
+            metadata={
+                "limit": limit,
+                "has_since": since is not None,
+                "has_until": until is not None,
+                "has_meeting_app": bool(meeting_app),
+                "has_search": bool(search),
+            },
+        )
 
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 f"""
                 SELECT id, user_pubkey, device_pubkey, ts, meeting_app,
-                       device_name, is_input_device, transcript, created_at
+                       device_name, is_input_device, transcript,
+                       data_key_source, created_at
                 FROM audio_transcripts
                 WHERE {" AND ".join(clauses)}
                 ORDER BY ts DESC
@@ -1504,7 +2058,13 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
                 *params,
             )
 
-        out = [_decrypted_audio_row(row, data_key) for row in rows]
+        out = [
+            _decrypted_audio_row(
+                row,
+                await _tenant_data_key(db, ctx.user_hex, _row_get(row, "data_key_source")),
+            )
+            for row in rows
+        ]
         if search:
             needle = search.lower()
             out = [
@@ -1512,6 +2072,8 @@ async def _http_transcripts(request: "web.Request") -> "web.Response":
                 if needle in str(row.get("transcript") or "").lower()
             ]
         return web.json_response(out)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_transcripts_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1544,7 +2106,11 @@ async def _http_put_deputy(request: "web.Request") -> "web.Response":
     rate_int = int(rate) if rate is not None else None
 
     try:
-        await _ensure_tenant(db, ctx)
+        await _ensure_tenant(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
         async with db.acquire() as conn:
             await conn.execute(
                 """
@@ -1570,6 +2136,8 @@ async def _http_put_deputy(request: "web.Request") -> "web.Response":
         return web.json_response({"ok": True})
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_put_deputy_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1582,7 +2150,11 @@ async def _http_list_deputies(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     try:
-        await _ensure_tenant(db, ctx)
+        await _ensure_tenant(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
         async with db.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -1605,6 +2177,8 @@ async def _http_list_deputies(request: "web.Request") -> "web.Response":
         return web.json_response(out)
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_list_deputies_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1620,7 +2194,11 @@ async def _http_delete_deputy(request: "web.Request") -> "web.Response":
     if not _valid_pubkey_hex(deputy_pubkey):
         return web.json_response({"error": "invalid deputy pubkey"}, status=400)
     try:
-        await _ensure_tenant(db, ctx)
+        await _ensure_tenant(
+            db,
+            ctx,
+            request.headers.get("X-Fisherman-Tenant-Data-Key"),
+        )
         async with db.acquire() as conn:
             result = await conn.execute(
                 """
@@ -1634,6 +2212,8 @@ async def _http_delete_deputy(request: "web.Request") -> "web.Response":
         return web.json_response({"ok": True, "result": result})
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
     except Exception:
         log.error("http_delete_deputy_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
@@ -1654,12 +2234,14 @@ async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
                     """
                     WITH newest AS (
                         SELECT DISTINCT ON (COALESCE(user_pubkey, 'unscoped'))
-                               id, user_pubkey, ts, app, "window", ocr_text
+                               id, user_pubkey, ts, app, "window", ocr_text,
+                               data_key_source
                         FROM frames
                         WHERE activity IS NULL
                         ORDER BY COALESCE(user_pubkey, 'unscoped'), ts DESC
                     )
-                    SELECT id, user_pubkey, ts, app, "window", ocr_text
+                    SELECT id, user_pubkey, ts, app, "window", ocr_text,
+                           data_key_source
                     FROM newest
                     ORDER BY ts DESC
                     LIMIT 25
@@ -1671,7 +2253,18 @@ async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
 
             for latest in rows:
                 user_key = latest["user_pubkey"] or "unscoped"
-                data_key = await _tenant_data_key(db, user_key if user_key != "unscoped" else None)
+                try:
+                    data_key = await _tenant_data_key(
+                        db,
+                        user_key if user_key != "unscoped" else None,
+                        _row_get(latest, "data_key_source"),
+                    )
+                except TenantKeyUnavailableError:
+                    log.info(
+                        "activity_categorizer_waiting_for_tenant_key",
+                        user=str(user_key)[:16],
+                    )
+                    continue
                 llm_settings = await _status_llm_settings(
                     db,
                     user_key if user_key != "unscoped" else None,
@@ -1690,6 +2283,21 @@ async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
                         partial(_decrypt_text_for_user, latest["ocr_text"], data_key),
                     )
                     if latest["ocr_text"] else ""
+                )
+                llm_mode = _status_llm_mode(llm_settings.get("mode"))
+                await _record_access_event(
+                    db,
+                    action="status_generation_read",
+                    scope="read:captures",
+                    user_hex=user_key,
+                    actor_role="system",
+                    metadata={
+                        "frame_id": int(latest["id"]),
+                        "mode": llm_mode,
+                        "external_llm_enabled": bool(llm_settings.get("external_llm_enabled")),
+                        "model": llm_settings.get("model") or _DEFAULT_STATUS_LLM_MODEL,
+                        "base_url": llm_settings.get("base_url") or _DEFAULT_STATUS_LLM_BASE_URL,
+                    },
                 )
 
                 activity = await _categorize_activity(
@@ -1765,7 +2373,11 @@ async def _handle_connection(
         return
 
     try:
-        tenant_data_key = await _ensure_tenant(db, ctx)
+        tenant_data_key = await _ensure_tenant(
+            db,
+            ctx,
+            _header_from_ws(ws, "X-Fisherman-Tenant-Data-Key"),
+        )
     except TenantEnrollmentError as e:
         log.warning(
             "ws_tenant_rejected",
@@ -1775,6 +2387,16 @@ async def _handle_connection(
         )
         await ws.close(code=1008, reason=str(e))
         return
+    except TenantKeyUnavailableError as e:
+        log.warning(
+            "ws_tenant_key_unavailable",
+            remote=remote,
+            user=ctx.user_hex[:16],
+            reason=str(e),
+        )
+        await ws.close(code=1008, reason=str(e))
+        return
+    data_key_source = _KEY_SOURCE_CLIENT if _client_keys_required() else _KEY_SOURCE_SERVER
     log.info(
         "client_connected",
         remote=remote,
@@ -1788,9 +2410,13 @@ async def _handle_connection(
             try:
                 msg = json.loads(raw)
                 if msg.get("type") == "frame":
-                    await _handle_frame(msg, db, r2, loop, ctx, tenant_data_key)
+                    await _handle_frame(
+                        msg, db, r2, loop, ctx, tenant_data_key, data_key_source
+                    )
                 elif msg.get("type") == "audio":
-                    await _handle_audio(msg, db, loop, ctx, tenant_data_key)
+                    await _handle_audio(
+                        msg, db, loop, ctx, tenant_data_key, data_key_source
+                    )
             except TenantQuotaError as e:
                 log.warning(
                     "tenant_quota_rejected",
@@ -1838,6 +2464,7 @@ async def _run(host: str, port: int) -> None:
     if web:
         app = web.Application()
         app["db"] = db
+        app["storage"] = r2
         app.router.add_get("/health", _http_health)
         app.router.add_get("/api/current_activity", _http_current_activity)
         app.router.add_get("/api/activity_history", _http_activity_history)
@@ -1845,6 +2472,7 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/api/transcripts", _http_transcripts)
         app.router.add_get("/api/status-llm", _http_get_status_llm)
         app.router.add_put("/api/status-llm", _http_put_status_llm)
+        app.router.add_post("/api/cloud/migrate-client-key", _http_migrate_client_key)
         app.router.add_get("/api/deputies", _http_list_deputies)
         app.router.add_put("/api/deputies/{pubkey}", _http_put_deputy)
         app.router.add_delete("/api/deputies/{pubkey}", _http_delete_deputy)

@@ -7,12 +7,15 @@ CREATE TABLE IF NOT EXISTS users (
     max_frames_per_hour INT,
     max_storage_mb INT,
     wrapped_data_key BYTEA,
+    data_key_source TEXT NOT NULL DEFAULT 'server_wrapped',
+    client_key_last_seen_at TIMESTAMPTZ,
     data_key_created_at TIMESTAMPTZ,
     data_key_rotated_at TIMESTAMPTZ,
     status_llm_mode TEXT NOT NULL DEFAULT 'managed',
     status_llm_base_url TEXT,
     status_llm_model TEXT,
-    status_llm_api_key BYTEA
+    status_llm_api_key BYTEA,
+    status_llm_key_source TEXT NOT NULL DEFAULT 'server_wrapped'
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_state TEXT NOT NULL DEFAULT 'active';
@@ -20,12 +23,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'default';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS max_frames_per_hour INT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS max_storage_mb INT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS wrapped_data_key BYTEA;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS data_key_source TEXT NOT NULL DEFAULT 'server_wrapped';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS client_key_last_seen_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS data_key_created_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS data_key_rotated_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_mode TEXT NOT NULL DEFAULT 'managed';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_base_url TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_model TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_api_key BYTEA;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_key_source TEXT NOT NULL DEFAULT 'server_wrapped';
 
 CREATE TABLE IF NOT EXISTS devices (
     user_pubkey   TEXT NOT NULL REFERENCES users(user_pubkey) ON DELETE CASCADE,
@@ -52,11 +58,13 @@ CREATE TABLE IF NOT EXISTS frames (
     tier_hint   INT,
     routing     JSONB,
     activity    BYTEA,          -- Fernet-encrypted activity status (category + detail)
+    data_key_source TEXT NOT NULL DEFAULT 'server_wrapped',
     created_at  TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS user_pubkey TEXT;
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS device_pubkey TEXT;
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS data_key_source TEXT NOT NULL DEFAULT 'server_wrapped';
 
 CREATE INDEX IF NOT EXISTS idx_frames_ts ON frames (ts);
 CREATE INDEX IF NOT EXISTS idx_frames_bundle ON frames (bundle_id);
@@ -76,11 +84,13 @@ CREATE TABLE IF NOT EXISTS audio_transcripts (
     device_name     TEXT,           -- audio device the transcript came from
     is_input_device BOOLEAN,        -- true = mic, false = system output
     transcript      BYTEA,          -- Fernet-encrypted
+    data_key_source TEXT NOT NULL DEFAULT 'server_wrapped',
     created_at      TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE audio_transcripts ADD COLUMN IF NOT EXISTS user_pubkey TEXT;
 ALTER TABLE audio_transcripts ADD COLUMN IF NOT EXISTS device_pubkey TEXT;
+ALTER TABLE audio_transcripts ADD COLUMN IF NOT EXISTS data_key_source TEXT NOT NULL DEFAULT 'server_wrapped';
 
 CREATE INDEX IF NOT EXISTS idx_audio_ts ON audio_transcripts (ts);
 CREATE INDEX IF NOT EXISTS idx_audio_app ON audio_transcripts (meeting_app);
@@ -114,3 +124,23 @@ CREATE TABLE IF NOT EXISTS deputy_rate_events (
 
 CREATE INDEX IF NOT EXISTS idx_deputy_rate_events_window
     ON deputy_rate_events(user_pubkey, deputy_pubkey, ts DESC);
+
+-- Metadata-only audit trail for context reads and status-generation
+-- reads. Never store raw OCR, transcripts, window titles, prompts, or
+-- generated status text in this table.
+CREATE TABLE IF NOT EXISTS access_audit_events (
+    id BIGSERIAL PRIMARY KEY,
+    user_pubkey TEXT NOT NULL,
+    actor_pubkey TEXT,
+    actor_role TEXT NOT NULL,
+    action TEXT NOT NULL,
+    scope TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_audit_user_created
+    ON access_audit_events(user_pubkey, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_access_audit_actor_created
+    ON access_audit_events(actor_pubkey, created_at DESC);

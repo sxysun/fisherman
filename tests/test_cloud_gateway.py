@@ -105,6 +105,8 @@ class CloudIngestReadinessTests(unittest.TestCase):
             "FISH_CLOUD_EXTERNAL_LLM_ENABLED",
             "FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR",
             "FISH_CLOUD_ENROLLMENT_MODE",
+            "FISH_CLOUD_KEY_MODE",
+            "FISH_CLOUD_LEGACY_DECRYPT_ENABLED",
             "OPENAI_API_KEY",
             "OPENROUTER_API_KEY",
             "FISH_STATUS_LLM_API_KEY",
@@ -140,6 +142,24 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertEqual(payload["status_llm_model"], "openai/gpt-4o-mini")
         self.assertEqual(payload["default_max_frames_per_hour"], 1200)
         self.assertEqual(payload["enrollment_mode"], "closed")
+
+    def test_client_key_mode_does_not_generate_cloud_wrapping_key(self):
+        os.environ.update(
+            {
+                "DATABASE_URL": "postgresql://example",
+                "FISH_MULTI_TENANT": "1",
+                "FISH_CLOUD_KEY_MODE": "client_provided",
+            }
+        )
+        cloud_ingest = _load_cloud_ingest_module()
+
+        payload = cloud_ingest.readiness_payload()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["ingest_ready"])
+        self.assertEqual(payload["encryption_key_source"], "client_provided")
+        self.assertEqual(payload["tenant_key_mode"], "client_provided")
+        self.assertFalse(Path(os.environ["FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE"]).exists())
 
     def test_cloud_ingest_ready_with_local_storage(self):
         os.environ.update(

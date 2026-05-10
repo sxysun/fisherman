@@ -15,7 +15,10 @@ uv run fisherman image "<image_key>" -o /tmp/f.jpg # decrypt screenshot to JPEG
 uv run fisherman show <id> -o /tmp/f.jpg           # full frame detail + image
 ```
 
-Requires `.env` with `DATABASE_URL` and `ENCRYPTION_KEY` (already configured if `setup.sh` was run).
+Self-hosted development uses `.env` with `DATABASE_URL` and `ENCRYPTION_KEY`
+(already configured if `setup.sh` was run). Managed Cloud runs with
+`FISH_CLOUD_KEY_MODE=client_provided`; tenant data keys come from approved
+clients and are not persisted under a Cloud-wide wrapping key.
 
 ## Stack
 

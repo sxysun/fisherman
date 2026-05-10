@@ -2,9 +2,11 @@
 
 The production Cloud compose should be able to run self-contained inside
 the attested CVM. DATABASE_URL is provided by the local Postgres service;
-ENCRYPTION_KEY can either be injected through encrypted env or generated
-once into the persistent /data volume. R2 is optional: when absent,
-storage.py uses encrypted local disk under /data/frames.
+strict Cloud mode receives tenant data keys from approved clients and
+does not generate a persistent Cloud-wide wrapping key. Legacy decrypt
+mode may still load/generate ENCRYPTION_KEY for one-off migrations. R2 is
+optional: when absent, storage.py uses encrypted local disk under
+/data/frames.
 """
 
 from __future__ import annotations
@@ -64,6 +66,15 @@ def _managed_status_llm_model() -> str:
     ).strip()
 
 
+def _client_key_mode() -> bool:
+    return os.environ.get("FISH_CLOUD_KEY_MODE", "").strip().lower() in {
+        "client",
+        "client-held",
+        "client_held",
+        "client_provided",
+    }
+
+
 def _ensure_encryption_key() -> str | None:
     """Load or create the Fernet key used by storage.py.
 
@@ -73,6 +84,12 @@ def _ensure_encryption_key() -> str | None:
     existing = os.environ.get("ENCRYPTION_KEY", "").strip()
     if existing:
         return "env"
+    if _client_key_mode() and not _truthy("FISH_CLOUD_LEGACY_DECRYPT_ENABLED"):
+        # Strict Cloud privacy mode: new tenant keys arrive from approved
+        # clients and stay process-local. Do not generate or load a
+        # persistent Cloud-wide wrapping key, because that would let a future
+        # unapproved runtime decrypt historical data.
+        return "client_provided"
 
     key_path = Path(os.environ.get("FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE", _DEFAULT_KEY_FILE))
     try:
@@ -153,6 +170,7 @@ def readiness_payload() -> dict[str, Any]:
         "enrollment_mode": _enrollment_mode(),
         "storage": _storage_backend() if ready else None,
         "encryption_key_source": key_source,
+        "tenant_key_mode": "client_provided" if _client_key_mode() else "server_wrapped",
         "external_llm_enabled": _external_llm_enabled(),
         "managed_llm_configured": bool(_managed_status_llm_api_key()),
         "status_llm_base_url": _managed_status_llm_base_url(),
