@@ -505,7 +505,11 @@ class FishermanDaemon:
             "frames_streamed": self._streamer.frames_sent if self._streamer else 0,
             "frames_dropped": self._streamer.frames_dropped if self._streamer else 0,
             "upload_queue_pending": (
-                self._upload_queue.count() if self._upload_queue is not None else 0
+                self._streamer.upload_queue_pending
+                if self._streamer is not None
+                else self._upload_queue.count(self._config.server_url)
+                if self._upload_queue is not None
+                else 0
             ),
             "connected": self._streamer.connected if self._streamer else False,
             "on_battery": on_battery(),
@@ -802,7 +806,12 @@ class FishermanDaemon:
                                 device_name=ap.device_name,
                                 is_input_device=ap.is_input_device,
                             )
-                            self._upload_queue.append("audio", payload, frame_ts)
+                            self._upload_queue.append(
+                                "audio",
+                                payload,
+                                frame_ts,
+                                target_url=cfg.server_url,
+                            )
                         self._audio_sent += 1
 
             except asyncio.CancelledError:
@@ -834,5 +843,10 @@ class FishermanDaemon:
             await self._streamer.send(frame, ocr_text, urls, routing=routing)
         elif self._upload_queue is not None:
             payload, frame_ts = build_frame_payload(frame, ocr_text, urls, routing)
-            self._upload_queue.append("frame", payload, frame_ts)
+            self._upload_queue.append(
+                "frame",
+                payload,
+                frame_ts,
+                target_url=self._config.server_url,
+            )
         self._frames_sent += 1

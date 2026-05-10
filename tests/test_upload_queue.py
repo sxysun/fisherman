@@ -29,6 +29,21 @@ class UploadQueueTests(unittest.TestCase):
             self.assertEqual(reopened.count(), 1)
             reopened.close()
 
+    def test_target_url_filters_pending_items(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "upload.sqlite")
+            q = UploadQueue(path, max_items=10)
+            q.append("frame", json.dumps({"n": 1}), 1.0, target_url="wss://cloud/ingest")
+            q.append("frame", json.dumps({"n": 2}), 2.0, target_url="ws://self/ingest")
+
+            cloud_rows = q.peek(10, target_url="wss://cloud/ingest")
+            self.assertEqual([json.loads(row.payload)["n"] for row in cloud_rows], [1])
+            self.assertEqual(cloud_rows[0].target_url, "wss://cloud/ingest")
+            self.assertEqual(q.count(target_url="wss://cloud/ingest"), 1)
+            self.assertEqual(q.count(target_url="ws://self/ingest"), 1)
+            self.assertEqual(q.count(), 2)
+            q.close()
+
 
 if __name__ == "__main__":
     unittest.main()

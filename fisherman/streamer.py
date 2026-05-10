@@ -144,7 +144,7 @@ class Streamer:
     @property
     def upload_queue_pending(self) -> int:
         if self._upload_queue is not None:
-            return self._upload_queue.count()
+            return self._upload_queue.count(target_url=self._url)
         return self._queue.qsize()
 
     async def start(self) -> None:
@@ -173,7 +173,7 @@ class Streamer:
     ) -> None:
         payload, frame_ts = build_frame_payload(frame, ocr_text, urls, routing)
         if self._upload_queue is not None:
-            self._upload_queue.append("frame", payload, frame_ts)
+            self._upload_queue.append("frame", payload, frame_ts, target_url=self._url)
             self._queue_wakeup.set()
             return
         if self._queue.full():
@@ -203,7 +203,7 @@ class Streamer:
             is_input_device=is_input_device,
         )
         if self._upload_queue is not None:
-            self._upload_queue.append("audio", msg, frame_ts)
+            self._upload_queue.append("audio", msg, frame_ts, target_url=self._url)
             self._queue_wakeup.set()
             return
         if self._queue.full():
@@ -251,7 +251,7 @@ class Streamer:
         assert self._upload_queue is not None
         while True:
             await self._connected_event.wait()
-            items = self._upload_queue.peek(1)
+            items = self._upload_queue.peek(1, target_url=self._url)
             if not items:
                 self._queue_wakeup.clear()
                 try:

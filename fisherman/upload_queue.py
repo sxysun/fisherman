@@ -22,6 +22,7 @@ class UploadQueueItem:
     payload: str
     frame_ts: float | None
     attempts: int
+    target_url: str | None = None
 
 
 class UploadQueue:
@@ -43,6 +44,7 @@ class UploadQueue:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 kind TEXT NOT NULL,
                 frame_ts REAL,
+                target_url TEXT,
                 payload TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
@@ -54,38 +56,66 @@ class UploadQueue:
             CREATE INDEX IF NOT EXISTS idx_upload_queue_oldest
             ON upload_queue(id ASC)
         """)
+        cols = {
+            str(row["name"])
+            for row in self._db.execute("PRAGMA table_info(upload_queue)").fetchall()
+        }
+        if "target_url" not in cols:
+            self._db.execute("ALTER TABLE upload_queue ADD COLUMN target_url TEXT")
+        self._db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_upload_queue_target_oldest
+            ON upload_queue(target_url, id ASC)
+        """)
 
     @property
     def path(self) -> str:
         return str(self._path)
 
-    def append(self, kind: str, payload: str, frame_ts: float | None = None) -> int | None:
+    def append(
+        self,
+        kind: str,
+        payload: str,
+        frame_ts: float | None = None,
+        target_url: str | None = None,
+    ) -> int | None:
         if self._max_items == 0:
             return None
         now = time.time()
         with self._lock:
             cur = self._db.execute(
                 """
-                INSERT INTO upload_queue(kind, frame_ts, payload, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO upload_queue(kind, frame_ts, target_url, payload, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (kind, frame_ts, payload, now, now),
+                (kind, frame_ts, target_url, payload, now, now),
             )
             item_id = int(cur.lastrowid)
             self._trim_locked()
             return item_id
 
-    def peek(self, limit: int = 1) -> list[UploadQueueItem]:
+    def peek(self, limit: int = 1, target_url: str | None = None) -> list[UploadQueueItem]:
         with self._lock:
-            rows = self._db.execute(
-                """
-                SELECT id, kind, frame_ts, payload, attempts
-                FROM upload_queue
-                ORDER BY id ASC
-                LIMIT ?
-                """,
-                (max(1, int(limit)),),
-            ).fetchall()
+            if target_url is None:
+                rows = self._db.execute(
+                    """
+                    SELECT id, kind, frame_ts, target_url, payload, attempts
+                    FROM upload_queue
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (max(1, int(limit)),),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    """
+                    SELECT id, kind, frame_ts, target_url, payload, attempts
+                    FROM upload_queue
+                    WHERE target_url = ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (target_url, max(1, int(limit))),
+                ).fetchall()
         return [
             UploadQueueItem(
                 id=int(row["id"]),
@@ -93,6 +123,7 @@ class UploadQueue:
                 payload=str(row["payload"]),
                 frame_ts=(float(row["frame_ts"]) if row["frame_ts"] is not None else None),
                 attempts=int(row["attempts"]),
+                target_url=(str(row["target_url"]) if row["target_url"] is not None else None),
             )
             for row in rows
         ]
@@ -114,9 +145,15 @@ class UploadQueue:
                 (error[:500], time.time(), int(item_id)),
             )
 
-    def count(self) -> int:
+    def count(self, target_url: str | None = None) -> int:
         with self._lock:
-            row = self._db.execute("SELECT COUNT(*) AS n FROM upload_queue").fetchone()
+            if target_url is None:
+                row = self._db.execute("SELECT COUNT(*) AS n FROM upload_queue").fetchone()
+            else:
+                row = self._db.execute(
+                    "SELECT COUNT(*) AS n FROM upload_queue WHERE target_url = ?",
+                    (target_url,),
+                ).fetchone()
         return int(row["n"])
 
     def close(self) -> None:

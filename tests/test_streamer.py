@@ -83,6 +83,33 @@ class StreamerTests(unittest.IsolatedAsyncioTestCase):
                     await send_task
                 queue.close()
 
+    async def test_durable_queue_only_drains_current_backend_target(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            queue = UploadQueue(str(Path(td) / "upload.sqlite"), max_items=10)
+            queue.append(
+                "frame",
+                '{"type":"frame","n":1}',
+                1.0,
+                target_url="ws://old-backend/ingest",
+            )
+            streamer = Streamer("ws://new-backend/ingest", "", upload_queue=queue)
+            streamer._ws = AsyncMock()
+            streamer._connected = True
+            streamer._connected_event.set()
+
+            send_task = asyncio.create_task(streamer._durable_send_loop())
+            try:
+                await asyncio.sleep(0.05)
+                streamer._ws.send.assert_not_awaited()
+                self.assertEqual(queue.count(), 1)
+                self.assertEqual(queue.count(target_url="ws://old-backend/ingest"), 1)
+                self.assertEqual(streamer.upload_queue_pending, 0)
+            finally:
+                send_task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await send_task
+                queue.close()
+
 
 if __name__ == "__main__":
     unittest.main()
