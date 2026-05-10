@@ -598,6 +598,12 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(activity)
 
+    async def test_status_sanitizer_blocks_health_adjacent_terms(self):
+        ingest = _load_ingest_module()
+
+        self.assertEqual(ingest._sanitize_status("researching blood circulation"), "")
+        self.assertEqual(ingest._sanitize_status("checking cardiac symptoms"), "")
+
     async def test_owner_can_configure_status_llm_settings_on_backend(self):
         os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "open"
         ingest = _load_ingest_module()

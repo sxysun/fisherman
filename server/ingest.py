@@ -845,7 +845,9 @@ def _sanitize_status(status: str) -> str:
     # Health/medical keywords
     _health_terms = {'symptom', 'diagnosis', 'prescription', 'therapy', 'medication',
                      'doctor', 'hospital', 'clinic', 'webmd', 'mayo clinic', 'health',
-                     'medical', 'patient', 'surgery', 'disease'}
+                     'medical', 'patient', 'surgery', 'disease', 'blood', 'circulation',
+                     'heart', 'cardio', 'cardiac', 'mental health', 'depression',
+                     'anxiety', 'cancer', 'diabetes', 'pregnancy', 'fertility'}
     if any(term in status.lower() for term in _health_terms):
         return ""
     # Financial keywords
