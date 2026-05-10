@@ -160,7 +160,8 @@ struct SettingsView: View {
 
             if backendMode == "cloud" {
                 hintText("Managed by Fisherman. Service endpoints and encrypted friend-status relay are configured automatically.")
-                hintText("Private context is only sent after the Fisherman Cloud TEE audit passes and Cloud ingest is enabled for your account.")
+                hintText("Raw context is processed inside the attested Cloud CVM and encrypted at rest with a CVM-held key. This is not client-held end-to-end encryption from the Fisherman operator yet.")
+                hintText("Friend status uses separate end-to-end encryption to each friend; the relay does not receive plaintext status.")
             } else if backendMode == "self_hosted" {
                 fieldRow("Self-hosted URL", placeholder: "wss://your-server:9999/ingest", text: $selfHostedURL)
                 hintText("Use this when you run your own Fisherman server. One URL is enough; Fisherman derives the activity and history endpoints automatically.")
