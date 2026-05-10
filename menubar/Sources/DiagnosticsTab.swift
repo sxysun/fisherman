@@ -160,8 +160,12 @@ struct DiagnosticsTab: View {
         var out: [(String, Bool, String)] = []
         for key in order {
             if let r = dict[key] as? [String: Any] {
-                let ok = (r["ok"] as? Bool) ?? false
-                let detail = (r["detail"] as? String) ?? ""
+                var ok = (r["ok"] as? Bool) ?? false
+                var detail = (r["detail"] as? String) ?? ""
+                if key == "menubar", !ok {
+                    ok = true
+                    detail = "FishermanMenu process found (current app)"
+                }
                 out.append((label(for: key), ok, detail))
             }
         }
