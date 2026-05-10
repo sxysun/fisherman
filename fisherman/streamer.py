@@ -118,6 +118,7 @@ class Streamer:
         self._frames_sent = 0
         self._frames_dropped = 0
         self._last_uploaded_ts: float | None = None
+        self._last_error: str | None = None
         self._upload_queue = upload_queue
         self._queue_wakeup = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
@@ -140,6 +141,10 @@ class Streamer:
         upstream. The cleanup task uses this as a safety bound — only
         local rows with timestamp ≤ this can be safely deleted."""
         return self._last_uploaded_ts
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
 
     @property
     def upload_queue_pending(self) -> int:
@@ -297,6 +302,7 @@ class Streamer:
                     if not allowed:
                         self._connected = False
                         self._connected_event.clear()
+                        self._last_error = "connection blocked by client guard"
                         log.warning("websocket_connect_guard_blocked", backoff=backoff)
                         await asyncio.sleep(backoff)
                         backoff = min(backoff * 2, _MAX_BACKOFF)
@@ -317,6 +323,7 @@ class Streamer:
                     proxy=None,
                 )
                 self._connected = True
+                self._last_error = None
                 self._connected_event.set()
                 self._ever_connected = True
                 backoff = 1.0
@@ -332,9 +339,10 @@ class Streamer:
 
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as e:
                 self._connected = False
                 self._connected_event.clear()
+                self._last_error = str(e) or e.__class__.__name__
                 if not self._ever_connected:
                     log.error(
                         "server_unreachable",

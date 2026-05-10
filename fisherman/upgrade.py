@@ -583,13 +583,24 @@ def diagnose() -> dict:
     try:
         from fisherman.config import FishermanConfig
         cfg = FishermanConfig()
+        backend_ok = True
+        backend_bits = [
+            cfg.backend_summary,
+            f"ingest={'enabled' if cfg.streaming_enabled else 'disabled'}",
+            f"relay={cfg.status_relay_url}",
+        ]
+        if cfg.backend_mode in {"cloud", "self_hosted"} and not cfg.streaming_enabled:
+            backend_ok = False
+        if cfg.backend_mode == "cloud" and not cfg.streaming_enabled:
+            if cfg.cloud_ingest_block_detail:
+                backend_bits.append(cfg.cloud_ingest_block_detail)
+            elif cfg.cloud_ingest_block_reason:
+                backend_bits.append(cfg.cloud_ingest_block_reason)
+            else:
+                backend_bits.append("review Cloud release or finish account setup")
         out["backend"] = {
-            "ok": True,
-            "detail": (
-                f"{cfg.backend_summary}; "
-                f"ingest={'enabled' if cfg.streaming_enabled else 'disabled'}; "
-                f"relay={cfg.status_relay_url}"
-            ),
+            "ok": backend_ok,
+            "detail": "; ".join(backend_bits),
         }
         out["identity"] = {
             "ok": bool(cfg.private_key),

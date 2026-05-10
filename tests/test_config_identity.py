@@ -160,6 +160,65 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertEqual(cfg.backend_mode, "self_hosted")
             self.assertEqual(cfg.cloud_trust_policy, "strict")
 
+    def test_non_cloud_backend_config_clears_cloud_ingest_block_state(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            user_env = self._home_env(home)
+            user_env.write_text(
+                "FISH_BACKEND_MODE=cloud\n"
+                "FISH_BACKEND_URL=https://fisherman.teleport.computer\n"
+                "FISH_CLOUD_INGEST_STATUS=blocked\n"
+                "FISH_CLOUD_INGEST_BLOCK_REASON=cloud_account_not_enabled\n"
+                "FISH_CLOUD_INGEST_BLOCK_DETAIL=tenant is not enrolled\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = cli._persist_backend_config(
+                    mode="local",
+                    backend_url="",
+                )
+
+            written = user_env.read_text(encoding="utf-8")
+            self.assertNotIn("FISH_CLOUD_INGEST_STATUS=", written)
+            self.assertNotIn("FISH_CLOUD_INGEST_BLOCK_REASON=", written)
+            self.assertNotIn("FISH_CLOUD_INGEST_BLOCK_DETAIL=", written)
+            self.assertEqual(cfg.backend_mode, "local")
+
+    def test_cloud_backend_config_persists_account_block_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            user_env = self._home_env(home)
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = cli._persist_backend_config(
+                    mode="cloud",
+                    backend_url="https://fisherman.teleport.computer",
+                    cloud_ingest_status="blocked",
+                    cloud_ingest_block_reason="cloud_account_not_enabled",
+                    cloud_ingest_block_detail="tenant is not enrolled",
+                )
+
+            written = user_env.read_text(encoding="utf-8")
+            self.assertIn("FISH_CLOUD_INGEST_STATUS=blocked\n", written)
+            self.assertIn(
+                "FISH_CLOUD_INGEST_BLOCK_REASON=cloud_account_not_enabled\n",
+                written,
+            )
+            self.assertIn(
+                "FISH_CLOUD_INGEST_BLOCK_DETAIL=tenant is not enrolled\n",
+                written,
+            )
+            self.assertEqual(cfg.cloud_ingest_block_reason, "cloud_account_not_enabled")
+
     def test_cloud_mode_ignores_stale_self_hosted_server_url(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             home = Path(home_dir)

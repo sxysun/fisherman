@@ -944,6 +944,9 @@ def _persist_backend_config(
     relay_url: str | None = None,
     server_url: str | None = None,
     cloud_trust_policy: str | None = None,
+    cloud_ingest_status: str | None = None,
+    cloud_ingest_block_reason: str | None = None,
+    cloud_ingest_block_detail: str | None = None,
 ) -> FishermanConfig:
     from fisherman import config as _cfg
 
@@ -960,6 +963,27 @@ def _persist_backend_config(
         _cfg.persist_user_env_var("FISH_CLOUD_TRUST_POLICY", cloud_trust_policy)
     elif mode != "cloud":
         _cfg.persist_user_env_var("FISH_CLOUD_TRUST_POLICY", "strict")
+    if mode == "cloud":
+        if cloud_ingest_status is not None:
+            _cfg.persist_user_env_var("FISH_CLOUD_INGEST_STATUS", cloud_ingest_status)
+        if cloud_ingest_block_reason:
+            _cfg.persist_user_env_var(
+                "FISH_CLOUD_INGEST_BLOCK_REASON",
+                cloud_ingest_block_reason,
+            )
+        else:
+            _cfg.remove_user_env_var("FISH_CLOUD_INGEST_BLOCK_REASON")
+        if cloud_ingest_block_detail:
+            _cfg.persist_user_env_var(
+                "FISH_CLOUD_INGEST_BLOCK_DETAIL",
+                cloud_ingest_block_detail,
+            )
+        else:
+            _cfg.remove_user_env_var("FISH_CLOUD_INGEST_BLOCK_DETAIL")
+    else:
+        _cfg.remove_user_env_var("FISH_CLOUD_INGEST_STATUS")
+        _cfg.remove_user_env_var("FISH_CLOUD_INGEST_BLOCK_REASON")
+        _cfg.remove_user_env_var("FISH_CLOUD_INGEST_BLOCK_DETAIL")
     return FishermanConfig()
 
 
@@ -977,6 +1001,11 @@ def backend_status(as_json: bool):
         "mode": cfg.backend_mode,
         "backend_url": cfg.backend_url,
         "cloud_trust_policy": cfg.cloud_trust_policy,
+        "cloud_ingest": {
+            "status": cfg.cloud_ingest_status,
+            "block_reason": cfg.cloud_ingest_block_reason,
+            "block_detail": cfg.cloud_ingest_block_detail,
+        },
         "ingest_url": cfg.server_url if cfg.streaming_enabled else None,
         "streaming_enabled": cfg.streaming_enabled,
         "status_relay_url": cfg.status_relay_url,
@@ -992,6 +1021,8 @@ def backend_status(as_json: bool):
     click.echo(f"backend:    {cfg.backend_summary}")
     if cfg.backend_mode == "cloud":
         click.echo(f"trust:      {cfg.cloud_trust_policy}")
+        if not cfg.streaming_enabled and cfg.cloud_ingest_block_detail:
+            click.echo(f"cloud:      {cfg.cloud_ingest_block_detail}")
     click.echo(f"ingest:     {out['ingest_url'] or 'disabled'}")
     click.echo(f"relay:      {cfg.status_relay_url}")
     click.echo(f"identity:   {'yes' if cfg.private_key else 'NO'}")
@@ -1108,26 +1139,51 @@ def backend_configure_cloud(
             sys.exit(1)
 
     capabilities = _cloud_capability_health(url, timeout=timeout)
+    ingest_detail = None
     ingest_ready = bool(
         isinstance(capabilities, dict)
         and isinstance(capabilities.get("ingest"), dict)
         and capabilities["ingest"].get("ready") is True
     )
+    if isinstance(capabilities, dict) and isinstance(capabilities.get("ingest"), dict):
+        ingest = capabilities["ingest"]
+        missing = ingest.get("missing") or []
+        if missing:
+            ingest_detail = "Cloud ingest is missing: " + ", ".join(map(str, missing))
+        else:
+            detail = ingest.get("detail")
+            ingest_detail = f"Cloud ingest is not ready: {detail}" if detail else None
+    elif capabilities is None:
+        ingest_detail = "Cloud health check did not respond"
     account_ready = False
     account_detail = None
     if ingest_ready:
         account_ready, account_detail = _cloud_account_ready(url, timeout=timeout)
+    if ingest_ready and account_ready:
+        block_reason = None
+        block_detail = None
+    elif not ingest_ready:
+        block_reason = "cloud_ingest_not_ready"
+        block_detail = ingest_detail or "Cloud ingest is not ready yet"
+    else:
+        block_reason = "cloud_account_not_enabled"
+        block_detail = account_detail or "Cloud account is not enabled for this identity"
     cfg = _persist_backend_config(
         mode="cloud",
         backend_url=url,
         relay_url=relay_url,
         server_url=ingest_url_from_backend_url(url) if ingest_ready and account_ready else None,
         cloud_trust_policy="dangerously_skip" if dangerously_allow_unaudited_ingest else "strict",
+        cloud_ingest_status="enabled" if ingest_ready and account_ready else "blocked",
+        cloud_ingest_block_reason=block_reason,
+        cloud_ingest_block_detail=block_detail,
     )
     click.echo("configured backend: Fisherman Cloud")
     click.echo(f"  backend: {cfg.backend_url}")
     click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until Cloud ingest is enabled for this account'}")
     click.echo(f"  account: {'enabled' if account_ready else account_detail or 'not checked'}")
+    if block_detail:
+        click.echo(f"  action:  {block_detail}")
     click.echo(f"  relay:   {cfg.status_relay_url}")
     if trust_record:
         compose = trust_record.get("compose_hash") or "?"

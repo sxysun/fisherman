@@ -140,12 +140,27 @@ struct SettingsView: View {
                         config.serverURL = savedCloudURL.hasPrefix("ws://") || savedCloudURL.hasPrefix("wss://")
                             ? ingestURL(from: savedCloudURL)
                             : (hadApprovedCloudIngest ? expectedIngestURL : defaultServerURL)
+                        if config.serverURL == expectedIngestURL {
+                            config.cloudIngestStatus = "enabled"
+                            config.cloudIngestBlockReason = ""
+                            config.cloudIngestBlockDetail = ""
+                        } else if normalizeCloudURL(savedCloudURL) != normalizeCloudURL(previousBackendURL) {
+                            config.cloudIngestStatus = "blocked"
+                            config.cloudIngestBlockReason = "cloud_approval_required"
+                            config.cloudIngestBlockDetail = "Review and approve this Cloud release before raw uploads start."
+                        }
                     } else if backendMode == "self_hosted" {
                         config.backendURL = trimmedSelfHostedURL
                         config.serverURL = ingestURL(from: trimmedSelfHostedURL)
+                        config.cloudIngestStatus = ""
+                        config.cloudIngestBlockReason = ""
+                        config.cloudIngestBlockDetail = ""
                     } else {
                         config.backendURL = ""
                         config.serverURL = defaultServerURL
+                        config.cloudIngestStatus = ""
+                        config.cloudIngestBlockReason = ""
+                        config.cloudIngestBlockDetail = ""
                     }
                     config.statusRelayURL = statusRelayURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     config.cloudTrustPolicy = (backendMode == "cloud" && dangerouslySkipCloudAttestation) ? "dangerously_skip" : "strict"
@@ -249,6 +264,8 @@ struct SettingsView: View {
 
             hintText("Review fetches the live TEE quote and compares compose hash, release git, image digest, app identity, and TLS binding against this Mac's approved record.")
 
+            cloudRuntimePanel
+
             if let cloudReview {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
@@ -305,6 +322,17 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .lineLimit(4)
+                if !cloudIngestEnabled {
+                    HStack {
+                        Spacer()
+                        Button(approvingCloud ? "Checking..." : "Finish Setup") {
+                            approveCloud()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(approvingCloud || reviewingCloud)
+                    }
+                }
             }
 
             if let cloudApprovalStatus {
@@ -328,6 +356,59 @@ struct SettingsView: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
         }
+    }
+
+    private var cloudRuntimePanel: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: cloudIngestEnabled ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                .foregroundStyle(cloudIngestEnabled ? Color.green : Color.orange)
+                .font(.system(size: 11))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(cloudRuntimeTitle)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(cloudRuntimeDetail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(8)
+        .background(Color.secondary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var cloudIngestEnabled: Bool {
+        backendMode == "cloud" && serverURL == ingestURL(from: currentCloudURL())
+    }
+
+    private var cloudRuntimeTitle: String {
+        if cloudIngestEnabled {
+            return "Cloud upload enabled"
+        }
+        switch config.cloudIngestBlockReason {
+        case "cloud_account_not_enabled":
+            return "Cloud account not enabled"
+        case "cloud_ingest_not_ready":
+            return "Cloud ingest not ready"
+        case "cloud_approval_required":
+            return "Cloud release needs review"
+        default:
+            return cloudTrustSummary == nil ? "Cloud release needs review" : "Cloud setup incomplete"
+        }
+    }
+
+    private var cloudRuntimeDetail: String {
+        if cloudIngestEnabled {
+            return "New raw context uploads to the approved Cloud release. Queued frames drain automatically while the daemon is running."
+        }
+        if !config.cloudIngestBlockDetail.isEmpty {
+            return config.cloudIngestBlockDetail
+        }
+        if cloudTrustSummary == nil {
+            return "Review the live release first. Until approval, Fisherman captures locally and queues Cloud uploads."
+        }
+        return "The release is approved, but this Mac has not finished account setup. Click Finish Setup; if it still fails, use Local Only or Self-hosted until the Cloud account is active."
     }
 
     // MARK: - Identity tab
@@ -862,7 +943,13 @@ struct SettingsView: View {
                     serverURL = config.serverURL
                     loadCloudTrustSummary()
                     cloudReview = nil
-                    cloudApprovalStatus = "Approved. Raw Cloud uploads are allowed for this release; restart the daemon if it was already running."
+                    if config.serverURL == ingestURL(from: savedCloudURL) {
+                        cloudApprovalStatus = "Approved and enabled. Queued frames will upload while the daemon is running."
+                    } else if !config.cloudIngestBlockDetail.isEmpty {
+                        cloudApprovalStatus = "Release approved, but upload is still blocked: \(config.cloudIngestBlockDetail)"
+                    } else {
+                        cloudApprovalStatus = "Release approved, but Cloud upload is not enabled for this account yet."
+                    }
                 } else {
                     let detail = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
                     cloudApprovalStatus = detail.isEmpty ? "Approval failed" : detail
@@ -1003,7 +1090,7 @@ struct SettingsView: View {
             return cloudReview.cloudRequiredOK ? "Ready to approve" : "Audit failed"
         }
         if cloudTrustSummary != nil {
-            return "Approved"
+            return cloudIngestEnabled ? "Approved and enabled" : "Approved, setup pending"
         }
         return "Not approved"
     }
@@ -1015,7 +1102,10 @@ struct SettingsView: View {
         if reviewingCloud || approvingCloud {
             return .orange
         }
-        return cloudTrustSummary == nil ? .orange : .green
+        if cloudTrustSummary == nil || !cloudIngestEnabled {
+            return .orange
+        }
+        return .green
     }
 
     private func loadCloudTrustSummary() {

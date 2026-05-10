@@ -237,6 +237,9 @@ class FishermanConfig(BaseSettings):
     backend_mode: str = "auto"
     backend_url: str = ""
     cloud_trust_policy: str = "strict"  # strict | dangerously_skip
+    cloud_ingest_status: str = ""  # enabled | blocked | ""
+    cloud_ingest_block_reason: str = ""
+    cloud_ingest_block_detail: str = ""
     server_url: str = DEFAULT_SERVER_URL  # ingest URL derived from backend_url
     private_key: str = ""  # ed25519 private key (hex)
     activity_port: int = 9998  # HTTP API port (used by menu bar, ignored by daemon)

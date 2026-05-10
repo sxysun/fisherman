@@ -154,7 +154,7 @@ struct DiagnosticsTab: View {
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         // Stable presentation order regardless of dict iteration order.
-        let order = ["menubar", "daemon", "status_relay", "screenpipe_binary",
+        let order = ["backend", "identity", "menubar", "daemon", "status_relay", "screenpipe_binary",
                      "screenpipe_process", "screenpipe_http",
                      "app_bundle", "screenpipe_db"]
         var out: [(String, Bool, String)] = []
@@ -182,6 +182,8 @@ struct DiagnosticsTab: View {
 
     nonisolated private static func label(for key: String) -> String {
         switch key {
+        case "backend":           return "Context home"
+        case "identity":          return "Identity"
         case "menubar":            return "Menu bar app"
         case "daemon":             return "Daemon (control port)"
         case "status_relay":       return "Status relay"

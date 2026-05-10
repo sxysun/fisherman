@@ -27,6 +27,9 @@ final class ConfigManager {
     var backendMode: String = "local"
     var backendURL: String = ""
     var cloudTrustPolicy: String = "strict"
+    var cloudIngestStatus: String = ""
+    var cloudIngestBlockReason: String = ""
+    var cloudIngestBlockDetail: String = ""
     var statusRelayURL: String = "https://relay.fisherman.teleport.computer"
     var serverURL: String = "ws://localhost:9999/ingest"
     var controlPort: String = "7892"
@@ -132,6 +135,27 @@ final class ConfigManager {
                     loadedAnyManagedValue = true
                 }
                 if trackLines { knownKeyLines["FISH_CLOUD_TRUST_POLICY", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_CLOUD_INGEST_STATUS") {
+                if shouldLoad("FISH_CLOUD_INGEST_STATUS", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    cloudIngestStatus = value
+                    loadedKeys.insert("FISH_CLOUD_INGEST_STATUS")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_CLOUD_INGEST_STATUS", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_CLOUD_INGEST_BLOCK_REASON") {
+                if shouldLoad("FISH_CLOUD_INGEST_BLOCK_REASON", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    cloudIngestBlockReason = value
+                    loadedKeys.insert("FISH_CLOUD_INGEST_BLOCK_REASON")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_CLOUD_INGEST_BLOCK_REASON", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_CLOUD_INGEST_BLOCK_DETAIL") {
+                if shouldLoad("FISH_CLOUD_INGEST_BLOCK_DETAIL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    cloudIngestBlockDetail = value
+                    loadedKeys.insert("FISH_CLOUD_INGEST_BLOCK_DETAIL")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_CLOUD_INGEST_BLOCK_DETAIL", default: []].append(i) }
             } else if let value = extractValue(trimmed, key: "FISH_STATUS_RELAY_URL") {
                 if shouldLoad("FISH_STATUS_RELAY_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
                     statusRelayURL = value
@@ -243,6 +267,9 @@ final class ConfigManager {
             ("FISH_BACKEND_MODE", backendMode),
             ("FISH_BACKEND_URL", backendURL),
             ("FISH_CLOUD_TRUST_POLICY", cloudTrustPolicy),
+            ("FISH_CLOUD_INGEST_STATUS", backendMode == "cloud" ? cloudIngestStatus : ""),
+            ("FISH_CLOUD_INGEST_BLOCK_REASON", backendMode == "cloud" ? cloudIngestBlockReason : ""),
+            ("FISH_CLOUD_INGEST_BLOCK_DETAIL", backendMode == "cloud" ? cloudIngestBlockDetail : ""),
             ("FISH_STATUS_RELAY_URL", statusRelayURL),
             ("FISH_CONTROL_PORT", controlPort),
             ("FISH_STATUS_LLM_MODE", statusLLMMode),
@@ -263,7 +290,17 @@ final class ConfigManager {
 
         // Track which line indices to delete (duplicates of any tracked key)
         var indicesToDelete = Set<Int>()
-        for key in persistServerURL ? [] : ["FISH_SERVER_URL"] {
+        var keysToDelete = persistServerURL ? [] : ["FISH_SERVER_URL"]
+        if backendMode != "cloud" || cloudIngestStatus.isEmpty {
+            keysToDelete.append("FISH_CLOUD_INGEST_STATUS")
+        }
+        if backendMode != "cloud" || cloudIngestBlockReason.isEmpty {
+            keysToDelete.append("FISH_CLOUD_INGEST_BLOCK_REASON")
+        }
+        if backendMode != "cloud" || cloudIngestBlockDetail.isEmpty {
+            keysToDelete.append("FISH_CLOUD_INGEST_BLOCK_DETAIL")
+        }
+        for key in keysToDelete {
             for index in knownKeyLines[key] ?? [] {
                 indicesToDelete.insert(index)
             }
@@ -290,7 +327,7 @@ final class ConfigManager {
             }
         }
 
-        for (key, value) in updates where !keysWritten.contains(key) {
+        for (key, value) in updates where !keysWritten.contains(key) && !value.isEmpty {
             outputLines.append("\(key)=\(value)")
         }
 

@@ -89,6 +89,10 @@ final class AppState {
     var framesDropped: Int = 0
     var uploadQueuePending: Int = 0
     var uploadQueueUnbound: Int = 0
+    var backendBlockCode: String?
+    var backendBlockDetail: String?
+    var backendBlockAction: String?
+    var streamError: String?
 
     // Pause
     var isPaused = false
@@ -139,10 +143,10 @@ final class AppState {
             return "down"
         }
         if streamingEnabled {
-            return fishermanConnected ? "uploading" : "ingest down"
+            return fishermanConnected ? "uploading" : disconnectedServiceLabel
         }
         if backendMode == "cloud" {
-            return "cloud ingest off"
+            return blockedServiceLabel
         }
         if backendMode == "self_hosted" {
             return "ingest disabled"
@@ -195,15 +199,71 @@ final class AppState {
     private var backendStatusDetail: String? {
         guard fishermanRunning else { return nil }
         if streamingEnabled && !fishermanConnected {
-            return "Ingest disconnected"
+            return backendBlockDetail ?? disconnectedStatusText
         }
         if !streamingEnabled && backendMode == "cloud" {
-            return "Cloud ingest off"
+            return backendBlockDetail ?? "Cloud setup incomplete"
         }
         if !streamingEnabled && backendMode == "self_hosted" {
             return "Ingest disabled"
         }
         return nil
+    }
+
+    var backendStatusHelpText: String? {
+        guard status == .degraded else { return nil }
+        if let detail = backendBlockDetail, !detail.isEmpty {
+            if let action = backendBlockAction, !action.isEmpty {
+                return "\(detail) \(action)."
+            }
+            return detail
+        }
+        if streamingEnabled && !fishermanConnected {
+            return disconnectedStatusText
+        }
+        return nil
+    }
+
+    private var blockedServiceLabel: String {
+        switch backendBlockCode {
+        case "cloud_approval_required", "cloud_attestation_failed", "cloud_attestation_unreachable":
+            return "approval needed"
+        case "cloud_account_not_enabled":
+            return "account pending"
+        case "cloud_ingest_not_ready":
+            return "cloud not ready"
+        default:
+            return "cloud setup needed"
+        }
+    }
+
+    private var disconnectedServiceLabel: String {
+        switch backendBlockCode {
+        case "cloud_approval_required", "cloud_attestation_failed", "cloud_attestation_unreachable":
+            return "approval needed"
+        case "cloud_account_not_enabled":
+            return "account pending"
+        case "cloud_ingest_not_ready":
+            return "cloud not ready"
+        default:
+            if backendMode == "cloud", let streamError, streamError.contains("403") {
+                return "account rejected"
+            }
+            return backendMode == "self_hosted" ? "server down" : "ingest down"
+        }
+    }
+
+    private var disconnectedStatusText: String {
+        if backendMode == "cloud", let streamError, streamError.contains("403") {
+            return "Cloud account is not enabled"
+        }
+        if backendMode == "cloud" {
+            return "Cloud ingest disconnected"
+        }
+        if backendMode == "self_hosted" {
+            return "Self-hosted ingest disconnected"
+        }
+        return "Ingest disconnected"
     }
 
     func update(screenpipeOK: Bool, fishermanStatus: [String: Any]?) {
@@ -219,6 +279,10 @@ final class AppState {
             framesDropped = s["frames_dropped"] as? Int ?? 0
             uploadQueuePending = s["upload_queue_pending"] as? Int ?? 0
             uploadQueueUnbound = s["upload_queue_unbound"] as? Int ?? 0
+            backendBlockCode = s["backend_block_code"] as? String
+            backendBlockDetail = s["backend_block_detail"] as? String
+            backendBlockAction = s["backend_block_action"] as? String
+            streamError = s["stream_error"] as? String
             isPaused = s["paused"] as? Bool ?? false
             errorDetail = s["error"] as? String
         } else {
@@ -227,6 +291,10 @@ final class AppState {
             framesStreamed = 0
             uploadQueuePending = 0
             uploadQueueUnbound = 0
+            backendBlockCode = nil
+            backendBlockDetail = nil
+            backendBlockAction = nil
+            streamError = nil
         }
 
         // Derive overall status

@@ -91,6 +91,32 @@ class BackendModeTests(unittest.TestCase):
         self.assertEqual(status["backend_mode"], "cloud")
         self.assertFalse(status["streaming_enabled"])
         self.assertEqual(status["upload_queue_pending"], 0)
+        self.assertEqual(status["backend_block_code"], "cloud_approval_required")
+
+    def test_cloud_daemon_surfaces_persisted_account_block_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            missing_project = home / "missing" / ".env"
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = FishermanConfig(
+                    backend_mode="cloud",
+                    backend_url="https://fisherman.teleport.computer",
+                    cloud_ingest_status="blocked",
+                    cloud_ingest_block_reason="cloud_account_not_enabled",
+                    cloud_ingest_block_detail="tenant is not enrolled",
+                    frames_dir=str(home / "frames"),
+                    audio_dir=str(home / "audio"),
+                    upload_queue_path=str(home / "upload.sqlite"),
+                )
+                daemon = FishermanDaemon(cfg)
+
+        status = daemon._get_status()
+        self.assertEqual(status["backend_block_code"], "cloud_account_not_enabled")
+        self.assertEqual(status["backend_block_detail"], "tenant is not enrolled")
+        self.assertEqual(status["backend_block_action"], "Open Settings > Context Home")
 
     def test_cloud_daemon_without_ingest_persists_frames_to_queue(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:

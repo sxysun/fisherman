@@ -105,6 +105,25 @@ struct ExpandedContent: View {
                 label: state.fishermanServiceLabel
             )
 
+            if let help = state.backendStatusHelpText {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text(help)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                    Spacer()
+                    Button("Fix") {
+                        onSettings()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+                .padding(.leading, 18)
+            }
+
             Divider()
 
             // Hangout suggestion

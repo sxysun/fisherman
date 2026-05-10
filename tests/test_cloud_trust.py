@@ -226,6 +226,33 @@ class CloudTrustTests(unittest.TestCase):
 
         self.assertFalse(verify_mock.call_args.kwargs["allow_bootstrap"])
 
+    def test_daemon_cloud_guard_reports_approval_required(self) -> None:
+        from fisherman.config import FishermanConfig
+        from fisherman.daemon import FishermanDaemon
+
+        cfg = FishermanConfig(
+            backend_mode="cloud",
+            backend_url="https://fisherman.teleport.computer",
+            server_url="wss://fisherman.teleport.computer/ingest",
+            private_key="11" * 32,
+            _env_file=(),
+        )
+        failure = cloud_trust.CloudTrustVerification(
+            ok=False,
+            reason="live deploy changed",
+            failures=("compose_hash changed",),
+        )
+        daemon = FishermanDaemon(cfg)
+        with mock.patch(
+            "fisherman.cloud_trust.verify_or_approve",
+            return_value=failure,
+        ):
+            self.assertFalse(daemon._cloud_connect_guard())
+
+        status = daemon._get_status()
+        self.assertEqual(status["backend_block_code"], "cloud_approval_required")
+        self.assertIn("compose_hash changed", status["backend_block_detail"])
+
     def test_cli_secret_cloud_requests_require_explicit_trust_record(self) -> None:
         from click import ClickException
         from fisherman import cli

@@ -16,7 +16,7 @@ from fisherman import storage_config
 from fisherman.audio_store import AudioStore
 from fisherman.blob_store import from_config as blob_store_from_config
 from fisherman.capture import capture_screen
-from fisherman.config import FishermanConfig, ingest_url_from_backend_url
+from fisherman.config import DEFAULT_SERVER_URL, FishermanConfig, ingest_url_from_backend_url
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
@@ -57,6 +57,9 @@ class FishermanDaemon:
         self._capture_backend = (config.capture_backend or "native").strip().lower()
         self._running = False
         self._capture_ok = False
+        self._backend_block_code: str | None = None
+        self._backend_block_detail: str | None = None
+        self._backend_block_action: str | None = None
         self._differ = FrameDiffer(threshold=config.diff_threshold)
         self._privacy = PrivacyFilter(config)
         self._router = TierRouter(config)
@@ -122,6 +125,7 @@ class FishermanDaemon:
             except Exception:
                 log.warning("invalid_private_key_for_relay", exc_info=True)
         self._mirror_sync: MirrorSync | None = None
+        self._initialize_backend_block_state()
 
     def _upload_target_url(self) -> str:
         """Backend URL used to tag durable outbox rows.
@@ -135,12 +139,70 @@ class FishermanDaemon:
             return ingest_url_from_backend_url(self._config.backend_url)
         return self._config.server_url
 
+    def _set_backend_block(
+        self,
+        code: str | None,
+        detail: str | None = None,
+        action: str | None = None,
+    ) -> None:
+        self._backend_block_code = code
+        self._backend_block_detail = detail
+        self._backend_block_action = action
+
+    def _initialize_backend_block_state(self) -> None:
+        if self._config.backend_mode != "cloud":
+            return
+        if self._streamer is not None:
+            return
+
+        reason = (self._config.cloud_ingest_block_reason or "").strip()
+        detail = (self._config.cloud_ingest_block_detail or "").strip()
+        if reason:
+            self._set_backend_block(
+                reason,
+                detail or self._default_backend_block_detail(reason),
+                "Open Settings > Context Home",
+            )
+            return
+
+        if self._config.server_url == DEFAULT_SERVER_URL:
+            try:
+                from fisherman import cloud_trust
+
+                trusted = cloud_trust.load_trust() is not None
+            except Exception:
+                trusted = False
+            if trusted:
+                self._set_backend_block(
+                    "cloud_account_not_enabled",
+                    "Cloud release is approved, but this account is not enabled yet.",
+                    "Open Settings > Context Home > Finish Setup",
+                )
+            else:
+                self._set_backend_block(
+                    "cloud_approval_required",
+                    "Review and approve Fisherman Cloud before raw uploads start.",
+                    "Open Settings > Context Home > Review Release",
+                )
+
+    def _default_backend_block_detail(self, code: str) -> str:
+        if code == "cloud_account_not_enabled":
+            return "Cloud account is not enabled for this identity."
+        if code == "cloud_ingest_not_ready":
+            return "Fisherman Cloud ingest is not ready yet."
+        if code == "cloud_approval_required":
+            return "Review and approve Fisherman Cloud before raw uploads start."
+        if code == "cloud_attestation_failed":
+            return "Cloud attestation failed; raw uploads are blocked."
+        return "Cloud uploads are blocked."
+
     def _cloud_connect_guard(self) -> bool:
         """Re-check Cloud trust before every websocket connect/reconnect."""
         if self._config.backend_mode != "cloud":
             return True
         if self._config.cloud_trust_policy == "dangerously_skip":
             log.warning("cloud_trust_dangerously_skipped")
+            self._set_backend_block(None)
             return True
         try:
             from fisherman import cloud_trust
@@ -152,13 +214,30 @@ class FishermanDaemon:
             )
         except Exception:
             log.warning("cloud_trust_recheck_failed", exc_info=True)
+            self._set_backend_block(
+                "cloud_attestation_unreachable",
+                "Could not verify the live Fisherman Cloud release. Uploads are queued locally.",
+                "Open Settings > Context Home > Review Release",
+            )
             return False
         if result.ok:
+            self._set_backend_block(None)
             return True
+        code = "cloud_approval_required"
+        if "attestation" in result.reason.lower():
+            code = "cloud_attestation_failed"
         log.warning(
             "cloud_trust_recheck_blocked",
             reason=result.reason,
             failures=list(result.failures),
+        )
+        detail = result.reason
+        if result.failures:
+            detail = f"{detail}: {result.failures[0]}"
+        self._set_backend_block(
+            code,
+            detail,
+            "Open Settings > Context Home > Review Release",
         )
         return False
 
@@ -527,6 +606,10 @@ class FishermanDaemon:
                 self._upload_queue.count_unbound() if self._upload_queue is not None else 0
             ),
             "connected": self._streamer.connected if self._streamer else False,
+            "backend_block_code": self._backend_block_code,
+            "backend_block_detail": self._backend_block_detail,
+            "backend_block_action": self._backend_block_action,
+            "stream_error": self._streamer.last_error if self._streamer else None,
             "on_battery": on_battery(),
             "capture_interval": self._get_interval(),
             "capture_backend": self._capture_backend,
