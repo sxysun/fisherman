@@ -107,13 +107,22 @@ struct SettingsView: View {
                 Button("Save") {
                     let trimmedSelfHostedURL = selfHostedURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     let trimmedCloudURL = cloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let previousBackendMode = config.backendMode
+                    let previousBackendURL = config.backendURL.isEmpty ? defaultCloudURL : config.backendURL
+                    let previousServerURL = config.serverURL
                     config.backendMode = backendMode
                     if backendMode == "cloud" {
                         let savedCloudURL = trimmedCloudURL.isEmpty ? defaultCloudURL : trimmedCloudURL
+                        let expectedIngestURL = ingestURL(from: savedCloudURL)
+                        let previousExpectedIngestURL = ingestURL(from: previousBackendURL)
+                        let hadApprovedCloudIngest =
+                            previousBackendMode == "cloud" &&
+                            savedCloudURL == previousBackendURL &&
+                            previousServerURL == previousExpectedIngestURL
                         config.backendURL = savedCloudURL
                         config.serverURL = savedCloudURL.hasPrefix("ws://") || savedCloudURL.hasPrefix("wss://")
                             ? ingestURL(from: savedCloudURL)
-                            : defaultServerURL
+                            : (hadApprovedCloudIngest ? expectedIngestURL : defaultServerURL)
                     } else if backendMode == "self_hosted" {
                         config.backendURL = trimmedSelfHostedURL
                         config.serverURL = ingestURL(from: trimmedSelfHostedURL)
