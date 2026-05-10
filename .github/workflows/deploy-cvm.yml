@@ -207,19 +207,46 @@ jobs:
           CONTRACT:             ${{ vars.FISHERMAN_APP_AUTH_ETH_SEPOLIA }}
         run: |
           set -euo pipefail
+          HASH="0x${{ steps.hash.outputs.hash }}"
           if [[ -z "$CONTRACT" ]]; then
             echo "::warning::FISHERMAN_APP_AUTH_ETH_SEPOLIA not set; skipping on-chain step"
             exit 0
           fi
-          ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x${{ steps.hash.outputs.hash }}" \
-              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false")
-          if [[ "$ALLOWED" == "true" ]]; then
+
+          is_allowed() {
+            cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "$HASH" \
+              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false"
+          }
+
+          if [[ "$(is_allowed)" == "true" ]]; then
             echo "compose_hash already on-chain"
-          else
-            cast send "$CONTRACT" 'addComposeHash(bytes32)' "0x${{ steps.hash.outputs.hash }}" \
-                --rpc-url "$ETH_SEPOLIA_RPC_URL" \
-                --private-key "$OWNER_PK"
+            exit 0
           fi
+
+          send_args=(
+            "$CONTRACT" 'addComposeHash(bytes32)' "$HASH"
+            --rpc-url "$ETH_SEPOLIA_RPC_URL"
+            --private-key "$OWNER_PK"
+          )
+          if cast send "${send_args[@]}"; then
+            exit 0
+          fi
+
+          # GitHub runs can overlap with a previous AppAuth tx for the
+          # same owner. Recheck first; if still not authorized, resend
+          # with the latest nonce and a bumped gas price so Sepolia
+          # accepts the replacement instead of leaving Cloud in an
+          # upgraded-but-unauthorized state.
+          sleep 20
+          if [[ "$(is_allowed)" == "true" ]]; then
+            echo "compose_hash became allowed after initial send"
+            exit 0
+          fi
+
+          GAS_PRICE=$(cast gas-price --rpc-url "$ETH_SEPOLIA_RPC_URL")
+          BUMPED_GAS_PRICE=$(( GAS_PRICE * 2 ))
+          echo "resending compose_hash authorization with bumped gas price"
+          cast send "${send_args[@]}" --resend --gas-price "$BUMPED_GAS_PRICE"
 
       - name: Wait for Cloud + relay /health
         run: |
