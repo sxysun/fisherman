@@ -695,10 +695,17 @@ def _cloud_account_ready(url: str, *, timeout: float = 10.0) -> tuple[bool, str 
         return False, "identity key is not ready"
     try:
         auth, _pub = _fishkey_header(cfg.private_key)
+        from fisherman import keys as _keys
         req = urllib.request.Request(
             _backend_api_url(url, "/api/current_activity"),
             method="GET",
-            headers={"Authorization": auth, "Accept": "application/json"},
+            headers={
+                "Authorization": auth,
+                "Accept": "application/json",
+                "X-Fisherman-Tenant-Data-Key": _keys.cloud_tenant_data_key(
+                    bytes.fromhex(cfg.private_key)
+                ),
+            },
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if 200 <= resp.status < 300:
