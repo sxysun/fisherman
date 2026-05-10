@@ -173,7 +173,7 @@ struct SettingsView: View {
 
             if backendMode == "cloud" {
                 hintText("New context is stored and processed by Fisherman Cloud. Changing homes affects new uploads only; history is not copied automatically.")
-                hintText("Raw context is processed inside the attested Cloud CVM and encrypted at rest with a CVM-held key. This is not client-held end-to-end encryption from the Fisherman operator yet.")
+                hintText("Raw context is processed inside the approved Cloud CVM. Cloud stores ciphertext under your client-held tenant key; after a deploy or restart, the runtime cannot decrypt history again until an approved device reconnects.")
                 hintText("Friend status uses separate end-to-end encryption to each friend; the relay does not receive plaintext status.")
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
