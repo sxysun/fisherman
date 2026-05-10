@@ -330,9 +330,12 @@ class FakeStorage:
         self.uploads = []
         self.downloads = []
         self.download_bytes = b"legacy-jpeg"
+        self.fail_download = False
 
     def download(self, key: str, data_key: str | bytes | None = None) -> bytes:
         self.downloads.append({"key": key, "data_key": data_key})
+        if self.fail_download:
+            raise FileNotFoundError(key)
         return self.download_bytes
 
     def upload(
@@ -671,6 +674,61 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
             crypto.decrypt_text(db.users[pub_a]["status_llm_api_key"], client_key),
             "sk-old",
         )
+
+    async def test_cloud_migration_keeps_legacy_row_when_image_reencrypt_fails(self):
+        os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "open"
+        os.environ["FISH_CLOUD_KEY_MODE"] = "client_provided"
+        os.environ["FISH_CLOUD_LEGACY_DECRYPT_ENABLED"] = "1"
+        ingest = _load_ingest_module()
+        crypto = sys.modules["crypto"]
+        db = RecordingPool()
+        storage = FakeStorage()
+        storage.fail_download = True
+        pub_a = _pub_hex(SEED_A)
+        legacy_key = crypto.generate_data_key()
+        client_key = __import__("fisherman.keys", fromlist=["cloud_tenant_data_key"]).cloud_tenant_data_key(SEED_A)
+
+        db.users[pub_a] = {
+            "disabled_at": None,
+            "enrollment_state": "active",
+            "max_frames_per_hour": None,
+            "wrapped_data_key": crypto.wrap_data_key(legacy_key),
+            "data_key_source": "server_wrapped",
+            "status_llm_mode": "managed",
+            "status_llm_base_url": None,
+            "status_llm_model": None,
+            "status_llm_api_key": None,
+            "status_llm_key_source": "server_wrapped",
+        }
+        db.frames.append({
+            "id": 1,
+            "user_pubkey": pub_a,
+            "device_pubkey": pub_a,
+            "ts": datetime.datetime.now(datetime.timezone.utc),
+            "window": crypto.encrypt_text("legacy window", legacy_key),
+            "ocr_text": crypto.encrypt_text("legacy ocr", legacy_key),
+            "urls": crypto.encrypt_json([], legacy_key),
+            "activity": None,
+            "image_key": "missing.jpg.enc",
+            "data_key_source": "server_wrapped",
+        })
+
+        resp = await ingest._http_migrate_client_key(FakeRequest(
+            _fishkey(SEED_A),
+            db,
+            headers={"X-Fisherman-Tenant-Data-Key": client_key},
+            query={"limit": "10"},
+            storage=storage,
+        ))
+        body = json.loads(resp.text)
+
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body["migrated_frames"], 0)
+        self.assertEqual(body["remaining_frames"], 1)
+        self.assertEqual(body["image_errors"], 1)
+        self.assertFalse(body["wrapped_data_key_removed"])
+        self.assertEqual(db.frames[0]["data_key_source"], "server_wrapped")
+        self.assertIsNotNone(db.users[pub_a]["wrapped_data_key"])
 
     async def test_cloud_rejects_oversized_frame_image(self):
         ingest = _load_ingest_module()

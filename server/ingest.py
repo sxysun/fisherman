@@ -1593,6 +1593,7 @@ async def _http_migrate_client_key(request: "web.Request") -> "web.Response":
                 enc_activity = encrypt_json(activity, client_key)
 
             image_key = row["image_key"]
+            image_failed = False
             if image_key:
                 try:
                     jpeg_data = await loop.run_in_executor(
@@ -1611,12 +1612,15 @@ async def _http_migrate_client_key(request: "web.Request") -> "web.Response":
                     )
                 except Exception:
                     image_errors += 1
+                    image_failed = True
                     log.warning(
                         "cloud_client_key_migration_image_failed",
                         user=ctx.user_hex[:16],
                         frame_id=row["id"],
                         exc_info=True,
                     )
+            if image_failed:
+                continue
 
             async with db.acquire() as conn:
                 await conn.execute(
