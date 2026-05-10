@@ -133,17 +133,31 @@ jobs:
           CLOUD_EXTERNAL_LLM_ENABLED: ${{ vars.FISHERMAN_CLOUD_EXTERNAL_LLM_ENABLED }}
         run: |
           set -euo pipefail
-          IMAGE_COMMIT=$(git log -1 --pretty=%H -- fisherman mirror relay server pyproject.toml)
-          IMAGE_TAG="${IMAGE_COMMIT:0:7}"
-          if [[ -z "$IMAGE_TAG" ]]; then
-            echo "::error::no commit touching image-relevant paths found"
-            exit 1
-          fi
           IMAGE_REPO="ghcr.io/${{ github.repository_owner }}/fisherman-mirror"
           IMAGE_REPO=$(echo "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')
+          IMAGE_COMMIT=""
+          IMAGE_TAG=""
+          IMAGE_DIGEST=""
+          for candidate in $(git log -20 --pretty=%H -- fisherman mirror relay server pyproject.toml ':(exclude)mirror/deploy/DEPLOYMENTS.md'); do
+            candidate_tag="${candidate:0:7}"
+            candidate_ref="$IMAGE_REPO:$candidate_tag"
+            candidate_digest=$(docker buildx imagetools inspect "$candidate_ref" --format '{{json .}}' 2>/dev/null | jq -r '.manifest.digest // empty' || true)
+            if [[ "$candidate_digest" == sha256:* ]]; then
+              IMAGE_COMMIT="$candidate"
+              IMAGE_TAG="$candidate_tag"
+              IMAGE_DIGEST="$candidate_digest"
+              break
+            fi
+          done
+          if [[ -z "$IMAGE_TAG" ]]; then
+            echo "::error::no published image tag found for recent image-relevant commits"
+            exit 1
+          fi
           IMAGE_TAG_REF="$IMAGE_REPO:$IMAGE_TAG"
           echo "Resolving mirror image digest: $IMAGE_TAG_REF"
-          IMAGE_DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG_REF" --format '{{json .}}' | jq -r '.manifest.digest')
+          if [[ -z "$IMAGE_DIGEST" ]]; then
+            IMAGE_DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG_REF" --format '{{json .}}' | jq -r '.manifest.digest')
+          fi
           if [[ -z "$IMAGE_DIGEST" || "$IMAGE_DIGEST" == "null" || "$IMAGE_DIGEST" != sha256:* ]]; then
             echo "::error::could not resolve digest for $IMAGE_TAG_REF"
             exit 1
