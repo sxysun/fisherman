@@ -72,6 +72,12 @@ jobs:
                   failures.append("cloud requires on-chain compose_hash authorization")
               if res.tls_fingerprint_ok is not True:
                   failures.append("cloud requires TLS certificate fingerprint bound in attestation")
+              if not res.compose_hash:
+                  failures.append("cloud attestation did not report a compose_hash")
+              if not res.git_commit:
+                  failures.append("cloud requires release git_commit metadata")
+              if not res.image_digest or res.image_digest == "sha256:dev":
+                  failures.append("cloud requires immutable image_digest metadata")
               return failures
 
           mirror_url = os.environ["MIRROR_URL"]

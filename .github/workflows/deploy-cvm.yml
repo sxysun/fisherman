@@ -283,10 +283,40 @@ jobs:
         run: |
           python -m pip install --quiet "cryptography>=43.0"
           python <<'PY'
-          import os, sys
+          import hashlib
+          import os
+          import socket
+          import ssl
+          import sys
+          from urllib.parse import urlparse
           sys.path.insert(0, ".")
           from fisherman.attestation import verify_attestation
 
+          def live_tls_fingerprint(url: str, timeout: float = 15.0) -> str | None:
+              parsed = urlparse(url)
+              if parsed.scheme != "https" or not parsed.hostname:
+                  return None
+              ctx = ssl.create_default_context()
+              with socket.create_connection((parsed.hostname, parsed.port or 443), timeout=timeout) as sock:
+                  with ctx.wrap_socket(sock, server_hostname=parsed.hostname) as tls:
+                      return hashlib.sha256(tls.getpeercert(binary_form=True)).hexdigest()
+
+          def cloud_required_failures(res) -> list[str]:
+              failures = []
+              if not res.all_required_ok:
+                  failures.extend(res.errors or ["base attestation checks failed"])
+              if res.tls_fingerprint_ok is not True:
+                  failures.append("cloud requires TLS certificate fingerprint bound in attestation")
+              if not res.compose_hash:
+                  failures.append("cloud attestation did not report a compose_hash")
+              if not res.git_commit:
+                  failures.append("cloud requires release git_commit metadata")
+              if not res.image_digest or res.image_digest == "sha256:dev":
+                  failures.append("cloud requires immutable image_digest metadata")
+              return failures
+
+          mirror_url = f"https://{os.environ['MIRROR_DOMAIN']}"
+          live_tls_fp = live_tls_fingerprint(mirror_url)
           # On-chain authorization is already verified by the
           # "Publish compose_hash on-chain (idempotent)" step above —
           # if the new compose_hash isn't allowed, that step fails the
@@ -294,9 +324,10 @@ jobs:
           # CI's ETH_SEPOLIA_RPC_URL secret needs an auth header that
           # urllib doesn't replicate cleanly, and we'd just race.
           res = verify_attestation(
-              mirror_url=f"https://{os.environ['MIRROR_DOMAIN']}",
+              mirror_url=mirror_url,
               rpc_url=None,
               contract_address=None,
+              live_tls_cert_sha256_hex=live_tls_fp,
           )
           print("---- per-row results ----")
           for name, val in [
@@ -308,14 +339,20 @@ jobs:
               ("mr_config_id_binding",  res.mr_config_id_binding_ok),
               ("event_log_replay",      res.event_log_replay_ok),
               ("on_chain_allowed",      res.on_chain_allowed),
+              ("tls_fingerprint",       res.tls_fingerprint_ok),
           ]:
               print(f"  {name:<24} = {val}")
+          print(f"git_commit = {res.git_commit}")
+          print(f"image_digest = {res.image_digest}")
+          print(f"live_tls_fingerprint = {live_tls_fp}")
+          print(f"attested_tls_fingerprint = {res.attested_tls_fingerprint_hex}")
           print(f"errors = {res.errors}")
           print(f"all_required_ok = {res.all_required_ok}")
-          if not res.all_required_ok:
+          failures = cloud_required_failures(res)
+          if failures:
               raise SystemExit(
-                  f"attestation FAILED — required rows not green. "
-                  f"errors={res.errors}"
+                  f"attestation FAILED — cloud-required rows not green. "
+                  f"failures={failures}"
               )
           PY
 
