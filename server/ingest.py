@@ -2470,10 +2470,14 @@ async def _http_context_delete(request: "web.Request") -> "web.Response":
     ctx = _require_http_context(request)
     if ctx is None:
         return web.json_response({"error": "Unauthorized"}, status=401)
-    if str(request.query.get("confirm", "")) != "DELETE" and not _truthy("FISH_CONTEXT_DELETE_TEST_MODE"):
+    dry_run = str(request.query.get("dry_run", "")).lower() in {"1", "true", "yes"}
+    if (
+        not dry_run
+        and str(request.query.get("confirm", "")) != "DELETE"
+        and not _truthy("FISH_CONTEXT_DELETE_TEST_MODE")
+    ):
         return web.json_response({"error": "confirm=DELETE required"}, status=400)
 
-    dry_run = str(request.query.get("dry_run", "")).lower() in {"1", "true", "yes"}
     all_records = str(request.query.get("all", "")).lower() in {"1", "true", "yes"}
     since = _parse_query_time(request.query.get("since_ts") or request.query.get("since"))
     until = _parse_query_time(request.query.get("until_ts") or request.query.get("until"))

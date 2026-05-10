@@ -2,7 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from fisherman import cli
 from fisherman.audio_store import AudioStore
 from fisherman.capture import ScreenFrame
 from fisherman.config import FishermanConfig
@@ -93,3 +95,60 @@ class ContextHomeTests(unittest.TestCase):
             self.assertEqual(rows[0]["ocr_text"], "context export test")
             transcripts = AudioStore(str(root / "new-audio"), 30).query(limit=10)
             self.assertEqual(transcripts[0]["transcript"], "meeting transcript")
+
+    def test_backend_image_export_pages_and_merges_large_archives(self):
+        cfg = FishermanConfig(
+            backend_mode="cloud",
+            backend_url="https://fisherman.teleport.computer",
+            private_key="01" * 32,
+        )
+        calls = []
+
+        def fake_request(_cfg, method, path, *, params=None, body=None, timeout=60.0):
+            calls.append(params)
+            if len(calls) == 1:
+                return {
+                    "format": "fisherman.context.v1",
+                    "source": {"kind": "backend"},
+                    "options": {"image_errors": 1},
+                    "frames": [
+                        {"id": "f10", "ts": "2026-05-10T10:00:00+00:00", "image_b64": "a"},
+                        {"id": "f9", "ts": "2026-05-10T09:00:00+00:00", "image_b64": "b"},
+                    ],
+                    "audio_transcripts": [
+                        {"id": "a10", "ts": "2026-05-10T10:00:00+00:00", "transcript": "first"},
+                    ],
+                }
+            return {
+                "format": "fisherman.context.v1",
+                "source": {"kind": "backend"},
+                "options": {"image_errors": 0},
+                "frames": [
+                    {"id": "f8", "ts": "2026-05-10T08:00:00+00:00", "image_b64": "c"},
+                ],
+                "audio_transcripts": [
+                    {"id": "a10", "ts": "2026-05-10T10:00:00+00:00", "transcript": "first"},
+                    {"id": "a8", "ts": "2026-05-10T08:00:00+00:00", "transcript": "second"},
+                ],
+            }
+
+        with mock.patch.dict("os.environ", {"FISH_CONTEXT_IMAGE_EXPORT_BATCH": "2"}), \
+             mock.patch.object(cli, "_backend_context_request", side_effect=fake_request):
+            archive = cli._backend_context_export_archive(
+                cfg,
+                since_ts=None,
+                until_ts=None,
+                limit=3,
+                include_images=True,
+                timeout=10.0,
+            )
+
+        self.assertEqual([row["id"] for row in archive["frames"]], ["f10", "f9", "f8"])
+        self.assertEqual([row["id"] for row in archive["audio_transcripts"]], ["a10", "a8"])
+        self.assertEqual(archive["options"]["chunks"], 2)
+        self.assertEqual(archive["options"]["image_errors"], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertLess(
+            calls[1]["until_ts"],
+            cli._context_row_ts_seconds({"ts": "2026-05-10T09:00:00+00:00"}),
+        )

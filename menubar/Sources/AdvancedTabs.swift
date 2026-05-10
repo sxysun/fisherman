@@ -473,7 +473,7 @@ struct ContextDataTab: View {
             }
             Toggle("Include screenshots", isOn: $includeImages)
                 .font(.system(size: 11))
-            Text(includeImages ? "The archive will contain raw screenshots. Treat it like highly private data." : "Default export includes OCR, app/window metadata, URLs, and transcripts, but not screenshots.")
+            Text(includeImages ? "The archive will contain raw screenshots and may take minutes for large limits. Treat it like highly private data." : "Default export includes OCR, app/window metadata, URLs, and transcripts, but not screenshots.")
                 .font(.system(size: 10))
                 .foregroundStyle(includeImages ? .orange : .secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -591,9 +591,41 @@ struct ContextDataTab: View {
                     statusMessage = successPrefix + "\n" + result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
                 } else {
                     let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-                    statusMessage = stderr.isEmpty ? "Command failed." : stderr
+                    let message = stderr.isEmpty ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) : stderr
+                    statusMessage = Self.friendlyCommandError(message)
                 }
             }
+        }
+    }
+
+    private static func friendlyCommandError(_ raw: String) -> String {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let jsonStart = text.firstIndex(of: "{") else {
+            return text.isEmpty ? "Command failed." : text
+        }
+        let jsonText = String(text[jsonStart...])
+        guard
+            let data = jsonText.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return text.isEmpty ? "Command failed." : text
+        }
+
+        let error = obj["error"] as? String ?? ""
+        let code = obj["code"] as? String ?? error
+        let detail = (obj["detail"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let detailSuffix = detail.isEmpty ? "" : "\n\nDetails: \(detail)"
+
+        switch code {
+        case "cloud_ingest_unavailable":
+            return "Fisherman Cloud ingest is temporarily unavailable. Try again in a moment or open Diagnostics to check Cloud health.\(detailSuffix)"
+        case "tenant_key_unavailable":
+            return "Fisherman Cloud cannot decrypt this context until this device reconnects and provides its client-held key. Make sure Fisherman is connected, then retry.\(detailSuffix)"
+        default:
+            if !error.isEmpty {
+                return "Backend error: \(error)\(detailSuffix)"
+            }
+            return text.isEmpty ? "Command failed." : text
         }
     }
 

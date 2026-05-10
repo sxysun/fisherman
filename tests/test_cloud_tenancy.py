@@ -251,6 +251,8 @@ class RecordingConn:
             return sum(1 for row in self._pool.frames if row["user_pubkey"] == user)
         if "FROM audio_transcripts" in normalized:
             user = args[0]
+            if "data_key_source <>" not in normalized:
+                return sum(1 for row in self._pool.transcript_rows if row["user_pubkey"] == user)
             return sum(
                 1 for row in self._pool.transcript_rows
                 if row.get("user_pubkey") == user and row.get("data_key_source") != args[1]
@@ -1028,6 +1030,56 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(delete_resp.status, 200)
         self.assertIsNotNone(db.deputies[(pub_a, pub_b)]["revoked_at"])
+
+    async def test_context_delete_dry_run_does_not_require_delete_confirmation(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        pub_a = _pub_hex(SEED_A)
+        db.users[pub_a] = {
+            "disabled_at": None,
+            "enrollment_state": "active",
+            "max_frames_per_hour": None,
+            "wrapped_data_key": None,
+            "data_key_source": "server_wrapped",
+        }
+        db.frames.append({
+            "user_pubkey": pub_a,
+            "device_pubkey": pub_a,
+            "ts": datetime.datetime.now(datetime.timezone.utc),
+            "app": "Code",
+            "bundle_id": "com.example.code",
+            "window": b"",
+            "ocr_text": b"",
+            "urls": b"",
+            "image_key": None,
+            "data_key_source": "server_wrapped",
+        })
+
+        resp = await ingest._http_context_delete(FakeRequest(
+            _fishkey(SEED_A),
+            db,
+            query={"all": "1", "dry_run": "1"},
+        ))
+
+        body = json.loads(resp.text)
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body["dry_run"])
+        self.assertEqual(body["frames"], 1)
+        self.assertEqual(body["audio_transcripts"], 0)
+
+    async def test_context_delete_still_requires_confirmation_for_real_delete(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+
+        resp = await ingest._http_context_delete(FakeRequest(
+            _fishkey(SEED_A),
+            db,
+            query={"all": "1"},
+        ))
+
+        body = json.loads(resp.text)
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(body["error"], "confirm=DELETE required")
 
 
 if __name__ == "__main__":

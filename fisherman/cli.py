@@ -1323,6 +1323,138 @@ def _backend_context_request(
         raise click.ClickException(f"backend context request failed: {e}") from e
 
 
+def _context_row_ts_seconds(row: dict) -> float | None:
+    value = row.get("ts")
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            return datetime.datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _context_row_key(row: dict, fallback_prefix: str, index: int) -> str:
+    row_id = row.get("id")
+    if row_id is not None:
+        return f"id:{row_id}"
+    return (
+        f"{fallback_prefix}:{row.get('ts')}:{row.get('app') or row.get('meeting_app')}:"
+        f"{row.get('window') or row.get('transcript')}:{index}"
+    )
+
+
+def _backend_context_export_archive(
+    cfg: FishermanConfig,
+    *,
+    since_ts: float | None,
+    until_ts: float | None,
+    limit: int,
+    include_images: bool,
+    timeout: float,
+) -> dict:
+    """Fetch a backend context archive.
+
+    Screenshot archives can be hundreds of megabytes. Pulling all images in one
+    JSON response can make the Cloud gateway or upstream worker reset the
+    connection, so image exports are paged by frame timestamp and merged client
+    side. Metadata-only exports keep the single-request path.
+    """
+    limit = max(1, int(limit))
+    image_batch = max(1, int(os.environ.get("FISH_CONTEXT_IMAGE_EXPORT_BATCH", "10") or "10"))
+    if not include_images or limit <= image_batch:
+        return _backend_context_request(
+            cfg,
+            "GET",
+            "/api/context/export",
+            params={
+                "since_ts": since_ts,
+                "until_ts": until_ts,
+                "limit": limit,
+                "include_images": "1" if include_images else "0",
+            },
+            timeout=timeout,
+        )
+
+    merged: dict | None = None
+    seen_frames: set[str] = set()
+    seen_audio: set[str] = set()
+    remaining = limit
+    page_until = until_ts
+    chunks = 0
+    image_errors = 0
+
+    while remaining > 0:
+        batch_limit = min(image_batch, remaining)
+        archive = _backend_context_request(
+            cfg,
+            "GET",
+            "/api/context/export",
+            params={
+                "since_ts": since_ts,
+                "until_ts": page_until,
+                "limit": batch_limit,
+                "include_images": "1",
+            },
+            timeout=timeout,
+        )
+        chunks += 1
+        if merged is None:
+            merged = dict(archive)
+            merged["frames"] = []
+            merged["audio_transcripts"] = []
+            opts = dict(archive.get("options") or {})
+            opts["limit"] = limit
+            opts["include_images"] = True
+            opts["chunks"] = 0
+            opts["image_errors"] = 0
+            merged["options"] = opts
+
+        frame_batch = archive.get("frames") or []
+        audio_batch = archive.get("audio_transcripts") or []
+        for idx, row in enumerate(frame_batch):
+            key = _context_row_key(row, "frame", idx)
+            if key in seen_frames:
+                continue
+            seen_frames.add(key)
+            merged["frames"].append(row)
+            remaining -= 1
+        for idx, row in enumerate(audio_batch):
+            if len(merged["audio_transcripts"]) >= limit:
+                break
+            key = _context_row_key(row, "audio", idx)
+            if key in seen_audio:
+                continue
+            seen_audio.add(key)
+            merged["audio_transcripts"].append(row)
+
+        image_errors += int((archive.get("options") or {}).get("image_errors") or 0)
+        frame_times = [
+            ts for ts in (_context_row_ts_seconds(row) for row in frame_batch)
+            if ts is not None
+        ]
+        if not frame_times or len(frame_batch) < batch_limit:
+            break
+        page_until = min(frame_times) - 0.000001
+        if since_ts is not None and page_until < since_ts:
+            break
+
+    if merged is None:
+        raise click.ClickException("backend returned no context archive")
+    merged["options"]["chunks"] = chunks
+    merged["options"]["image_errors"] = image_errors
+    return merged
+
+
 @main.group(name="context")
 def context_group():
     """Export, import, or delete a context home."""
@@ -1356,16 +1488,12 @@ def context_export(output, home, since, until, limit, include_images, timeout):
             include_images=include_images,
         )
     else:
-        archive = _backend_context_request(
+        archive = _backend_context_export_archive(
             cfg,
-            "GET",
-            "/api/context/export",
-            params={
-                "since_ts": since_ts,
-                "until_ts": until_ts,
-                "limit": max(1, int(limit)),
-                "include_images": "1" if include_images else "0",
-            },
+            since_ts=since_ts,
+            until_ts=until_ts,
+            limit=max(1, int(limit)),
+            include_images=include_images,
             timeout=timeout,
         )
         _ctx.write_archive(output, archive)
@@ -1450,7 +1578,7 @@ def context_delete(home, since, until, all_records, limit, dry_run, confirm, tim
                 "until_ts": until_ts,
                 "all": "1" if all_records else "",
                 "dry_run": "1" if dry_run else "",
-                "confirm": confirm,
+                "confirm": "DELETE" if dry_run else confirm,
             },
             timeout=timeout,
         )
