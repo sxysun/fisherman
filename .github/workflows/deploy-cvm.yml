@@ -93,6 +93,7 @@ jobs:
           CLOUD_ENROLLMENT_MODE: ${{ vars.FISHERMAN_CLOUD_ENROLLMENT_MODE }}
           CLOUD_ALLOWED_PUBKEYS: ${{ vars.FISHERMAN_CLOUD_ALLOWED_PUBKEYS }}
           CLOUD_MAX_FRAMES_PER_HOUR: ${{ vars.FISHERMAN_CLOUD_MAX_FRAMES_PER_HOUR }}
+          CLOUD_EXTERNAL_LLM_ENABLED: ${{ vars.FISHERMAN_CLOUD_EXTERNAL_LLM_ENABLED }}
         run: |
           set -euo pipefail
           # The older `phala cvms upgrade` wrapper mis-parses -e KEY=VALUE
@@ -176,6 +177,7 @@ jobs:
             -e FISHERMAN_CLOUD_ENROLLMENT_MODE="$CLOUD_ENROLLMENT_MODE" \
             -e FISHERMAN_CLOUD_ALLOWED_PUBKEYS="$CLOUD_ALLOWED_PUBKEYS" \
             -e FISHERMAN_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR="$CLOUD_MAX_FRAMES_PER_HOUR" \
+            -e FISHERMAN_CLOUD_EXTERNAL_LLM_ENABLED="$CLOUD_EXTERNAL_LLM_ENABLED" \
             --wait
 
       - name: Read Phala-reported compose_hash AFTER upgrade

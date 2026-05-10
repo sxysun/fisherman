@@ -321,6 +321,7 @@ def _ensure_cloud_trust_or_disable(config: FishermanConfig) -> None:
     result = cloud_trust.verify_or_approve(
         config.backend_url,
         timeout=timeout,
+        allow_bootstrap=False,
         rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or DEFAULT_APP_AUTH_RPC_URL,
         contract_address=(
             os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
@@ -607,6 +608,11 @@ def _cloud_required_failures(res) -> list[str]:
         failures.append("cloud requires on-chain compose_hash authorization")
     if res.tls_fingerprint_ok is not True:
         failures.append("cloud requires TLS certificate fingerprint bound in attestation")
+    if not getattr(res, "git_commit", None):
+        failures.append("cloud requires release git_commit metadata")
+    image_digest = getattr(res, "image_digest", None)
+    if not image_digest or image_digest == "sha256:dev":
+        failures.append("cloud requires immutable image_digest metadata")
     return failures
 
 
@@ -628,6 +634,44 @@ def _cloud_capability_health(url: str, *, timeout: float = 10.0) -> dict | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def _cloud_account_ready(url: str, *, timeout: float = 10.0) -> tuple[bool, str | None]:
+    """Return whether this identity can read/write its Cloud tenant.
+
+    /health only says Cloud ingest exists. This authenticated probe says the
+    current FishKey has an enrolled tenant. In open/allowlist deployments it
+    may create the row; in closed hosted Cloud it returns 403 until the account
+    service or operator enrolls the user.
+    """
+    cfg = FishermanConfig()
+    if not cfg.private_key:
+        _load_keys()
+        cfg = FishermanConfig()
+    if not cfg.private_key:
+        return False, "identity key is not ready"
+    try:
+        auth, _pub = _fishkey_header(cfg.private_key)
+        req = urllib.request.Request(
+            _backend_api_url(url, "/api/current_activity"),
+            method="GET",
+            headers={"Authorization": auth, "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if 200 <= resp.status < 300:
+                return True, None
+            return False, f"Cloud account probe returned HTTP {resp.status}"
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = json.loads(e.read()).get("error", "")
+        except Exception:
+            detail = e.reason or ""
+        if e.code == 403:
+            return False, detail or "Cloud tenant is not enrolled"
+        return False, f"Cloud account probe returned HTTP {e.code}: {detail or e.reason}"
+    except Exception as e:
+        return False, f"Cloud account probe failed: {e}"
 
 
 @main.command()
@@ -999,22 +1043,27 @@ def backend_configure_cloud(
         and isinstance(capabilities.get("ingest"), dict)
         and capabilities["ingest"].get("ready") is True
     )
+    account_ready = False
+    account_detail = None
+    if ingest_ready:
+        account_ready, account_detail = _cloud_account_ready(url, timeout=timeout)
     cfg = _persist_backend_config(
         mode="cloud",
         backend_url=url,
         relay_url=relay_url,
-        server_url=ingest_url_from_backend_url(url) if ingest_ready else None,
+        server_url=ingest_url_from_backend_url(url) if ingest_ready and account_ready else None,
     )
     click.echo("configured backend: Fisherman Cloud")
     click.echo(f"  backend: {cfg.backend_url}")
     click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until Cloud ingest is enabled for this account'}")
+    click.echo(f"  account: {'enabled' if account_ready else account_detail or 'not checked'}")
     click.echo(f"  relay:   {cfg.status_relay_url}")
     if trust_record:
         compose = trust_record.get("compose_hash") or "?"
         git = trust_record.get("git_commit") or "?"
         click.echo(f"  trust:   approved compose=0x{compose[:12]} git={git[:12]}")
     elif skip_audit:
-        click.echo("  trust:   skipped; daemon will audit before streaming raw context")
+        click.echo("  trust:   skipped; raw ingest will stay disabled until Cloud is approved")
     if isinstance(capabilities, dict):
         att_ready = (capabilities.get("attestation") or {}).get("ready")
         relay_ready = (capabilities.get("relay") or {}).get("ready")

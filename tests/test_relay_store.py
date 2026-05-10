@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 
-from relay.server import SQLiteEventStore
+from relay.server import SQLiteEventStore, SlidingWindowRateLimiter
 
 
 class SQLiteEventStoreTests(unittest.TestCase):
@@ -122,6 +122,16 @@ class SQLiteEventStoreTests(unittest.TestCase):
 
         self.assertEqual(removed, 1)
         self.assertEqual(rows, [])
+
+
+class SlidingWindowRateLimiterTests(unittest.TestCase):
+    def test_limiter_allows_until_limit_then_recovers_after_window(self) -> None:
+        limiter = SlidingWindowRateLimiter(limit=2, window_seconds=10)
+
+        self.assertTrue(limiter.allow("1.2.3.4", now=100))
+        self.assertTrue(limiter.allow("1.2.3.4", now=101))
+        self.assertFalse(limiter.allow("1.2.3.4", now=102))
+        self.assertTrue(limiter.allow("1.2.3.4", now=112))
 
 
 if __name__ == "__main__":

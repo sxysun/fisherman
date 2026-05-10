@@ -13,7 +13,7 @@ import click
 import structlog
 from dotenv import load_dotenv
 
-from crypto import decrypt_json, decrypt_text, unwrap_data_key
+from crypto import decrypt_json, decrypt_text, generate_data_key, unwrap_data_key, wrap_data_key
 from storage import create_storage
 
 load_dotenv()
@@ -44,7 +44,21 @@ async def _get_pool() -> asyncpg.Pool:
     return await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=4)
 
 
+def _ensure_encryption_key() -> None:
+    """Load the CVM-generated master key when it is stored on /data."""
+    if os.environ.get("ENCRYPTION_KEY"):
+        return
+    key_path = Path(os.environ.get("FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE", "/data/secrets/encryption.key"))
+    try:
+        key = key_path.read_text().strip()
+    except OSError:
+        key = ""
+    if key:
+        os.environ["ENCRYPTION_KEY"] = key
+
+
 def _decrypt_text_with_fallback(raw: bytes, data_key: str | None) -> str:
+    _ensure_encryption_key()
     try:
         return decrypt_text(raw, data_key)
     except Exception:
@@ -54,6 +68,7 @@ def _decrypt_text_with_fallback(raw: bytes, data_key: str | None) -> str:
 
 
 def _decrypt_json_with_fallback(raw: bytes, data_key: str | None) -> object:
+    _ensure_encryption_key()
     try:
         return decrypt_json(raw, data_key)
     except Exception:
@@ -83,6 +98,10 @@ def _decrypt_row(row: asyncpg.Record, data_key: str | None = None) -> dict:
         if isinstance(d.get(field), datetime.datetime):
             d[field] = d[field].isoformat()
     return d
+
+
+def _valid_pubkey_hex(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", (value or "").lower()))
 
 
 async def _query_frames(
@@ -125,6 +144,7 @@ async def _query_frames(
         })
         key_by_user: dict[str, str | None] = {}
         if user_pubkeys:
+            _ensure_encryption_key()
             async with pool.acquire() as conn:
                 key_rows = await conn.fetch(
                     """
@@ -165,6 +185,7 @@ async def _download_image(image_key: str, output: str | None) -> str:
     data_key = None
     parts = image_key.split("/")
     if len(parts) > 2 and parts[0] == "users":
+        _ensure_encryption_key()
         user_pubkey = parts[1]
         pool = await _get_pool()
         try:
@@ -317,6 +338,171 @@ def summary(since, until, app):
         for u in sorted(urls):
             click.echo(f"    url: {u}")
         click.echo()
+
+
+@cli.group(name="users")
+def users_group():
+    """Operate Fisherman Cloud tenants from inside the backend."""
+
+
+@users_group.command(name="enroll")
+@click.argument("pubkey")
+@click.option("--plan", default="default", show_default=True)
+@click.option("--max-frames-hour", default=1200, show_default=True, type=int)
+def users_enroll(pubkey: str, plan: str, max_frames_hour: int):
+    """Create or re-enable a Cloud tenant."""
+    pubkey = pubkey.strip().lower()
+    if not _valid_pubkey_hex(pubkey):
+        click.echo("pubkey must be 64 lowercase hex chars", err=True)
+        sys.exit(2)
+
+    async def _enroll():
+        _ensure_encryption_key()
+        if not os.environ.get("ENCRYPTION_KEY"):
+            click.echo("ENCRYPTION_KEY is not set and no key file was found", err=True)
+            sys.exit(2)
+        pool = await _get_pool()
+        try:
+            tenant_key = generate_data_key()
+            wrapped_key = wrap_data_key(tenant_key)
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO users
+                        (user_pubkey, enrollment_state, disabled_at, plan,
+                         max_frames_per_hour, wrapped_data_key, data_key_created_at)
+                    VALUES ($1, 'active', NULL, $2, $3, $4, now())
+                    ON CONFLICT (user_pubkey) DO UPDATE SET
+                        enrollment_state = 'active',
+                        disabled_at = NULL,
+                        plan = $2,
+                        max_frames_per_hour = $3,
+                        wrapped_data_key = COALESCE(users.wrapped_data_key, $4),
+                        data_key_created_at = COALESCE(users.data_key_created_at, now())
+                    """,
+                    pubkey,
+                    plan,
+                    max_frames_hour if max_frames_hour > 0 else None,
+                    wrapped_key,
+                )
+        finally:
+            await pool.close()
+
+    asyncio.run(_enroll())
+    click.echo(f"enrolled: {pubkey}")
+
+
+@users_group.command(name="disable")
+@click.argument("pubkey")
+def users_disable(pubkey: str):
+    """Disable a Cloud tenant without deleting data."""
+    pubkey = pubkey.strip().lower()
+    if not _valid_pubkey_hex(pubkey):
+        click.echo("pubkey must be 64 lowercase hex chars", err=True)
+        sys.exit(2)
+
+    async def _disable():
+        pool = await _get_pool()
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET disabled_at = now(), enrollment_state = 'disabled'
+                    WHERE user_pubkey = $1
+                    """,
+                    pubkey,
+                )
+        finally:
+            await pool.close()
+
+    asyncio.run(_disable())
+    click.echo(f"disabled: {pubkey}")
+
+
+@users_group.command(name="list")
+@click.option("--limit", default=50, show_default=True, type=int)
+def users_list(limit: int):
+    """List Cloud tenants."""
+    async def _list():
+        pool = await _get_pool()
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT user_pubkey, created_at, disabled_at, enrollment_state,
+                           plan, max_frames_per_hour, max_storage_mb
+                    FROM users
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                    """,
+                    max(1, min(limit, 500)),
+                )
+            return [dict(row) for row in rows]
+        finally:
+            await pool.close()
+
+    click.echo(json.dumps(asyncio.run(_list()), indent=2, default=str))
+
+
+@users_group.command(name="devices")
+@click.argument("pubkey")
+def users_devices(pubkey: str):
+    """List devices for one Cloud tenant."""
+    pubkey = pubkey.strip().lower()
+    if not _valid_pubkey_hex(pubkey):
+        click.echo("pubkey must be 64 lowercase hex chars", err=True)
+        sys.exit(2)
+
+    async def _devices():
+        pool = await _get_pool()
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT device_pubkey, label, created_at, revoked_at
+                    FROM devices
+                    WHERE user_pubkey = $1
+                    ORDER BY created_at DESC
+                    """,
+                    pubkey,
+                )
+            return [dict(row) for row in rows]
+        finally:
+            await pool.close()
+
+    click.echo(json.dumps(asyncio.run(_devices()), indent=2, default=str))
+
+
+@users_group.command(name="revoke-device")
+@click.argument("pubkey")
+@click.argument("device_pubkey")
+def users_revoke_device(pubkey: str, device_pubkey: str):
+    """Revoke one tenant device key."""
+    pubkey = pubkey.strip().lower()
+    device_pubkey = device_pubkey.strip().lower()
+    if not _valid_pubkey_hex(pubkey) or not _valid_pubkey_hex(device_pubkey):
+        click.echo("pubkeys must be 64 lowercase hex chars", err=True)
+        sys.exit(2)
+
+    async def _revoke():
+        pool = await _get_pool()
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE devices
+                    SET revoked_at = now()
+                    WHERE user_pubkey = $1 AND device_pubkey = $2
+                    """,
+                    pubkey,
+                    device_pubkey,
+                )
+        finally:
+            await pool.close()
+
+    asyncio.run(_revoke())
+    click.echo(f"revoked device: {device_pubkey} for {pubkey}")
 
 
 if __name__ == "__main__":

@@ -30,6 +30,8 @@ class CloudGatewayTests(unittest.TestCase):
                     "ingest_ready": False,
                     "multi_tenant": True,
                     "missing": ["DATABASE_URL", "ENCRYPTION_KEY"],
+                    "external_llm_enabled": False,
+                    "default_max_frames_per_hour": 1200,
                 },
             },
             relay={"ok": True, "body": "ok"},
@@ -42,6 +44,8 @@ class CloudGatewayTests(unittest.TestCase):
         self.assertFalse(payload["mirror"]["paired"])
         self.assertFalse(payload["ingest"]["ready"])
         self.assertEqual(payload["ingest"]["missing"], ["DATABASE_URL", "ENCRYPTION_KEY"])
+        self.assertFalse(payload["ingest"]["external_llm_enabled"])
+        self.assertEqual(payload["ingest"]["default_max_frames_per_hour"], 1200)
         self.assertTrue(payload["relay"]["ready"])
         self.assertFalse(payload["relay"]["stores_plaintext"])
         self.assertEqual(payload["ingest"]["url"], "wss://fisherman.teleport.computer/ingest")
@@ -58,6 +62,10 @@ class CloudGatewayTests(unittest.TestCase):
                     "multi_tenant": True,
                     "storage": "r2",
                     "missing": [],
+                    "external_llm_enabled": False,
+                    "default_max_frames_per_hour": 1200,
+                    "max_ws_message_bytes": 16777216,
+                    "max_image_bytes": 8388608,
                 },
             },
             relay={"ok": True, "body": "ok"},
@@ -69,6 +77,8 @@ class CloudGatewayTests(unittest.TestCase):
         self.assertTrue(payload["mirror"]["paired"])
         self.assertTrue(payload["ingest"]["ready"])
         self.assertEqual(payload["ingest"]["storage"], "r2")
+        self.assertFalse(payload["ingest"]["external_llm_enabled"])
+        self.assertEqual(payload["ingest"]["max_ws_message_bytes"], 16777216)
 
 
 class CloudIngestReadinessTests(unittest.TestCase):
@@ -85,6 +95,9 @@ class CloudIngestReadinessTests(unittest.TestCase):
             "FISH_MULTI_TENANT",
             "FISHERMAN_MULTI_TENANT",
             "FISHERMAN_CLOUD_MULTI_TENANT",
+            "FISH_CLOUD_EXTERNAL_LLM_ENABLED",
+            "FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR",
+            "FISH_CLOUD_ENROLLMENT_MODE",
         ]:
             os.environ.pop(key, None)
         os.environ["FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE"] = str(
@@ -108,6 +121,9 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertNotIn("R2_SECRET_ACCESS_KEY", payload["missing"])
         self.assertIn("FISH_MULTI_TENANT", payload["missing"])
         self.assertEqual(payload["encryption_key_source"], "generated_file")
+        self.assertFalse(payload["external_llm_enabled"])
+        self.assertEqual(payload["default_max_frames_per_hour"], 1200)
+        self.assertEqual(payload["enrollment_mode"], "closed")
 
     def test_cloud_ingest_ready_with_local_storage(self):
         os.environ.update(
@@ -124,6 +140,8 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertTrue(payload["ingest_ready"])
         self.assertEqual(payload["storage"], "local")
         self.assertEqual(payload["missing"], [])
+        self.assertFalse(payload["external_llm_enabled"])
+        self.assertEqual(payload["enrollment_mode"], "closed")
 
     def test_cloud_ingest_reports_r2_when_credentials_exist(self):
         os.environ.update(

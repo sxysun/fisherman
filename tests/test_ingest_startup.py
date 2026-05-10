@@ -154,7 +154,10 @@ class IngestStartupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(serve_calls[0]["host"], "127.0.0.1")
         self.assertEqual(serve_calls[0]["port"], 9876)
         self.assertIs(serve_calls[0]["kwargs"]["process_request"], self.ingest._auth_check)
-        self.assertIsNone(serve_calls[0]["kwargs"]["max_size"])
+        self.assertEqual(
+            serve_calls[0]["kwargs"]["max_size"],
+            self.ingest._DEFAULT_MAX_WS_MESSAGE_BYTES,
+        )
         self.assertGreaterEqual(add_signal_handler_mock.call_count, 2)
         self.assertTrue(any("CREATE TABLE" in sql for sql, _ in fake_pool.executed))
 

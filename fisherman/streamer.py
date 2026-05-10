@@ -17,6 +17,7 @@ log = structlog.get_logger()
 
 _MAX_QUEUE = 32
 _MAX_BACKOFF = 30.0
+_MAX_INBOUND_MESSAGE_BYTES = 1024 * 1024
 
 
 def _load_signing_key(private_key_hex: str):
@@ -97,10 +98,12 @@ class Streamer:
         private_key_hex: str,
         upload_queue: UploadQueue | None = None,
         connect_guard: Callable[[], bool] | None = None,
+        connect_guard_interval: float = 300.0,
     ):
         self._url = url
         self._priv_key, self._pub_hex = _load_signing_key(private_key_hex)
         self._connect_guard = connect_guard
+        self._connect_guard_interval = max(30.0, float(connect_guard_interval))
         self._ws: websockets.WebSocketClientProtocol | None = None
         # Queue items are tuples (payload_json, frame_screenpipe_ts | None).
         # Carrying the screenpipe timestamp through to the send-success
@@ -285,6 +288,7 @@ class Streamer:
     async def _reconnect_loop(self) -> None:
         backoff = 1.0
         while True:
+            guard_task: asyncio.Task | None = None
             try:
                 if self._connect_guard is not None:
                     allowed = await asyncio.to_thread(self._connect_guard)
@@ -305,7 +309,7 @@ class Streamer:
                     ping_timeout=30,
                     close_timeout=5,
                     open_timeout=10,
-                    max_size=None,
+                    max_size=_MAX_INBOUND_MESSAGE_BYTES,
                     proxy=None,
                 )
                 self._connected = True
@@ -315,6 +319,10 @@ class Streamer:
                 log.info("websocket_connected", url=self._url)
 
                 # Keep alive — wait for connection to close
+                if self._connect_guard is not None:
+                    guard_task = asyncio.create_task(
+                        self._connected_guard_loop(self._ws)
+                    )
                 async for _ in self._ws:
                     pass  # server shouldn't send much, but drain it
 
@@ -333,3 +341,24 @@ class Streamer:
                     log.warning("websocket_disconnected", backoff=backoff, exc_info=True)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, _MAX_BACKOFF)
+            finally:
+                if guard_task is not None:
+                    guard_task.cancel()
+                    try:
+                        await guard_task
+                    except asyncio.CancelledError:
+                        pass
+
+    async def _connected_guard_loop(self, ws) -> None:
+        """Close an already-open socket if the Cloud trust guard later fails."""
+        while True:
+            await asyncio.sleep(self._connect_guard_interval)
+            allowed = await asyncio.to_thread(self._connect_guard)
+            if allowed:
+                continue
+            if self._ws is ws:
+                self._connected = False
+                self._connected_event.clear()
+                log.warning("websocket_connect_guard_closed_active_connection")
+                await ws.close(code=4003, reason="Cloud trust check failed")
+            return

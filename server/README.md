@@ -91,14 +91,16 @@ Auth model:
 | `INGEST_PORT` | No | `9999` | WebSocket listen port |
 | `HTTP_API_PORT` | No | `9998` | HTTP API listen port (owner activity endpoints) |
 | `FISH_MULTI_TENANT` | No | unset | Enable Cloud tenant mode. Each valid FishKey pubkey becomes its own user namespace |
-| `FISH_CLOUD_ENROLLMENT_MODE` | No | `open` | Cloud enrollment gate: `open`, `allowlist`, or `closed` |
+| `FISH_CLOUD_ENROLLMENT_MODE` | No | `closed` | Cloud enrollment gate: `open`, `allowlist`, or `closed` |
 | `FISH_CLOUD_ALLOWED_PUBKEYS` | No | — | Comma/space-separated owner pubkeys that may auto-enroll when mode is `allowlist` |
-| `FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR` | No | unlimited | Optional per-tenant ingest quota assigned on first enrollment |
+| `FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR` | No | `1200` | Per-tenant ingest quota assigned on first enrollment. Set `0` only for trusted private deployments |
 
 Cloud production requires `DATABASE_URL` and `FISH_MULTI_TENANT=1`.
 `ENCRYPTION_KEY` may be injected or generated once into the persistent CVM
 volume. R2 credentials are optional; when absent, encrypted frame blobs are
-stored on local CVM disk.
+stored on local CVM disk. Hosted Cloud should stay `closed` or `allowlist`
+until an account/billing enrollment service provisions rows in `users`;
+`open` is only appropriate for trusted private deployments.
 
 ### Storage Backends
 
@@ -120,6 +122,24 @@ New tenant rows receive a per-tenant Fernet data key stored as
 key remain readable through legacy fallback.
 
 Header format: `Authorization: FishKey <pubkey_hex>:<timestamp>:<signature_hex>`
+
+### Cloud Tenant Operations
+
+Hosted Cloud should use closed enrollment by default. From inside the
+backend container/CVM, enroll and operate tenants with:
+
+```bash
+cd /app/server
+python cli.py users enroll <user_pubkey> --plan default --max-frames-hour 1200
+python cli.py users list
+python cli.py users devices <user_pubkey>
+python cli.py users revoke-device <user_pubkey> <device_pubkey>
+python cli.py users disable <user_pubkey>
+```
+
+These commands require `DATABASE_URL` and the same `ENCRYPTION_KEY`
+source as ingest. `disable` and `revoke-device` stop future access
+without deleting captured data.
 
 **Deputies / Agent Access:** Owners can provision scoped deputy pubkeys
 under their tenant. A deputy authenticates with its own FishKey plus

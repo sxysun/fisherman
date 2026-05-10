@@ -49,6 +49,7 @@ jobs:
     permissions:
       contents: write
       actions:  write   # for `gh variable set` to persist CVM ids
+      packages: read
     env:
       CVM_NAME:     fisherman-mirror
       NODE_ID:      ${{ vars.PHALA_NODE_ID }}
@@ -71,6 +72,14 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install phala CLI + jq + foundry
         run: |
@@ -121,14 +130,29 @@ jobs:
           CLOUD_ENROLLMENT_MODE: ${{ vars.FISHERMAN_CLOUD_ENROLLMENT_MODE }}
           CLOUD_ALLOWED_PUBKEYS: ${{ vars.FISHERMAN_CLOUD_ALLOWED_PUBKEYS }}
           CLOUD_MAX_FRAMES_PER_HOUR: ${{ vars.FISHERMAN_CLOUD_MAX_FRAMES_PER_HOUR }}
+          CLOUD_EXTERNAL_LLM_ENABLED: ${{ vars.FISHERMAN_CLOUD_EXTERNAL_LLM_ENABLED }}
         run: |
           set -euo pipefail
-          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay server pyproject.toml)
+          IMAGE_COMMIT=$(git log -1 --pretty=%H -- fisherman mirror relay server pyproject.toml)
+          IMAGE_TAG="${IMAGE_COMMIT:0:7}"
           if [[ -z "$IMAGE_TAG" ]]; then
             echo "::error::no commit touching image-relevant paths found"
             exit 1
           fi
+          IMAGE_REPO="ghcr.io/${{ github.repository_owner }}/fisherman-mirror"
+          IMAGE_REPO=$(echo "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')
+          IMAGE_TAG_REF="$IMAGE_REPO:$IMAGE_TAG"
+          echo "Resolving mirror image digest: $IMAGE_TAG_REF"
+          IMAGE_DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG_REF" --format '{{json .}}' | jq -r '.manifest.digest')
+          if [[ -z "$IMAGE_DIGEST" || "$IMAGE_DIGEST" == "null" || "$IMAGE_DIGEST" != sha256:* ]]; then
+            echo "::error::could not resolve digest for $IMAGE_TAG_REF"
+            exit 1
+          fi
+          IMAGE_REF="$IMAGE_REPO@$IMAGE_DIGEST"
           export IMAGE_TAG
+          export IMAGE_REF
+          export IMAGE_COMMIT
+          export IMAGE_DIGEST
           RENDERED_COMPOSE="$RUNNER_TEMP/docker-compose.phala.$IMAGE_TAG.yaml"
           export RENDERED_COMPOSE
           python <<'PY'
@@ -136,14 +160,21 @@ jobs:
           from pathlib import Path
 
           src = Path(os.environ["COMPOSE_FILE"]).read_text()
-          needle = "${MIRROR_IMAGE_TAG:-latest}"
-          tag = os.environ["IMAGE_TAG"]
-          if needle not in src:
-              raise SystemExit(f"{needle} not found in compose template")
-          Path(os.environ["RENDERED_COMPOSE"]).write_text(src.replace(needle, tag))
+          replacements = {
+              "ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}": os.environ["IMAGE_REF"],
+              "${FISHERMAN_GIT_COMMIT:-dev}": os.environ["IMAGE_COMMIT"],
+              "${FISHERMAN_IMAGE_DIGEST:-sha256:dev}": os.environ["IMAGE_DIGEST"],
+          }
+          rendered = src
+          for needle, value in replacements.items():
+              if needle not in rendered:
+                  raise SystemExit(f"{needle} not found in compose template")
+              rendered = rendered.replace(needle, value)
+          Path(os.environ["RENDERED_COMPOSE"]).write_text(rendered)
           PY
           echo ">>> phala deploy -n $CVM_NAME --node-id $NODE_ID -c $RENDERED_COMPOSE"
-          echo "Deploying mirror image tag: $IMAGE_TAG (last image-relevant commit)"
+          echo "Deploying mirror image: $IMAGE_REF"
+          echo "Image commit: $IMAGE_COMMIT"
           echo "Rendered compose sha256: $(sha256sum "$RENDERED_COMPOSE" | awk '{print $1}')"
           phala deploy \
             --api-token "$PHALA_CLOUD_API_KEY" \
@@ -166,6 +197,7 @@ jobs:
             -e FISHERMAN_CLOUD_ENROLLMENT_MODE="$CLOUD_ENROLLMENT_MODE" \
             -e FISHERMAN_CLOUD_ALLOWED_PUBKEYS="$CLOUD_ALLOWED_PUBKEYS" \
             -e FISHERMAN_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR="$CLOUD_MAX_FRAMES_PER_HOUR" \
+            -e FISHERMAN_CLOUD_EXTERNAL_LLM_ENABLED="$CLOUD_EXTERNAL_LLM_ENABLED" \
             --wait -j 2>&1 | tee /tmp/deploy.log
 
           # Tail of the log is a JSON document — extract app_id + vm_uuid
@@ -217,16 +249,37 @@ jobs:
               exit 1
           fi
           echo "compose_hash (Phala-reported): 0x$HASH"
-          # Idempotent: skip if already allowed
-          ALLOWED=$(cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "0x$HASH" \
-              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false")
-          if [[ "$ALLOWED" == "true" ]]; then
+
+          COMPOSE_HASH="0x$HASH"
+          is_allowed() {
+            cast call "$CONTRACT" 'isAppAllowed(bytes32)(bool)' "$COMPOSE_HASH" \
+              --rpc-url "$ETH_SEPOLIA_RPC_URL" || echo "false"
+          }
+
+          if [[ "$(is_allowed)" == "true" ]]; then
             echo "compose_hash already on-chain — skipping addComposeHash()"
             exit 0
           fi
-          cast send "$CONTRACT" 'addComposeHash(bytes32)' "0x$HASH" \
-              --rpc-url "$ETH_SEPOLIA_RPC_URL" \
-              --private-key "$OWNER_PK"
+
+          send_args=(
+            "$CONTRACT" 'addComposeHash(bytes32)' "$COMPOSE_HASH"
+            --rpc-url "$ETH_SEPOLIA_RPC_URL"
+            --private-key "$OWNER_PK"
+          )
+          if cast send "${send_args[@]}"; then
+            exit 0
+          fi
+
+          sleep 20
+          if [[ "$(is_allowed)" == "true" ]]; then
+            echo "compose_hash became allowed after initial send"
+            exit 0
+          fi
+
+          GAS_PRICE=$(cast gas-price --rpc-url "$ETH_SEPOLIA_RPC_URL")
+          BUMPED_GAS_PRICE=$(( GAS_PRICE * 2 ))
+          echo "resending compose_hash authorization with bumped gas price"
+          cast send "${send_args[@]}" --resend --gas-price "$BUMPED_GAS_PRICE"
 
       - name: Persist CVM ids as variables
         env:

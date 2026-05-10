@@ -40,6 +40,7 @@ _HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+_DEFAULT_MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024
 
 
 def _env(name: str, default: str) -> str:
@@ -71,6 +72,13 @@ def _ingest_ready(body: Any, ok: bool) -> bool:
     return False
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
 def build_capability_payload(
     *,
     mirror: dict[str, Any],
@@ -91,12 +99,20 @@ def build_capability_payload(
     missing: list[str] = []
     storage = None
     multi_tenant = None
+    external_llm_enabled = False
+    default_max_frames_per_hour = None
+    max_ws_message_bytes = None
+    max_image_bytes = None
     if isinstance(ingest_body, dict):
         raw_missing = ingest_body.get("missing") or []
         if isinstance(raw_missing, list):
             missing = [str(item) for item in raw_missing]
         storage = ingest_body.get("storage")
         multi_tenant = ingest_body.get("multi_tenant")
+        external_llm_enabled = bool(ingest_body.get("external_llm_enabled"))
+        default_max_frames_per_hour = ingest_body.get("default_max_frames_per_hour")
+        max_ws_message_bytes = ingest_body.get("max_ws_message_bytes")
+        max_image_bytes = ingest_body.get("max_image_bytes")
 
     overall = "ok" if mirror_ok and relay_ok and ingest_ready else "degraded"
     return {
@@ -115,6 +131,10 @@ def build_capability_payload(
             "multi_tenant": bool(multi_tenant) if multi_tenant is not None else True,
             "storage": storage,
             "missing": missing,
+            "external_llm_enabled": external_llm_enabled,
+            "default_max_frames_per_hour": default_max_frames_per_hour,
+            "max_ws_message_bytes": max_ws_message_bytes,
+            "max_image_bytes": max_image_bytes,
             "detail": _body_summary(ingest_body),
         },
         "mirror": {
@@ -241,7 +261,7 @@ async def _proxy_ingest_ws(request: web.Request) -> web.StreamResponse:
         upstream_ws = await session.ws_connect(
             ws_url,
             headers=_forward_headers(request),
-            max_msg_size=0,
+            max_msg_size=request.app["max_ws_message_bytes"],
         )
     except Exception as exc:
         log.warning("cloud_ingest_ws_unavailable", error=str(exc))
@@ -250,7 +270,7 @@ async def _proxy_ingest_ws(request: web.Request) -> web.StreamResponse:
             status=503,
         )
 
-    client_ws = web.WebSocketResponse(max_msg_size=0)
+    client_ws = web.WebSocketResponse(max_msg_size=request.app["max_ws_message_bytes"])
     await client_ws.prepare(request)
 
     try:
@@ -275,7 +295,11 @@ async def build_app() -> web.Application:
     timeout = ClientTimeout(total=float(_env("CLOUD_PROXY_TIMEOUT_SECONDS", "5")))
     session = ClientSession(timeout=timeout)
 
-    app = web.Application()
+    max_ws_message_bytes = _int_env(
+        "FISH_CLOUD_MAX_WS_MESSAGE_BYTES",
+        _DEFAULT_MAX_WS_MESSAGE_BYTES,
+    )
+    app = web.Application(client_max_size=max_ws_message_bytes)
     app["session"] = session
     app["public_url"] = _env("CLOUD_PUBLIC_URL", _DEFAULT_CLOUD_PUBLIC_URL)
     app["relay_public_url"] = _env("CLOUD_RELAY_URL", _DEFAULT_RELAY_PUBLIC_URL)
@@ -283,6 +307,7 @@ async def build_app() -> web.Application:
     app["relay_health_url"] = _env("CLOUD_RELAY_HEALTH_URL", "http://relay:9100")
     app["ingest_http_url"] = _env("CLOUD_INGEST_HTTP_URL", "http://cloud-ingest:9998")
     app["ingest_ws_url"] = _env("CLOUD_INGEST_WS_URL", "ws://cloud-ingest:9999/ingest")
+    app["max_ws_message_bytes"] = max_ws_message_bytes
 
     app.router.add_get("/health", _health)
     app.router.add_get("/.well-known/attestation", _proxy_attestation)

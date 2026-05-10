@@ -100,6 +100,11 @@ def _required_failures(res: Any) -> list[str]:
         failures.append("cloud requires TLS certificate fingerprint bound in attestation")
     if not _compose_hash_hex(res):
         failures.append("cloud attestation did not report a compose_hash")
+    if not getattr(res, "git_commit", None):
+        failures.append("cloud requires release git_commit metadata")
+    image_digest = getattr(res, "image_digest", None)
+    if not image_digest or image_digest == "sha256:dev":
+        failures.append("cloud requires immutable image_digest metadata")
     return failures
 
 
@@ -164,20 +169,18 @@ def _trusted_release_mismatches(
 
     approved_git = record.get("git_commit") or None
     live_git = current.get("git_commit") or None
-    if approved_git and live_git and approved_git != live_git:
+    if not approved_git:
+        mismatches.append("approved trust record is missing git_commit; reapprove Cloud")
+    elif live_git and approved_git != live_git:
         mismatches.append(
             f"git_commit changed: approved={approved_git} live={live_git}"
         )
 
     approved_digest = record.get("image_digest") or None
     live_digest = current.get("image_digest") or None
-    if (
-        approved_digest
-        and live_digest
-        and approved_digest != "sha256:dev"
-        and live_digest != "sha256:dev"
-        and approved_digest != live_digest
-    ):
+    if not approved_digest or approved_digest == "sha256:dev":
+        mismatches.append("approved trust record is missing immutable image_digest; reapprove Cloud")
+    elif live_digest and approved_digest != live_digest:
         mismatches.append(
             f"image_digest changed: approved={approved_digest} live={live_digest}"
         )

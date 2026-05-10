@@ -44,6 +44,52 @@ _DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 _MAX_CIPHERTEXT_BYTES = 64 * 1024  # 64 KiB ceiling per event
 _MAX_FUTURE_DRIFT = 60             # reject events claiming > now+60s
 _MAX_PAST_DRIFT = 7 * 24 * 3600    # reject events older than 7d at submit time
+_DEFAULT_EVENTS_PER_IP_HOUR = 600
+_DEFAULT_RPC_PER_IP_HOUR = 600
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+def _client_ip(request: web.Request) -> str:
+    cloudflare_ip = request.headers.get("CF-Connecting-IP", "").strip()
+    if cloudflare_ip:
+        return cloudflare_ip
+    peer = request.remote or "unknown"
+    return peer
+
+
+class SlidingWindowRateLimiter:
+    def __init__(self, limit: int, window_seconds: int = 3600):
+        self._limit = max(1, int(limit))
+        self._window = float(window_seconds)
+        self._hits: dict[str, deque[float]] = {}
+
+    def allow(self, key: str, now: float | None = None) -> bool:
+        now = time.time() if now is None else now
+        cutoff = now - self._window
+        hits = self._hits.setdefault(key, deque())
+        while hits and hits[0] < cutoff:
+            hits.popleft()
+        if len(hits) >= self._limit:
+            return False
+        hits.append(now)
+        return True
+
+
+def _rate_limit(request: web.Request, name: str) -> web.Response | None:
+    limiter: SlidingWindowRateLimiter | None = request.app.get(name)
+    if limiter is None:
+        return None
+    ip = _client_ip(request)
+    if limiter.allow(ip):
+        return None
+    log.warning("relay_rate_limited", limiter=name, ip=ip)
+    return web.json_response({"error": "rate limit exceeded"}, status=429)
 
 
 class EventStore:
@@ -276,6 +322,10 @@ def _verify_event(
 
 
 async def post_events(request: web.Request) -> web.Response:
+    limited = _rate_limit(request, "event_rate_limiter")
+    if limited is not None:
+        return limited
+
     try:
         body = await request.json()
     except Exception:
@@ -300,7 +350,7 @@ async def post_events(request: web.Request) -> web.Response:
         return web.json_response({"error": "recipient_tag must be 16 bytes"}, status=400)
 
     try:
-        ciphertext = base64.b64decode(ciphertext_b64)
+        ciphertext = base64.b64decode(ciphertext_b64, validate=True)
     except Exception:
         return web.json_response({"error": "invalid base64"}, status=400)
 
@@ -590,6 +640,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
 
 async def post_rpc(request: web.Request) -> web.Response:
+    limited = _rate_limit(request, "rpc_rate_limiter")
+    if limited is not None:
+        return limited
+
     try:
         body = await request.json()
     except Exception:
@@ -638,6 +692,12 @@ def build_app(
         EventStore(buffer_size=buffer_size, ttl=ttl)
     )
     app["router"] = Router()
+    app["event_rate_limiter"] = SlidingWindowRateLimiter(
+        _env_int("RELAY_EVENTS_PER_IP_HOUR", _DEFAULT_EVENTS_PER_IP_HOUR)
+    )
+    app["rpc_rate_limiter"] = SlidingWindowRateLimiter(
+        _env_int("RELAY_RPC_PER_IP_HOUR", _DEFAULT_RPC_PER_IP_HOUR)
+    )
     app.router.add_post("/events", post_events)
     app.router.add_get("/events", get_events)
     app.router.add_get("/health", health)

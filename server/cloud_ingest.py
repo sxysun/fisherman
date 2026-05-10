@@ -78,8 +78,20 @@ def _storage_backend() -> str:
 
 
 def _enrollment_mode() -> str:
-    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "open").strip().lower()
+    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "closed").strip().lower()
     return mode if mode in {"open", "allowlist", "closed"} else "closed"
+
+
+def _external_llm_enabled() -> bool:
+    return _truthy("FISH_CLOUD_EXTERNAL_LLM_ENABLED")
+
+
+def _default_max_frames_per_hour() -> int:
+    value = os.environ.get("FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR", "").strip()
+    try:
+        return int(value) if value else 1200
+    except ValueError:
+        return 1200
 
 
 def missing_required_env(key_source: str | None = None) -> list[str]:
@@ -109,6 +121,8 @@ def readiness_payload() -> dict[str, Any]:
         "enrollment_mode": _enrollment_mode(),
         "storage": _storage_backend() if ready else None,
         "encryption_key_source": key_source,
+        "external_llm_enabled": _external_llm_enabled(),
+        "default_max_frames_per_hour": _default_max_frames_per_hour(),
         "missing": missing,
     }
 

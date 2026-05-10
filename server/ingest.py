@@ -52,18 +52,38 @@ from auth import (
     AuthContext,
 )
 
+def _truthy(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _external_llm_enabled() -> bool:
+    """Return whether categorization may call a model outside this process.
+
+    Managed multi-tenant Cloud must not leak decrypted OCR/window text to a
+    third-party LLM by accident. Self-hosted deployments keep the older
+    opt-in behavior: setting OPENAI_API_KEY/OPENAI_BASE_URL enables the
+    model path unless FISH_DISABLE_EXTERNAL_LLM is set.
+    """
+    if is_multi_tenant_enabled():
+        return _truthy("FISH_CLOUD_EXTERNAL_LLM_ENABLED")
+    return not _truthy("FISH_DISABLE_EXTERNAL_LLM")
+
+
 try:
     from openai import AsyncOpenAI
     _openai_api_key = os.environ.get("OPENAI_API_KEY")
     _openai_base_url = os.environ.get("OPENAI_BASE_URL")
-    if _openai_api_key or _openai_base_url:
+    if (_openai_api_key or _openai_base_url) and _external_llm_enabled():
         _openai_client = AsyncOpenAI(
             api_key=_openai_api_key or "not-needed",
             base_url=_openai_base_url,
         )
     else:
         _openai_client = None
-        log.warning("openai_not_configured", msg="Set OPENAI_API_KEY for activity categorization")
+        if _openai_api_key or _openai_base_url:
+            log.warning("openai_disabled", msg="External LLM categorization is disabled")
+        else:
+            log.warning("openai_not_configured", msg="Set OPENAI_API_KEY for activity categorization")
 except ImportError:
     _openai_client = None
     log.warning("openai_not_installed", msg="Install openai package for activity categorization")
@@ -71,6 +91,12 @@ except ImportError:
 log = structlog.get_logger()
 
 _pool = ThreadPoolExecutor(max_workers=4)
+
+_DEFAULT_MAX_FRAMES_PER_HOUR = 1200
+_DEFAULT_MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024
+_DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+_DEFAULT_MAX_TEXT_CHARS = 120_000
+_DEFAULT_MAX_URLS = 200
 
 
 def serve(*args, **kwargs):
@@ -107,6 +133,10 @@ class DeputyRateLimitError(RuntimeError):
     """Raised when a deputy exceeds its configured request rate."""
 
 
+class PayloadValidationError(RuntimeError):
+    """Raised when an ingest payload is malformed or exceeds safety limits."""
+
+
 def _env_int(name: str, default: int | None = None) -> int | None:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -118,7 +148,7 @@ def _env_int(name: str, default: int | None = None) -> int | None:
 
 
 def _cloud_enrollment_mode() -> str:
-    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "open").strip().lower()
+    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "closed").strip().lower()
     return mode if mode in {"open", "allowlist", "closed"} else "closed"
 
 
@@ -132,8 +162,33 @@ def _allowed_tenant_pubkeys() -> set[str]:
 
 
 def _default_max_frames_per_hour() -> int | None:
-    limit = _env_int("FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR", None)
+    limit = _env_int("FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR", _DEFAULT_MAX_FRAMES_PER_HOUR)
     return limit if limit and limit > 0 else None
+
+
+def _max_ws_message_bytes() -> int:
+    return (
+        _env_int("FISH_CLOUD_MAX_WS_MESSAGE_BYTES", _DEFAULT_MAX_WS_MESSAGE_BYTES)
+        or _DEFAULT_MAX_WS_MESSAGE_BYTES
+    )
+
+
+def _max_image_bytes() -> int:
+    return (
+        _env_int("FISH_CLOUD_MAX_IMAGE_BYTES", _DEFAULT_MAX_IMAGE_BYTES)
+        or _DEFAULT_MAX_IMAGE_BYTES
+    )
+
+
+def _max_text_chars() -> int:
+    return (
+        _env_int("FISH_CLOUD_MAX_TEXT_CHARS", _DEFAULT_MAX_TEXT_CHARS)
+        or _DEFAULT_MAX_TEXT_CHARS
+    )
+
+
+def _max_urls() -> int:
+    return _env_int("FISH_CLOUD_MAX_URLS", _DEFAULT_MAX_URLS) or _DEFAULT_MAX_URLS
 
 
 def _can_auto_enroll(user_hex: str) -> bool:
@@ -169,7 +224,8 @@ async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT disabled_at, enrollment_state, wrapped_data_key
+            SELECT disabled_at, enrollment_state, wrapped_data_key,
+                   max_frames_per_hour
             FROM users
             WHERE user_pubkey = $1
             """,
@@ -227,16 +283,41 @@ async def _ensure_tenant(db: asyncpg.Pool, ctx: AuthContext) -> str | None:
                 stored_wrapped = _row_get(stored, "wrapped_data_key")
                 if stored_wrapped:
                     tenant_key = unwrap_data_key(bytes(stored_wrapped))
+            if _row_get(row, "max_frames_per_hour") is None:
+                default_limit = _default_max_frames_per_hour()
+                if default_limit:
+                    await conn.execute(
+                        """
+                        UPDATE users
+                        SET max_frames_per_hour = $2
+                        WHERE user_pubkey = $1
+                          AND max_frames_per_hour IS NULL
+                        """,
+                        ctx.user_hex,
+                        default_limit,
+                    )
 
-        await conn.execute(
+        device = await conn.fetchrow(
             """
-            INSERT INTO devices (user_pubkey, device_pubkey)
-            VALUES ($1, $2)
-            ON CONFLICT (user_pubkey, device_pubkey) DO NOTHING
+            SELECT revoked_at
+            FROM devices
+            WHERE user_pubkey = $1 AND device_pubkey = $2
             """,
             ctx.user_hex,
             ctx.actor_hex,
         )
+        if _row_get(device, "revoked_at") is not None:
+            raise TenantEnrollmentError("device is revoked")
+        if device is None:
+            await conn.execute(
+                """
+                INSERT INTO devices (user_pubkey, device_pubkey)
+                VALUES ($1, $2)
+                ON CONFLICT (user_pubkey, device_pubkey) DO NOTHING
+                """,
+                ctx.user_hex,
+                ctx.actor_hex,
+            )
     return tenant_key
 
 
@@ -324,6 +405,56 @@ async def _backfill_single_tenant_owner(db: asyncpg.Pool, owner_pubkey: bytes) -
             owner_hex,
         )
     log.info("unscoped_rows_scoped_to_owner", owner=owner_hex[:16])
+
+
+def _coerce_text_field(msg: dict, field: str, *, default: str = "") -> str:
+    value = msg.get(field, default)
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise PayloadValidationError(f"{field} must be a string")
+    if len(value) > _max_text_chars():
+        raise PayloadValidationError(f"{field} exceeds max length")
+    return value
+
+
+def _coerce_urls(msg: dict) -> list[str]:
+    value = msg.get("urls", [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise PayloadValidationError("urls must be a list")
+    if len(value) > _max_urls():
+        raise PayloadValidationError("urls exceeds max length")
+    out: list[str] = []
+    for url in value:
+        if not isinstance(url, str):
+            raise PayloadValidationError("urls must contain strings")
+        if len(url) > 4096:
+            raise PayloadValidationError("url exceeds max length")
+        out.append(url)
+    return out
+
+
+def _decode_image_b64(value: object) -> bytes | None:
+    if not value:
+        return None
+    if not isinstance(value, str):
+        raise PayloadValidationError("image must be base64 string")
+    try:
+        data = base64.b64decode(value, validate=True)
+    except Exception as exc:
+        raise PayloadValidationError("image must be valid base64") from exc
+    if len(data) > _max_image_bytes():
+        raise PayloadValidationError("image exceeds max size")
+    return data
+
+
+def _coerce_ts(msg: dict) -> float:
+    ts = msg.get("ts")
+    if not isinstance(ts, (int, float)):
+        raise PayloadValidationError("ts must be numeric")
+    return float(ts)
 
 
 def _require_http_context(request: "web.Request") -> AuthContext | None:
@@ -490,11 +621,12 @@ async def _handle_frame(
     tenant_data_key: str | None = None,
 ) -> None:
     """Process a single frame: encrypt sensitive fields, upload image, store to Postgres."""
-    ts = msg["ts"]
-    ocr_text = msg.get("ocr_text", "")
-    urls = msg.get("urls", [])
-
-    window = msg.get("window", "")
+    ts = _coerce_ts(msg)
+    ocr_text = _coerce_text_field(msg, "ocr_text")
+    urls = _coerce_urls(msg)
+    window = _coerce_text_field(msg, "window")
+    app = _coerce_text_field(msg, "app", default="") or None
+    bundle = _coerce_text_field(msg, "bundle", default="") or None
     await _check_frame_quota(db, ctx)
 
     # Encrypt sensitive fields (CPU-bound, run in thread)
@@ -506,9 +638,8 @@ async def _handle_frame(
 
     # Encrypt and upload image to R2 (I/O-bound, run in thread)
     image_key = None
-    image_b64 = msg.get("image")
-    if image_b64:
-        jpeg_data = base64.b64decode(image_b64)
+    jpeg_data = _decode_image_b64(msg.get("image"))
+    if jpeg_data is not None:
         image_key = await loop.run_in_executor(
             _pool,
             partial(r2.upload, jpeg_data, ts, user_pubkey=ctx.user_hex, data_key=tenant_data_key),
@@ -534,8 +665,8 @@ async def _handle_frame(
             ctx.user_hex,
             ctx.actor_hex,
             ts,
-            msg.get("app"),
-            msg.get("bundle"),
+            app,
+            bundle,
             enc_window,
             enc_ocr,
             enc_urls,
@@ -550,7 +681,7 @@ async def _handle_frame(
         "frame_stored",
         ts=ts,
         image_key=image_key,
-        app=msg.get("app"),
+        app=app,
         user=ctx.user_hex[:16],
         actor=ctx.actor_hex[:16],
     )
@@ -564,10 +695,12 @@ async def _handle_audio(
     tenant_data_key: str | None = None,
 ) -> None:
     """Store a meeting audio transcript (encrypted)."""
-    ts = msg["ts"]
-    transcript = msg.get("transcript", "")
+    ts = _coerce_ts(msg)
+    transcript = _coerce_text_field(msg, "transcript")
     if not transcript:
         return
+    meeting_app = _coerce_text_field(msg, "meeting_app", default="") or None
+    device_name = _coerce_text_field(msg, "device_name", default="") or None
 
     enc_transcript = await loop.run_in_executor(
         _pool,
@@ -585,16 +718,16 @@ async def _handle_audio(
             ctx.user_hex,
             ctx.actor_hex,
             ts,
-            msg.get("meeting_app"),
-            msg.get("device_name"),
-            msg.get("is_input_device"),
+            meeting_app,
+            device_name,
+            bool(msg.get("is_input_device")),
             enc_transcript,
         )
 
     log.info(
         "audio_stored",
         ts=ts,
-        app=msg.get("meeting_app"),
+        app=meeting_app,
         user=ctx.user_hex[:16],
         chars=len(transcript),
         input=msg.get("is_input_device"),
@@ -920,6 +1053,10 @@ async def _http_health(request: "web.Request") -> "web.Response":
         "multi_tenant": is_multi_tenant_enabled(),
         "enrollment_mode": _cloud_enrollment_mode() if is_multi_tenant_enabled() else None,
         "storage": storage_backend,
+        "external_llm_enabled": _external_llm_enabled(),
+        "default_max_frames_per_hour": _default_max_frames_per_hour(),
+        "max_ws_message_bytes": _max_ws_message_bytes(),
+        "max_image_bytes": _max_image_bytes(),
         "missing": [],
     })
 
@@ -1428,6 +1565,13 @@ async def _handle_connection(
                     reason=str(e),
                 )
                 await ws.send(json.dumps({"type": "error", "error": str(e)}))
+            except PayloadValidationError as e:
+                log.warning(
+                    "payload_rejected",
+                    user=ctx.user_hex[:16],
+                    reason=str(e),
+                )
+                await ws.send(json.dumps({"type": "error", "error": str(e)}))
             except Exception:
                 log.warning("frame_processing_failed", exc_info=True)
     except ConnectionClosed:
@@ -1481,7 +1625,7 @@ async def _run(host: str, port: int) -> None:
         host,
         port,
         process_request=_auth_check,
-        max_size=None,  # frames can be large
+        max_size=_max_ws_message_bytes(),
     ):
         log.info("ingest_server_started", host=host, port=port)
         await stop.wait()

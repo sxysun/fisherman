@@ -115,7 +115,16 @@ class RecordingConn:
                     "wrapped_data_key": None,
                 },
             )
-            row["wrapped_data_key"] = args[1]
+            if "SET wrapped_data_key" in normalized:
+                row["wrapped_data_key"] = args[1]
+            elif "SET max_frames_per_hour" in normalized:
+                row["max_frames_per_hour"] = args[1]
+        elif normalized.startswith("INSERT INTO devices"):
+            self._pool.devices[(args[0], args[1])] = {
+                "user_pubkey": args[0],
+                "device_pubkey": args[1],
+                "revoked_at": None,
+            }
         elif normalized.startswith("INSERT INTO frames"):
             self._pool.frames.append(
                 {
@@ -160,6 +169,8 @@ class RecordingConn:
         user_pubkey = args[0]
         if "FROM users" in normalized:
             return self._pool.users.get(user_pubkey)
+        if "FROM devices" in normalized:
+            return self._pool.devices.get((args[0], args[1]))
         if "FROM deputies" in normalized:
             row = self._pool.deputies.get((args[0], args[1]))
             if row and row.get("revoked_at") is None:
@@ -230,6 +241,7 @@ class RecordingPool:
         self.transcript_rows = []
         self.deputies = {}
         self.users = {}
+        self.devices = {}
         self.deputy_rate_events = []
 
     def acquire(self):
@@ -255,6 +267,7 @@ class FakeStorage:
                 "timestamp": timestamp,
                 "user_pubkey": user_pubkey,
                 "key": key,
+                "data_key": data_key,
             }
         )
         return key
@@ -385,7 +398,45 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ingest.TenantEnrollmentError):
             await ingest._ensure_tenant(db, ctx_b)
 
+    async def test_closed_enrollment_rejects_new_cloud_tenant_by_default(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            role="tenant",
+        )
+
+        self.assertEqual(ingest._cloud_enrollment_mode(), "closed")
+        with self.assertRaises(ingest.TenantEnrollmentError):
+            await ingest._ensure_tenant(db, ctx_a)
+        self.assertNotIn(_pub_hex(SEED_A), db.users)
+
+    async def test_existing_cloud_tenant_gets_default_quota_and_revoked_device_rejected(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        pub_a = _pub_hex(SEED_A)
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(pub_a),
+            user_pubkey=bytes.fromhex(pub_a),
+            role="tenant",
+        )
+        db.users[pub_a] = {
+            "disabled_at": None,
+            "enrollment_state": "active",
+            "max_frames_per_hour": None,
+            "wrapped_data_key": None,
+        }
+
+        await ingest._ensure_tenant(db, ctx_a)
+        self.assertEqual(db.users[pub_a]["max_frames_per_hour"], 1200)
+
+        db.devices[(pub_a, pub_a)]["revoked_at"] = time.time()
+        with self.assertRaises(ingest.TenantEnrollmentError):
+            await ingest._ensure_tenant(db, ctx_a)
+
     async def test_new_cloud_rows_use_per_tenant_data_key(self):
+        os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "open"
         ingest = _load_ingest_module()
         db = RecordingPool()
         storage = FakeStorage()
@@ -423,12 +474,61 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Exception):
             crypto.decrypt_text(db.frames[0]["ocr_text"])
 
+    async def test_cloud_rejects_oversized_frame_image(self):
+        ingest = _load_ingest_module()
+        os.environ["FISH_CLOUD_MAX_IMAGE_BYTES"] = "3"
+        db = RecordingPool()
+        storage = FakeStorage()
+        loop = asyncio.get_running_loop()
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            role="tenant",
+        )
+
+        with self.assertRaises(ingest.PayloadValidationError):
+            await ingest._handle_frame(
+                {
+                    "type": "frame",
+                    "ts": 1710000000.0,
+                    "app": "Code",
+                    "bundle": "com.example.code",
+                    "window": "Tenant A",
+                    "ocr_text": "tenant-key-only",
+                    "urls": [],
+                    "image": base64.b64encode(b"jpeg").decode("ascii"),
+                },
+                db,
+                storage,
+                loop,
+                ctx_a,
+            )
+
+    async def test_multi_tenant_cloud_disables_external_llm_by_default(self):
+        os.environ["OPENAI_API_KEY"] = "test-key"
+        os.environ.pop("FISH_CLOUD_EXTERNAL_LLM_ENABLED", None)
+        ingest = _load_ingest_module()
+
+        self.assertFalse(ingest._external_llm_enabled())
+        self.assertIsNone(ingest._openai_client)
+
+        os.environ["FISH_CLOUD_EXTERNAL_LLM_ENABLED"] = "1"
+        ingest = _load_ingest_module()
+        self.assertTrue(ingest._external_llm_enabled())
+
     async def test_current_activity_is_filtered_by_authenticated_tenant(self):
         ingest = _load_ingest_module()
         db = RecordingPool()
         crypto = sys.modules["crypto"]
         pub_a = _pub_hex(SEED_A)
         pub_b = _pub_hex(SEED_B)
+        for pub in (pub_a, pub_b):
+            db.users[pub] = {
+                "disabled_at": None,
+                "enrollment_state": "active",
+                "max_frames_per_hour": None,
+                "wrapped_data_key": None,
+            }
         db.activity_rows = {
             pub_a: {
                 "ts": type("Ts", (), {"timestamp": lambda self: time.time(), "isoformat": lambda self: "a"})(),
@@ -571,6 +671,12 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         db = RecordingPool()
         pub_a = _pub_hex(SEED_A)
         pub_b = _pub_hex(SEED_B)
+        db.users[pub_a] = {
+            "disabled_at": None,
+            "enrollment_state": "active",
+            "max_frames_per_hour": None,
+            "wrapped_data_key": None,
+        }
 
         put_resp = await ingest._http_put_deputy(FakeRequest(
             _fishkey(SEED_A),
