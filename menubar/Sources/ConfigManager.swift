@@ -207,7 +207,7 @@ final class ConfigManager {
         var outputLines = existingLines
         var keysWritten = Set<String>()
 
-        let updates: [(String, String)] = [
+        var updates: [(String, String)] = [
             ("FISH_BACKEND_MODE", backendMode),
             ("FISH_BACKEND_URL", backendURL),
             ("FISH_STATUS_RELAY_URL", statusRelayURL),
@@ -215,10 +215,19 @@ final class ConfigManager {
             ("FISH_PRIVATE_KEY", privateKeyHex),
             ("FISH_DISPLAY_NAME", displayName),
         ]
+        let persistServerURL = (
+            backendMode == "self_hosted"
+            || (backendMode == "cloud"
+                && serverURL.hasPrefix("ws")
+                && serverURL != defaultServerURL)
+        )
+        if persistServerURL {
+            updates.append(("FISH_SERVER_URL", serverURL))
+        }
 
         // Track which line indices to delete (duplicates of any tracked key)
         var indicesToDelete = Set<Int>()
-        for key in ["FISH_SERVER_URL"] {
+        for key in persistServerURL ? [] : ["FISH_SERVER_URL"] {
             for index in knownKeyLines[key] ?? [] {
                 indicesToDelete.insert(index)
             }
@@ -433,7 +442,12 @@ final class ConfigManager {
             if backendURL.hasPrefix("ws://") || backendURL.hasPrefix("wss://") {
                 serverURL = Self.ingestURL(from: backendURL)
             } else {
-                serverURL = defaultServerURL
+                let expected = Self.ingestURL(from: backendURL)
+                if loadedKeys.contains("FISH_SERVER_URL") && serverURL == expected {
+                    serverURL = expected
+                } else {
+                    serverURL = defaultServerURL
+                }
             }
         }
     }
