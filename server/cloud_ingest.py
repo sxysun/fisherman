@@ -32,6 +32,38 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _managed_status_llm_api_key() -> str:
+    return (
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("FISH_STATUS_LLM_API_KEY")
+        or ""
+    ).strip()
+
+
+def _managed_status_llm_base_url() -> str:
+    return (
+        os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("FISH_STATUS_LLM_BASE_URL")
+        or "https://openrouter.ai/api/v1"
+    ).strip()
+
+
+def _managed_status_llm_model() -> str:
+    return (
+        os.environ.get("OPENAI_MODEL")
+        or os.environ.get("FISH_STATUS_LLM_MODEL")
+        or "openai/gpt-4o-mini"
+    ).strip()
+
+
 def _ensure_encryption_key() -> str | None:
     """Load or create the Fernet key used by storage.py.
 
@@ -83,7 +115,7 @@ def _enrollment_mode() -> str:
 
 
 def _external_llm_enabled() -> bool:
-    return _truthy("FISH_CLOUD_EXTERNAL_LLM_ENABLED")
+    return _env_bool("FISH_CLOUD_EXTERNAL_LLM_ENABLED", True)
 
 
 def _default_max_frames_per_hour() -> int:
@@ -122,6 +154,9 @@ def readiness_payload() -> dict[str, Any]:
         "storage": _storage_backend() if ready else None,
         "encryption_key_source": key_source,
         "external_llm_enabled": _external_llm_enabled(),
+        "managed_llm_configured": bool(_managed_status_llm_api_key()),
+        "status_llm_base_url": _managed_status_llm_base_url(),
+        "status_llm_model": _managed_status_llm_model(),
         "default_max_frames_per_hour": _default_max_frames_per_hour(),
         "missing": missing,
     }

@@ -8,7 +8,11 @@ CREATE TABLE IF NOT EXISTS users (
     max_storage_mb INT,
     wrapped_data_key BYTEA,
     data_key_created_at TIMESTAMPTZ,
-    data_key_rotated_at TIMESTAMPTZ
+    data_key_rotated_at TIMESTAMPTZ,
+    status_llm_mode TEXT NOT NULL DEFAULT 'managed',
+    status_llm_base_url TEXT,
+    status_llm_model TEXT,
+    status_llm_api_key BYTEA
 );
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS enrollment_state TEXT NOT NULL DEFAULT 'active';
@@ -18,6 +22,10 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS max_storage_mb INT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS wrapped_data_key BYTEA;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS data_key_created_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS data_key_rotated_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_mode TEXT NOT NULL DEFAULT 'managed';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_base_url TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_model TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS status_llm_api_key BYTEA;
 
 CREATE TABLE IF NOT EXISTS devices (
     user_pubkey   TEXT NOT NULL REFERENCES users(user_pubkey) ON DELETE CASCADE,

@@ -103,6 +103,10 @@ class RecordingConn:
                     "enrollment_state": "active",
                     "max_frames_per_hour": args[1] if len(args) > 1 else None,
                     "wrapped_data_key": args[2] if len(args) > 2 else None,
+                    "status_llm_mode": "managed",
+                    "status_llm_base_url": None,
+                    "status_llm_model": None,
+                    "status_llm_api_key": None,
                 },
             )
         elif normalized.startswith("UPDATE users"):
@@ -113,9 +117,19 @@ class RecordingConn:
                     "enrollment_state": "active",
                     "max_frames_per_hour": None,
                     "wrapped_data_key": None,
+                    "status_llm_mode": "managed",
+                    "status_llm_base_url": None,
+                    "status_llm_model": None,
+                    "status_llm_api_key": None,
                 },
             )
-            if "SET wrapped_data_key" in normalized:
+            if "status_llm_mode" in normalized:
+                row["status_llm_mode"] = args[1]
+                row["status_llm_base_url"] = args[2]
+                row["status_llm_model"] = args[3]
+                if len(args) > 4:
+                    row["status_llm_api_key"] = args[4]
+            elif "SET wrapped_data_key" in normalized:
                 row["wrapped_data_key"] = args[1]
             elif "SET max_frames_per_hour" in normalized:
                 row["max_frames_per_hour"] = args[1]
@@ -504,17 +518,16 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
                 ctx_a,
             )
 
-    async def test_multi_tenant_cloud_disables_external_llm_by_default(self):
+    async def test_multi_tenant_cloud_enables_external_llm_by_default_with_kill_switch(self):
         os.environ["OPENAI_API_KEY"] = "test-key"
         os.environ.pop("FISH_CLOUD_EXTERNAL_LLM_ENABLED", None)
         ingest = _load_ingest_module()
 
-        self.assertFalse(ingest._external_llm_enabled())
-        self.assertIsNone(ingest._openai_client)
-
-        os.environ["FISH_CLOUD_EXTERNAL_LLM_ENABLED"] = "1"
-        ingest = _load_ingest_module()
         self.assertTrue(ingest._external_llm_enabled())
+
+        os.environ["FISH_CLOUD_EXTERNAL_LLM_ENABLED"] = "0"
+        ingest = _load_ingest_module()
+        self.assertFalse(ingest._external_llm_enabled())
 
     async def test_current_activity_is_filtered_by_authenticated_tenant(self):
         ingest = _load_ingest_module()
@@ -552,20 +565,67 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(fetchrow_args, [pub_a, pub_b])
 
-    async def test_activity_categorizer_has_private_heuristic_fallback(self):
+    async def test_activity_categorizer_uses_private_heuristic_only_when_no_llm_mode(self):
         ingest = _load_ingest_module()
-        ingest._openai_client = None
 
         activity = await ingest._categorize_activity(
             "Terminal",
             "secret customer incident",
             "alice@example.com password token",
+            {"mode": "none"},
         )
 
         self.assertEqual(activity["category"], "terminal")
         self.assertEqual(activity["status"], "using terminal")
         self.assertNotIn("alice", activity["status"])
         self.assertNotIn("password", activity["status"])
+
+    async def test_activity_categorizer_does_not_use_heuristic_when_llm_key_missing(self):
+        ingest = _load_ingest_module()
+
+        activity = await ingest._categorize_activity(
+            "Terminal",
+            "secret customer incident",
+            "alice@example.com password token",
+            {
+                "mode": "managed",
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "openai/gpt-4o-mini",
+                "api_key": "",
+                "external_llm_enabled": True,
+            },
+        )
+
+        self.assertIsNone(activity)
+
+    async def test_owner_can_configure_status_llm_settings_on_backend(self):
+        os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "open"
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+
+        put_resp = await ingest._http_put_status_llm(FakeRequest(
+            _fishkey(SEED_A),
+            db,
+            body={
+                "mode": "byo",
+                "base_url": "https://openrouter.ai/api/v1",
+                "model": "openai/gpt-4o-mini",
+                "api_key": "sk-test",
+            },
+        ))
+
+        body = json.loads(put_resp.text)
+        pub_a = _pub_hex(SEED_A)
+        self.assertEqual(put_resp.status, 200)
+        self.assertEqual(body["mode"], "byo")
+        self.assertTrue(body["api_key_configured"])
+        self.assertNotEqual(db.users[pub_a]["status_llm_api_key"], b"sk-test")
+
+        get_resp = await ingest._http_get_status_llm(FakeRequest(_fishkey(SEED_A), db))
+        get_body = json.loads(get_resp.text)
+        self.assertEqual(get_resp.status, 200)
+        self.assertEqual(get_body["mode"], "byo")
+        self.assertTrue(get_body["api_key_configured"])
 
     async def test_backend_deputy_query_requires_scope_and_filters_tenant(self):
         ingest = _load_ingest_module()

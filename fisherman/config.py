@@ -331,3 +331,9 @@ class FishermanConfig(BaseSettings):
     # public name; FISH_LEDGER_URL remains readable for older configs.
     status_relay_url: str = ""
     ledger_url: str = DEFAULT_STATUS_RELAY_URL
+
+    # Activity status generation. The backend also stores per-tenant values;
+    # these env values keep the local Settings UI and Local Only mode explicit.
+    status_llm_mode: str = "managed"  # managed | byo | none
+    status_llm_base_url: str = "https://openrouter.ai/api/v1"
+    status_llm_model: str = "openai/gpt-4o-mini"

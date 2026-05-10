@@ -1071,6 +1071,160 @@ def backend_configure_cloud(
     click.echo("Restart the daemon for changes to take effect.")
 
 
+def _active_backend_base_url(cfg: FishermanConfig) -> str:
+    if cfg.backend_mode in {"cloud", "self_hosted"} and cfg.backend_url:
+        return cfg.backend_url
+    return ""
+
+
+def _status_llm_backend_request(
+    method: str,
+    body: dict | None = None,
+    *,
+    timeout: float = 15.0,
+) -> dict:
+    cfg = FishermanConfig()
+    backend_url = _active_backend_base_url(cfg)
+    if not backend_url:
+        raise click.ClickException("no active Cloud/Self-hosted backend")
+
+    seed_hex = cfg.private_key
+    if not seed_hex:
+        _load_keys()  # auto-mints and persists a single identity if missing
+        cfg = FishermanConfig()
+        seed_hex = cfg.private_key
+    auth, _pub = _fishkey_header(seed_hex)
+    data = None
+    headers = {"Authorization": auth}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        _backend_api_url(backend_url, "/api/status-llm"),
+        method=method,
+        data=data,
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise click.ClickException(f"backend returned HTTP {e.code}: {detail}") from e
+    except Exception as e:
+        raise click.ClickException(f"backend status LLM request failed: {e}") from e
+
+
+def _local_status_llm_settings() -> dict:
+    cfg = FishermanConfig()
+    return {
+        "mode": cfg.status_llm_mode,
+        "base_url": cfg.status_llm_base_url,
+        "model": cfg.status_llm_model,
+        "api_key_configured": False,
+        "managed_key_configured": False,
+        "external_llm_enabled": cfg.status_llm_mode != "none",
+        "backend_mode": cfg.backend_mode,
+        "backend_url": cfg.backend_url,
+    }
+
+
+@main.group(name="activity-status")
+def activity_status_group():
+    """Configure ambient activity-status generation."""
+
+
+@activity_status_group.command(name="status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def activity_status_status(as_json: bool):
+    """Show the effective status-generation settings."""
+    cfg = FishermanConfig()
+    if _active_backend_base_url(cfg):
+        try:
+            out = _status_llm_backend_request("GET")
+            out["backend_mode"] = cfg.backend_mode
+            out["backend_url"] = cfg.backend_url
+        except click.ClickException as e:
+            out = _local_status_llm_settings()
+            out["backend_error"] = str(e)
+    else:
+        out = _local_status_llm_settings()
+
+    if as_json:
+        click.echo(json.dumps(out, indent=2))
+        return
+    click.echo(f"mode:       {out.get('mode')}")
+    click.echo(f"backend:    {out.get('backend_mode') or cfg.backend_mode}")
+    click.echo(f"base_url:   {out.get('base_url') or 'default'}")
+    click.echo(f"model:      {out.get('model') or 'default'}")
+    click.echo(f"api key:    {'configured' if out.get('api_key_configured') else 'not configured'}")
+    if out.get("mode") == "managed":
+        click.echo(f"managed:    {'configured' if out.get('managed_key_configured') else 'missing'}")
+    if out.get("backend_error"):
+        click.echo(f"warning:    {out['backend_error']}", err=True)
+
+
+@activity_status_group.command(name="configure")
+@click.option("--mode", required=True, type=click.Choice(["managed", "byo", "none"]),
+              help="managed uses backend key, byo uses your supplied key, none disables LLM.")
+@click.option("--base-url", default=None, help="OpenAI-compatible base URL.")
+@click.option("--model", default=None, help="Model name, e.g. openai/gpt-4o-mini.")
+@click.option("--api-key", default=None, help="BYO API key. Stored encrypted on Cloud/Self-hosted.")
+@click.option("--clear-api-key", is_flag=True, help="Remove the stored BYO API key.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def activity_status_configure(
+    mode: str,
+    base_url: str | None,
+    model: str | None,
+    api_key: str | None,
+    clear_api_key: bool,
+    as_json: bool,
+):
+    """Configure LLM use for activity status on the active backend."""
+    from fisherman import config as _cfg
+
+    cfg = FishermanConfig()
+    base = (base_url or cfg.status_llm_base_url).strip()
+    chosen_model = (model or cfg.status_llm_model).strip()
+
+    _cfg.persist_user_env_var("FISH_STATUS_LLM_MODE", mode)
+    if base:
+        _cfg.persist_user_env_var("FISH_STATUS_LLM_BASE_URL", base)
+    if chosen_model:
+        _cfg.persist_user_env_var("FISH_STATUS_LLM_MODEL", chosen_model)
+
+    body = {
+        "mode": mode,
+        "base_url": base,
+        "model": chosen_model,
+    }
+    if api_key:
+        body["api_key"] = api_key
+    if clear_api_key:
+        body["clear_api_key"] = True
+
+    if _active_backend_base_url(cfg):
+        out = _status_llm_backend_request("PUT", body)
+        out["backend_mode"] = cfg.backend_mode
+        out["backend_url"] = cfg.backend_url
+    else:
+        out = _local_status_llm_settings()
+        out.update({"mode": mode, "base_url": base, "model": chosen_model, "ok": True})
+
+    if as_json:
+        click.echo(json.dumps(out, indent=2))
+        return
+    click.echo(f"configured activity status: {mode}")
+    click.echo(f"  model:   {chosen_model or 'default'}")
+    click.echo(f"  backend: {out.get('backend_mode') or cfg.backend_mode}")
+    if mode == "none":
+        click.echo("  LLM:     disabled; heuristic status only")
+    elif mode == "byo":
+        click.echo(f"  key:     {'configured' if out.get('api_key_configured') else 'unchanged / missing'}")
+    else:
+        click.echo(f"  managed: {'configured' if out.get('managed_key_configured') else 'missing'}")
+
+
 @main.group(name="cloud")
 def cloud_group():
     """Fisherman Cloud operations."""

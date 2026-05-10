@@ -34,12 +34,12 @@ struct SettingsView: View {
     private let friendAudiences = ["friends", "work", "close", "custom"]
 
     enum SettingsTab: String, CaseIterable {
-        case server = "Backend"
+        case server = "Context Home"
         case identity = "Identity"
         case friends = "Friends"
         case deputies = "Agent Access"
         case storage = "Backup"
-        case agent = "Agent"
+        case agent = "Activity Status"
         case diagnostics = "Diagnostics"
     }
 
@@ -88,7 +88,7 @@ struct SettingsView: View {
                     case .storage:
                         BackupTab()
                     case .agent:
-                        AgentTab()
+                        ActivityStatusTab(config: config)
                     case .diagnostics:
                         DiagnosticsTab()
                     }
@@ -160,7 +160,7 @@ struct SettingsView: View {
 
     private var serverTab: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionHeader("Backend")
+            sectionHeader("Context Home")
 
             Picker("Mode", selection: $backendMode) {
                 Text("Local Only").tag("local")
@@ -170,7 +170,7 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
 
             if backendMode == "cloud" {
-                hintText("Managed by Fisherman. Service endpoints and encrypted friend-status relay are configured automatically.")
+                hintText("New context is stored and processed by Fisherman Cloud. Changing homes affects new uploads only; history is not copied automatically.")
                 hintText("Raw context is processed inside the attested Cloud CVM and encrypted at rest with a CVM-held key. This is not client-held end-to-end encryption from the Fisherman operator yet.")
                 hintText("Friend status uses separate end-to-end encryption to each friend; the relay does not receive plaintext status.")
                 HStack(spacing: 8) {
@@ -188,9 +188,9 @@ struct SettingsView: View {
                 }
             } else if backendMode == "self_hosted" {
                 fieldRow("Self-hosted URL", placeholder: "wss://your-server:9999/ingest", text: $selfHostedURL)
-                hintText("Use this when you run your own Fisherman server. One URL is enough; Fisherman derives the activity and history endpoints automatically.")
+                hintText("New context is written to the server you operate. One URL is enough; Fisherman derives activity, history, and agent endpoints automatically.")
             } else {
-                hintText("Raw context stays on this laptop. Friend status can still use the encrypted relay when configured.")
+                hintText("New context stays on this laptop. Agent access requires this Mac to be online, while friend status can still use the encrypted relay.")
             }
 
             DisclosureGroup("Advanced endpoints", isExpanded: $showAdvancedBackend) {
@@ -210,7 +210,7 @@ struct SettingsView: View {
             }
             .font(.system(size: 12, weight: .medium))
 
-            hintText("Backup and agent access are optional capabilities. They are not required for Self-hosted or Fisherman Cloud.")
+            hintText("Backup is only for laptop-local copies. Agent access and activity status use whichever context home is active.")
         }
     }
 

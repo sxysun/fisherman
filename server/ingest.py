@@ -56,36 +56,28 @@ def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _external_llm_enabled() -> bool:
     """Return whether categorization may call a model outside this process.
 
-    Managed multi-tenant Cloud must not leak decrypted OCR/window text to a
-    third-party LLM by accident. Self-hosted deployments keep the older
-    opt-in behavior: setting OPENAI_API_KEY/OPENAI_BASE_URL enables the
-    model path unless FISH_DISABLE_EXTERNAL_LLM is set.
+    Users choose the LLM mode per tenant. This switch is the operator-level
+    kill switch for managed Cloud or self-hosted deployments.
     """
     if is_multi_tenant_enabled():
-        return _truthy("FISH_CLOUD_EXTERNAL_LLM_ENABLED")
+        return _env_bool("FISH_CLOUD_EXTERNAL_LLM_ENABLED", True)
     return not _truthy("FISH_DISABLE_EXTERNAL_LLM")
 
 
 try:
     from openai import AsyncOpenAI
-    _openai_api_key = os.environ.get("OPENAI_API_KEY")
-    _openai_base_url = os.environ.get("OPENAI_BASE_URL")
-    if (_openai_api_key or _openai_base_url) and _external_llm_enabled():
-        _openai_client = AsyncOpenAI(
-            api_key=_openai_api_key or "not-needed",
-            base_url=_openai_base_url,
-        )
-    else:
-        _openai_client = None
-        if _openai_api_key or _openai_base_url:
-            log.warning("openai_disabled", msg="External LLM categorization is disabled")
-        else:
-            log.warning("openai_not_configured", msg="Set OPENAI_API_KEY for activity categorization")
 except ImportError:
-    _openai_client = None
+    AsyncOpenAI = None
     log.warning("openai_not_installed", msg="Install openai package for activity categorization")
 
 log = structlog.get_logger()
@@ -97,6 +89,9 @@ _DEFAULT_MAX_WS_MESSAGE_BYTES = 16 * 1024 * 1024
 _DEFAULT_MAX_IMAGE_BYTES = 8 * 1024 * 1024
 _DEFAULT_MAX_TEXT_CHARS = 120_000
 _DEFAULT_MAX_URLS = 200
+_DEFAULT_STATUS_LLM_BASE_URL = "https://openrouter.ai/api/v1"
+_DEFAULT_STATUS_LLM_MODEL = "openai/gpt-4o-mini"
+_STATUS_LLM_MODES = {"managed", "byo", "none"}
 
 
 def serve(*args, **kwargs):
@@ -189,6 +184,36 @@ def _max_text_chars() -> int:
 
 def _max_urls() -> int:
     return _env_int("FISH_CLOUD_MAX_URLS", _DEFAULT_MAX_URLS) or _DEFAULT_MAX_URLS
+
+
+def _status_llm_mode(value: str | None) -> str:
+    mode = (value or "managed").strip().lower()
+    return mode if mode in _STATUS_LLM_MODES else "managed"
+
+
+def _managed_status_llm_api_key() -> str:
+    return (
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("FISH_STATUS_LLM_API_KEY")
+        or ""
+    ).strip()
+
+
+def _managed_status_llm_base_url() -> str:
+    return (
+        os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("FISH_STATUS_LLM_BASE_URL")
+        or _DEFAULT_STATUS_LLM_BASE_URL
+    ).strip()
+
+
+def _managed_status_llm_model() -> str:
+    return (
+        os.environ.get("OPENAI_MODEL")
+        or os.environ.get("FISH_STATUS_LLM_MODEL")
+        or _DEFAULT_STATUS_LLM_MODEL
+    ).strip()
 
 
 def _can_auto_enroll(user_hex: str) -> bool:
@@ -331,6 +356,68 @@ async def _tenant_data_key(db: asyncpg.Pool, user_hex: str | None) -> str | None
         )
     wrapped = _row_get(row, "wrapped_data_key")
     return unwrap_data_key(bytes(wrapped)) if wrapped else None
+
+
+async def _status_llm_settings(
+    db: asyncpg.Pool,
+    user_hex: str | None,
+    data_key: str | None,
+) -> dict:
+    """Return effective per-user status LLM settings.
+
+    mode=managed uses the deployment/OpenRouter key. mode=byo uses the
+    user's encrypted key. mode=none is the only path that intentionally uses
+    heuristic status text.
+    """
+    settings = {
+        "mode": "managed",
+        "base_url": _managed_status_llm_base_url(),
+        "model": _managed_status_llm_model(),
+        "api_key": "",
+        "api_key_configured": False,
+        "managed_key_configured": bool(_managed_status_llm_api_key()),
+        "external_llm_enabled": _external_llm_enabled(),
+    }
+    if not user_hex or user_hex == "unscoped":
+        settings["api_key"] = _managed_status_llm_api_key()
+        settings["api_key_configured"] = bool(settings["api_key"])
+        return settings
+
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT status_llm_mode, status_llm_base_url, status_llm_model,
+                   status_llm_api_key
+            FROM users
+            WHERE user_pubkey = $1
+            """,
+            user_hex,
+        )
+
+    mode = _status_llm_mode(_row_get(row, "status_llm_mode"))
+    settings["mode"] = mode
+    settings["base_url"] = (
+        _row_get(row, "status_llm_base_url")
+        or _managed_status_llm_base_url()
+    )
+    settings["model"] = (
+        _row_get(row, "status_llm_model")
+        or _managed_status_llm_model()
+    )
+
+    if mode == "byo":
+        encrypted_key = _row_get(row, "status_llm_api_key")
+        if encrypted_key:
+            try:
+                settings["api_key"] = _decrypt_text_for_user(bytes(encrypted_key), data_key)
+            except Exception:
+                settings["api_key"] = ""
+        settings["api_key_configured"] = bool(settings["api_key"])
+    elif mode == "managed":
+        settings["api_key"] = _managed_status_llm_api_key()
+        settings["api_key_configured"] = bool(settings["api_key"])
+
+    return settings
 
 
 def _decrypt_text_for_user(ciphertext: bytes, data_key: str | None) -> str:
@@ -853,14 +940,38 @@ async def _categorize_activity(
     app: str | None,
     window: str,
     ocr_text: str,
+    llm_settings: dict | None = None,
 ) -> dict | None:
     """Call OpenAI API to categorize activity with open-ended emoji + category.
 
     Returns {"emoji": "...", "category": "...", "status": "..."} or None on error.
     """
     fallback = _heuristic_activity(app, window, ocr_text)
-    if not _openai_client:
+    settings = llm_settings or {
+        "mode": "managed",
+        "base_url": _managed_status_llm_base_url(),
+        "model": _managed_status_llm_model(),
+        "api_key": _managed_status_llm_api_key(),
+        "external_llm_enabled": _external_llm_enabled(),
+    }
+    mode = _status_llm_mode(settings.get("mode"))
+    if mode == "none":
         return fallback
+    if not settings.get("external_llm_enabled"):
+        log.warning("activity_llm_operator_disabled", mode=mode)
+        return None
+    api_key = (settings.get("api_key") or "").strip()
+    if not api_key:
+        log.warning("activity_llm_key_missing", mode=mode)
+        return None
+    if AsyncOpenAI is None:
+        return None
+
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=settings.get("base_url") or _DEFAULT_STATUS_LLM_BASE_URL,
+    )
+    model = settings.get("model") or _DEFAULT_STATUS_LLM_MODEL
 
     prompt = f"""Generate a short ambient status (max 30 chars) describing what this person is doing, based on their screen.
 
@@ -895,8 +1006,8 @@ When in doubt about privacy, use a generic topic descriptor.
 
     for attempt in range(3):
         try:
-            response = await _openai_client.chat.completions.create(
-                model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+            response = await client.chat.completions.create(
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
                 temperature=0.2,
@@ -926,7 +1037,7 @@ When in doubt about privacy, use a generic topic descriptor.
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
 
-    return fallback
+    return None
 
 
 async def _http_current_activity(request: "web.Request") -> "web.Response":
@@ -1054,11 +1165,121 @@ async def _http_health(request: "web.Request") -> "web.Response":
         "enrollment_mode": _cloud_enrollment_mode() if is_multi_tenant_enabled() else None,
         "storage": storage_backend,
         "external_llm_enabled": _external_llm_enabled(),
+        "managed_llm_configured": bool(_managed_status_llm_api_key()),
+        "status_llm_base_url": _managed_status_llm_base_url(),
+        "status_llm_model": _managed_status_llm_model(),
         "default_max_frames_per_hour": _default_max_frames_per_hour(),
         "max_ws_message_bytes": _max_ws_message_bytes(),
         "max_image_bytes": _max_image_bytes(),
         "missing": [],
     })
+
+
+def _public_status_llm_settings(settings: dict) -> dict:
+    return {
+        "mode": settings.get("mode") or "managed",
+        "base_url": settings.get("base_url") or _managed_status_llm_base_url(),
+        "model": settings.get("model") or _managed_status_llm_model(),
+        "api_key_configured": bool(settings.get("api_key_configured")),
+        "managed_key_configured": bool(settings.get("managed_key_configured")),
+        "external_llm_enabled": bool(settings.get("external_llm_enabled")),
+    }
+
+
+async def _http_get_status_llm(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: GET /api/status-llm - returns non-secret LLM status settings."""
+    db: asyncpg.Pool = request.app["db"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        data_key = await _ensure_tenant(db, ctx)
+        settings = await _status_llm_settings(db, ctx.user_hex, data_key)
+        return web.json_response(_public_status_llm_settings(settings))
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except Exception:
+        log.error("http_get_status_llm_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_put_status_llm(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: PUT /api/status-llm - updates tenant status-generation settings."""
+    db: asyncpg.Pool = request.app["db"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    raw_mode = str(body.get("mode") or "managed").strip().lower()
+    if raw_mode not in _STATUS_LLM_MODES:
+        return web.json_response({"error": "invalid mode"}, status=400)
+    mode = raw_mode
+    base_url = str(body.get("base_url") or "").strip()
+    model = str(body.get("model") or "").strip()
+    if base_url and not base_url.startswith(("https://", "http://")):
+        return web.json_response({"error": "base_url must be http(s)"}, status=400)
+    if len(base_url) > 512:
+        return web.json_response({"error": "base_url too long"}, status=400)
+    if len(model) > 200:
+        return web.json_response({"error": "model too long"}, status=400)
+
+    api_key = body.get("api_key")
+    clear_api_key = bool(body.get("clear_api_key"))
+    if api_key is not None and not isinstance(api_key, str):
+        return web.json_response({"error": "api_key must be a string"}, status=400)
+    api_key_value = (api_key or "").strip() if isinstance(api_key, str) else ""
+    if len(api_key_value) > 4096:
+        return web.json_response({"error": "api_key too long"}, status=400)
+
+    try:
+        data_key = await _ensure_tenant(db, ctx)
+        encrypted_api_key = encrypt_text(api_key_value, data_key) if api_key_value else None
+        async with db.acquire() as conn:
+            if encrypted_api_key is not None or clear_api_key:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET status_llm_mode = $2,
+                        status_llm_base_url = $3,
+                        status_llm_model = $4,
+                        status_llm_api_key = $5
+                    WHERE user_pubkey = $1
+                    """,
+                    ctx.user_hex,
+                    mode,
+                    base_url or None,
+                    model or None,
+                    encrypted_api_key,
+                )
+            else:
+                await conn.execute(
+                    """
+                    UPDATE users
+                    SET status_llm_mode = $2,
+                        status_llm_base_url = $3,
+                        status_llm_model = $4
+                    WHERE user_pubkey = $1
+                    """,
+                    ctx.user_hex,
+                    mode,
+                    base_url or None,
+                    model or None,
+                )
+        settings = await _status_llm_settings(db, ctx.user_hex, data_key)
+        return web.json_response({"ok": True, **_public_status_llm_settings(settings)})
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except Exception:
+        log.error("http_put_status_llm_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
 
 
 async def _http_activity_history(request: "web.Request") -> "web.Response":
@@ -1449,6 +1670,11 @@ async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
             for latest in rows:
                 user_key = latest["user_pubkey"] or "unscoped"
                 data_key = await _tenant_data_key(db, user_key if user_key != "unscoped" else None)
+                llm_settings = await _status_llm_settings(
+                    db,
+                    user_key if user_key != "unscoped" else None,
+                    data_key,
+                )
                 window = (
                     await loop.run_in_executor(
                         _pool,
@@ -1464,7 +1690,12 @@ async def _activity_categorizer_task(db: asyncpg.Pool) -> None:
                     if latest["ocr_text"] else ""
                 )
 
-                activity = await _categorize_activity(latest["app"], window, ocr_text)
+                activity = await _categorize_activity(
+                    latest["app"],
+                    window,
+                    ocr_text,
+                    llm_settings,
+                )
 
                 if activity:
                     enc_activity = await loop.run_in_executor(
@@ -1610,6 +1841,8 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/api/activity_history", _http_activity_history)
         app.router.add_get("/api/query", _http_query)
         app.router.add_get("/api/transcripts", _http_transcripts)
+        app.router.add_get("/api/status-llm", _http_get_status_llm)
+        app.router.add_put("/api/status-llm", _http_put_status_llm)
         app.router.add_get("/api/deputies", _http_list_deputies)
         app.router.add_put("/api/deputies/{pubkey}", _http_put_deputy)
         app.router.add_delete("/api/deputies/{pubkey}", _http_delete_deputy)

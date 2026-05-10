@@ -30,7 +30,9 @@ class CloudGatewayTests(unittest.TestCase):
                     "ingest_ready": False,
                     "multi_tenant": True,
                     "missing": ["DATABASE_URL", "ENCRYPTION_KEY"],
-                    "external_llm_enabled": False,
+                    "external_llm_enabled": True,
+                    "managed_llm_configured": False,
+                    "status_llm_model": "openai/gpt-4o-mini",
                     "default_max_frames_per_hour": 1200,
                 },
             },
@@ -44,7 +46,9 @@ class CloudGatewayTests(unittest.TestCase):
         self.assertFalse(payload["mirror"]["paired"])
         self.assertFalse(payload["ingest"]["ready"])
         self.assertEqual(payload["ingest"]["missing"], ["DATABASE_URL", "ENCRYPTION_KEY"])
-        self.assertFalse(payload["ingest"]["external_llm_enabled"])
+        self.assertTrue(payload["ingest"]["external_llm_enabled"])
+        self.assertFalse(payload["ingest"]["managed_llm_configured"])
+        self.assertEqual(payload["ingest"]["status_llm_model"], "openai/gpt-4o-mini")
         self.assertEqual(payload["ingest"]["default_max_frames_per_hour"], 1200)
         self.assertTrue(payload["relay"]["ready"])
         self.assertFalse(payload["relay"]["stores_plaintext"])
@@ -62,7 +66,9 @@ class CloudGatewayTests(unittest.TestCase):
                     "multi_tenant": True,
                     "storage": "r2",
                     "missing": [],
-                    "external_llm_enabled": False,
+                    "external_llm_enabled": True,
+                    "managed_llm_configured": True,
+                    "status_llm_model": "openai/gpt-4o-mini",
                     "default_max_frames_per_hour": 1200,
                     "max_ws_message_bytes": 16777216,
                     "max_image_bytes": 8388608,
@@ -77,7 +83,8 @@ class CloudGatewayTests(unittest.TestCase):
         self.assertTrue(payload["mirror"]["paired"])
         self.assertTrue(payload["ingest"]["ready"])
         self.assertEqual(payload["ingest"]["storage"], "r2")
-        self.assertFalse(payload["ingest"]["external_llm_enabled"])
+        self.assertTrue(payload["ingest"]["external_llm_enabled"])
+        self.assertTrue(payload["ingest"]["managed_llm_configured"])
         self.assertEqual(payload["ingest"]["max_ws_message_bytes"], 16777216)
 
 
@@ -98,6 +105,13 @@ class CloudIngestReadinessTests(unittest.TestCase):
             "FISH_CLOUD_EXTERNAL_LLM_ENABLED",
             "FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR",
             "FISH_CLOUD_ENROLLMENT_MODE",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "FISH_STATUS_LLM_API_KEY",
+            "OPENAI_BASE_URL",
+            "FISH_STATUS_LLM_BASE_URL",
+            "OPENAI_MODEL",
+            "FISH_STATUS_LLM_MODEL",
         ]:
             os.environ.pop(key, None)
         os.environ["FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE"] = str(
@@ -121,7 +135,9 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertNotIn("R2_SECRET_ACCESS_KEY", payload["missing"])
         self.assertIn("FISH_MULTI_TENANT", payload["missing"])
         self.assertEqual(payload["encryption_key_source"], "generated_file")
-        self.assertFalse(payload["external_llm_enabled"])
+        self.assertTrue(payload["external_llm_enabled"])
+        self.assertFalse(payload["managed_llm_configured"])
+        self.assertEqual(payload["status_llm_model"], "openai/gpt-4o-mini")
         self.assertEqual(payload["default_max_frames_per_hour"], 1200)
         self.assertEqual(payload["enrollment_mode"], "closed")
 
@@ -140,7 +156,8 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertTrue(payload["ingest_ready"])
         self.assertEqual(payload["storage"], "local")
         self.assertEqual(payload["missing"], [])
-        self.assertFalse(payload["external_llm_enabled"])
+        self.assertTrue(payload["external_llm_enabled"])
+        self.assertFalse(payload["managed_llm_configured"])
         self.assertEqual(payload["enrollment_mode"], "closed")
 
     def test_cloud_ingest_reports_r2_when_credentials_exist(self):

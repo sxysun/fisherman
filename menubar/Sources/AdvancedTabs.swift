@@ -330,138 +330,176 @@ struct BackupTab: View {
     }
 }
 
-// MARK: - Agent tab
+// MARK: - Activity status tab
 
-struct AgentTab: View {
-    @State private var apiKey: String = ""
+struct ActivityStatusTab: View {
+    var config: ConfigManager
+
+    @State private var mode: String = "managed"
+    @State private var baseURL: String = "https://openrouter.ai/api/v1"
     @State private var model: String = "openai/gpt-4o-mini"
-    @State private var interval: String = "300"
-    @State private var enabled: Bool = false
+    @State private var apiKey: String = ""
+    @State private var apiKeyConfigured: Bool = false
+    @State private var managedKeyConfigured: Bool = false
+    @State private var externalLLMEnabled: Bool = true
     @State private var statusMessage: String?
-
-    private let plistPath = (NSHomeDirectory() as NSString)
-        .appendingPathComponent("Library/LaunchAgents/com.fisherman.agent.plist")
+    @State private var loading: Bool = false
+    @State private var applying: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Status Loop (optional)")
+            Text("Activity Status")
                 .font(.system(size: 14, weight: .semibold))
-            Text("Periodically read your context, summarize via OpenRouter, publish to friends. Off by default.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
 
-            SecureField("OpenRouter API key (OPENAI_API_KEY)", text: $apiKey)
+            Text("Controls how Fisherman turns private screen context into the short status shown to you and published to friends. These settings apply to the active context home.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            Picker("Status generation", selection: $mode) {
+                Text("Fisherman-managed").tag("managed")
+                Text("My OpenRouter key").tag("byo")
+                Text("No LLM").tag("none")
+            }
+            .pickerStyle(.segmented)
+
+            if mode == "managed" {
+                Text(managedCopy)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("Managed key")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    Text(managedKeyConfigured ? "configured" : "missing")
+                        .font(.system(size: 11))
+                        .foregroundStyle(managedKeyConfigured ? .green : .orange)
+                }
+                modelField
+            } else if mode == "byo" {
+                Text("Use your own OpenRouter-compatible key. Cloud and Self-hosted store it encrypted with that backend's tenant data key; leave it blank to keep the existing key.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                SecureField(apiKeyConfigured ? "Existing key configured" : "OpenRouter API key", text: $apiKey)
+                    .textFieldStyle(.roundedBorder)
+                modelField
+            } else {
+                Text("Fisherman will not call an LLM. Status falls back to private keyword categories like coding, terminal, meeting, or browsing.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Button(applying ? "Applying..." : "Apply") { apply() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(applying || loading)
+                Button("Refresh") { load() }
+                    .disabled(loading)
+                Spacer()
+            }
+
+            if !externalLLMEnabled && mode != "none" {
+                Text("The backend operator LLM switch is off, so status will not call a model until that backend enables it.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+            }
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .onAppear { load() }
+    }
+
+    private var modelField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("https://openrouter.ai/api/v1", text: $baseURL)
                 .textFieldStyle(.roundedBorder)
-            Text("Saved in macOS Keychain — never written to disk in plaintext.")
-                .font(.system(size: 10)).foregroundStyle(.tertiary)
-
-            HStack {
-                Text("Model:").font(.system(size: 11))
-                TextField("openai/gpt-4o-mini", text: $model).textFieldStyle(.roundedBorder)
-            }
-            HStack {
-                Text("Interval (seconds):").font(.system(size: 11))
-                TextField("300", text: $interval).frame(width: 100).textFieldStyle(.roundedBorder)
-            }
-
-            Toggle("Run automatically (launchd)", isOn: $enabled)
-                .onChange(of: enabled) { _, v in v ? install() : uninstall() }
-
-            if let m = statusMessage {
-                Text(m).font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-        }
-        .onAppear {
-            if let key = readKeychain() { apiKey = key }
-            enabled = FileManager.default.fileExists(atPath: plistPath)
+            TextField("openai/gpt-4o-mini", text: $model)
+                .textFieldStyle(.roundedBorder)
         }
     }
 
-    private func install() {
-        guard !apiKey.isEmpty else {
-            statusMessage = "Paste an API key first."; enabled = false; return
+    private var managedCopy: String {
+        switch config.backendMode {
+        case "cloud":
+            return "Fisherman Cloud uses the managed model inside the Cloud CVM after Cloud trust has been approved."
+        case "self_hosted":
+            return "Your self-hosted server uses the model key configured on that server."
+        default:
+            return "Local Only keeps raw context on this Mac. Managed status is available when a backend is active."
         }
-        guard let cli = CliBridge.fishermanPath() else {
-            statusMessage = "fisherman CLI not on PATH."; enabled = false; return
-        }
-        writeKeychain(apiKey)
-
-        let plist = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-          "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>com.fisherman.agent</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(cli)</string>
-                <string>agent</string>
-                <string>run</string>
-                <string>--interval</string>
-                <string>\(interval)</string>
-                <string>--model</string>
-                <string>\(model)</string>
-            </array>
-            <key>EnvironmentVariables</key>
-            <dict>
-                <key>OPENAI_API_KEY</key>
-                <string>\(apiKey)</string>
-            </dict>
-            <key>RunAtLoad</key><true/>
-            <key>KeepAlive</key><true/>
-            <key>StandardOutPath</key>
-            <string>/tmp/fisherman-agent.out.log</string>
-            <key>StandardErrorPath</key>
-            <string>/tmp/fisherman-agent.err.log</string>
-        </dict>
-        </plist>
-        """
-        try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
-
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        p.arguments = ["load", plistPath]
-        try? p.run()
-        p.waitUntilExit()
-        statusMessage = "Agent loop running."
     }
 
-    private func uninstall() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        p.arguments = ["unload", plistPath]
-        try? p.run()
-        p.waitUntilExit()
-        try? FileManager.default.removeItem(atPath: plistPath)
-        statusMessage = "Agent loop stopped."
+    private func load() {
+        loading = true
+        statusMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            let object = CliBridge.runJsonObject(["activity-status", "status", "--json"])
+            DispatchQueue.main.async {
+                if let object {
+                    mode = object["mode"] as? String ?? config.statusLLMMode
+                    baseURL = object["base_url"] as? String ?? config.statusLLMBaseURL
+                    model = object["model"] as? String ?? config.statusLLMModel
+                    apiKeyConfigured = object["api_key_configured"] as? Bool ?? false
+                    managedKeyConfigured = object["managed_key_configured"] as? Bool ?? false
+                    externalLLMEnabled = object["external_llm_enabled"] as? Bool ?? true
+                    if let error = object["backend_error"] as? String {
+                        statusMessage = error
+                    }
+                } else {
+                    mode = config.statusLLMMode
+                    baseURL = config.statusLLMBaseURL
+                    model = config.statusLLMModel
+                    statusMessage = "Could not read backend status settings."
+                }
+                loading = false
+            }
+        }
     }
 
-    private func writeKeychain(_ value: String) {
-        let q: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: "com.fisherman.agent",
-            kSecAttrAccount: "OPENAI_API_KEY",
+    private func apply() {
+        applying = true
+        statusMessage = nil
+        config.statusLLMMode = mode
+        config.statusLLMBaseURL = baseURL
+        config.statusLLMModel = model
+        config.save()
+
+        var args = [
+            "activity-status", "configure",
+            "--mode", mode,
+            "--base-url", baseURL,
+            "--model", model,
+            "--json",
         ]
-        SecItemDelete(q as CFDictionary)
-        var add = q
-        add[kSecValueData] = value.data(using: .utf8)
-        SecItemAdd(add as CFDictionary, nil)
-    }
+        if mode == "byo" && !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args += ["--api-key", apiKey.trimmingCharacters(in: .whitespacesAndNewlines)]
+        }
+        let cliArgs = args
 
-    private func readKeychain() -> String? {
-        let q: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: "com.fisherman.agent",
-            kSecAttrAccount: "OPENAI_API_KEY",
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne,
-        ]
-        var item: AnyObject?
-        guard SecItemCopyMatching(q as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let s = String(data: data, encoding: .utf8)
-        else { return nil }
-        return s
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = CliBridge.run(cliArgs)
+            let object = result.exitCode == 0
+                ? (try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+                : nil
+            DispatchQueue.main.async {
+                if let object {
+                    mode = object["mode"] as? String ?? mode
+                    baseURL = object["base_url"] as? String ?? baseURL
+                    model = object["model"] as? String ?? model
+                    apiKeyConfigured = object["api_key_configured"] as? Bool ?? apiKeyConfigured
+                    managedKeyConfigured = object["managed_key_configured"] as? Bool ?? managedKeyConfigured
+                    externalLLMEnabled = object["external_llm_enabled"] as? Bool ?? externalLLMEnabled
+                    apiKey = ""
+                    statusMessage = "Saved. Restart the daemon if you changed context-home settings."
+                } else {
+                    let error = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    statusMessage = error.isEmpty ? "Could not save activity status settings." : error
+                }
+                applying = false
+            }
+        }
     }
 }

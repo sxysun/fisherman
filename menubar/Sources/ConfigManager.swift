@@ -30,6 +30,9 @@ final class ConfigManager {
     var serverURL: String = "ws://localhost:9999/ingest"
     var controlPort: String = "7892"
     var activityPort: String = "9998"
+    var statusLLMMode: String = "managed"
+    var statusLLMBaseURL: String = "https://openrouter.ai/api/v1"
+    var statusLLMModel: String = "openai/gpt-4o-mini"
 
     // Ed25519 key pair (hex-encoded)
     var privateKeyHex: String = ""
@@ -158,6 +161,27 @@ final class ConfigManager {
                     loadedAnyManagedValue = true
                 }
                 if trackLines { knownKeyLines["FISH_ACTIVITY_PORT", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_STATUS_LLM_MODE") {
+                if shouldLoad("FISH_STATUS_LLM_MODE", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    statusLLMMode = value
+                    loadedKeys.insert("FISH_STATUS_LLM_MODE")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_STATUS_LLM_MODE", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_STATUS_LLM_BASE_URL") {
+                if shouldLoad("FISH_STATUS_LLM_BASE_URL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    statusLLMBaseURL = value
+                    loadedKeys.insert("FISH_STATUS_LLM_BASE_URL")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_STATUS_LLM_BASE_URL", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_STATUS_LLM_MODEL") {
+                if shouldLoad("FISH_STATUS_LLM_MODEL", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    statusLLMModel = value
+                    loadedKeys.insert("FISH_STATUS_LLM_MODEL")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_STATUS_LLM_MODEL", default: []].append(i) }
             } else if let value = extractValue(trimmed, key: "FISH_PRIVATE_KEY") {
                 if shouldLoad("FISH_PRIVATE_KEY", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
                     privateKeyHex = value
@@ -212,6 +236,9 @@ final class ConfigManager {
             ("FISH_BACKEND_URL", backendURL),
             ("FISH_STATUS_RELAY_URL", statusRelayURL),
             ("FISH_CONTROL_PORT", controlPort),
+            ("FISH_STATUS_LLM_MODE", statusLLMMode),
+            ("FISH_STATUS_LLM_BASE_URL", statusLLMBaseURL),
+            ("FISH_STATUS_LLM_MODEL", statusLLMModel),
             ("FISH_PRIVATE_KEY", privateKeyHex),
             ("FISH_DISPLAY_NAME", displayName),
         ]

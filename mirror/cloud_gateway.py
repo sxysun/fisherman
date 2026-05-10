@@ -100,6 +100,9 @@ def build_capability_payload(
     storage = None
     multi_tenant = None
     external_llm_enabled = False
+    managed_llm_configured = False
+    status_llm_base_url = None
+    status_llm_model = None
     default_max_frames_per_hour = None
     max_ws_message_bytes = None
     max_image_bytes = None
@@ -110,6 +113,9 @@ def build_capability_payload(
         storage = ingest_body.get("storage")
         multi_tenant = ingest_body.get("multi_tenant")
         external_llm_enabled = bool(ingest_body.get("external_llm_enabled"))
+        managed_llm_configured = bool(ingest_body.get("managed_llm_configured"))
+        status_llm_base_url = ingest_body.get("status_llm_base_url")
+        status_llm_model = ingest_body.get("status_llm_model")
         default_max_frames_per_hour = ingest_body.get("default_max_frames_per_hour")
         max_ws_message_bytes = ingest_body.get("max_ws_message_bytes")
         max_image_bytes = ingest_body.get("max_image_bytes")
@@ -132,6 +138,9 @@ def build_capability_payload(
             "storage": storage,
             "missing": missing,
             "external_llm_enabled": external_llm_enabled,
+            "managed_llm_configured": managed_llm_configured,
+            "status_llm_base_url": status_llm_base_url,
+            "status_llm_model": status_llm_model,
             "default_max_frames_per_hour": default_max_frames_per_hour,
             "max_ws_message_bytes": max_ws_message_bytes,
             "max_image_bytes": max_image_bytes,
