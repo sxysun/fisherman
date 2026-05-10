@@ -1313,14 +1313,26 @@ def _backend_context_request(
         data=data,
         headers=headers,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise click.ClickException(f"backend returned HTTP {e.code}: {detail}") from e
-    except Exception as e:
-        raise click.ClickException(f"backend context request failed: {e}") from e
+    attempts = 3 if method.upper() == "GET" else 1
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")
+            if e.code in {502, 503, 504} and attempt + 1 < attempts:
+                last_error = click.ClickException(f"backend returned HTTP {e.code}: {detail}")
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise click.ClickException(f"backend returned HTTP {e.code}: {detail}") from e
+        except Exception as e:
+            last_error = e
+            if attempt + 1 < attempts:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise click.ClickException(f"backend context request failed: {e}") from e
+    raise click.ClickException(f"backend context request failed: {last_error}")
 
 
 def _context_row_ts_seconds(row: dict) -> float | None:

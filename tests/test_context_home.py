@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -152,3 +153,40 @@ class ContextHomeTests(unittest.TestCase):
             calls[1]["until_ts"],
             cli._context_row_ts_seconds({"ts": "2026-05-10T09:00:00+00:00"}),
         )
+
+    def test_backend_context_get_retries_transient_read_failures(self):
+        cfg = FishermanConfig(
+            backend_mode="self_hosted",
+            backend_url="https://backend.example",
+            private_key="01" * 32,
+        )
+        calls = 0
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        def fake_urlopen(_req, timeout=60.0):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise urllib.error.URLError("transient eof")
+            return FakeResponse()
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = cli._backend_context_request(
+                cfg,
+                "GET",
+                "/api/context/export",
+                params={"limit": 1},
+                timeout=10.0,
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(calls, 2)
