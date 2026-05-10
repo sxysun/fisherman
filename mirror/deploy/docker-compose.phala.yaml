@@ -26,9 +26,11 @@
 #
 # IMPORTANT: every literal in the rendered compose enters the
 # compose_hash that we publish on-chain via
-# FishermanAppAuth.addComposeHash(). CI replaces
-# ${MIRROR_IMAGE_TAG:-latest} with the exact per-commit image tag before
-# `phala deploy` so code rollouts produce a new attested compose_hash.
+# FishermanAppAuth.addComposeHash(). CI replaces the GHCR image
+# placeholder with the exact per-release digest before `phala deploy`
+# so code rollouts produce a new attested compose_hash.
+# CI also renders that image by immutable digest and writes the digest
+# into the attested runtime metadata exposed by /.well-known/attestation.
 # Cosmetic build env vars (commit SHA, build time) are explicitly
 # category (A) and never security-relevant. See deploy/BUILD.md.
 
@@ -124,6 +126,8 @@ services:
     environment:
       - FISHERMAN_DATA_DIR=/data
       - FISHERMAN_TLS_DOMAIN=${DOMAIN:-fisherman.teleport.computer}
+      - FISHERMAN_GIT_COMMIT=${FISHERMAN_GIT_COMMIT:-dev}
+      - FISHERMAN_IMAGE_DIGEST=${FISHERMAN_IMAGE_DIGEST:-sha256:dev}
     volumes:
       - mirror-data:/data
       # tappd.sock — dstack TEE-side API. The mirror reads:

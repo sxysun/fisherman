@@ -13,8 +13,8 @@ Releases containing:
 - The expected output OCI tarball sha256
 - The rendered `mirror/deploy/docker-compose.phala.yaml` used for
   `phala deploy`, with `${MIRROR_IMAGE_TAG:-latest}` replaced by the
-  exact per-commit image tag. This rendered file is the plaintext input
-  to the on-chain `compose_hash`.
+  exact immutable GHCR image digest reference. This rendered file is
+  the plaintext input to the on-chain `compose_hash`.
 
 ## Prerequisites
 
@@ -76,7 +76,11 @@ will stream raw context to the new deployment.
 ```bash
 # Compute the rendered compose that CI gives to phala deploy
 IMAGE_TAG=$(git rev-parse --short HEAD)
-MIRROR_IMAGE_TAG=$IMAGE_TAG ./mirror/deploy/publish-compose-hash.sh
+IMAGE_REPO=ghcr.io/sxysun/fisherman-mirror
+IMAGE_DIGEST=$(docker buildx imagetools inspect "$IMAGE_REPO:$IMAGE_TAG" \
+  --format '{{json .}}' | jq -r '.manifest.digest')
+FISHERMAN_IMAGE_REF="$IMAGE_REPO@$IMAGE_DIGEST" \
+  ./mirror/deploy/publish-compose-hash.sh
 
 # Publish via foundry's cast (replace placeholders)
 cast send $FISHERMAN_APP_AUTH 'addComposeHash(bytes32)' 0x<hash> \

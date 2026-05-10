@@ -33,6 +33,7 @@ jobs:
     permissions:
       contents: write
       actions:  write
+      packages: read
     env:
       COMPOSE_FILE:  mirror/deploy/docker-compose.phala.yaml
       MIRROR_DOMAIN: ${{ vars.MIRROR_DOMAIN }}
@@ -53,6 +54,14 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "24"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - run: |
           npm install -g phala
@@ -101,17 +110,32 @@ jobs:
           # built. On manual dispatch, fall back to the most recent
           # image-relevant commit that should already have a GHCR tag.
           if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
-            IMAGE_TAG="${{ github.event.workflow_run.head_sha }}"
-            IMAGE_TAG="${IMAGE_TAG:0:7}"
+            IMAGE_COMMIT="${{ github.event.workflow_run.head_sha }}"
+            IMAGE_TAG="${IMAGE_COMMIT:0:7}"
           else
-            IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay server pyproject.toml)
+            IMAGE_COMMIT=$(git log -1 --pretty=%H -- fisherman mirror relay server pyproject.toml)
+            IMAGE_TAG="${IMAGE_COMMIT:0:7}"
           fi
           if [[ -z "$IMAGE_TAG" ]]; then
             echo "::error::no commit touching image-relevant paths found"
             exit 1
           fi
-          echo "Deploying mirror image tag: $IMAGE_TAG"
+          IMAGE_REPO="ghcr.io/${{ github.repository_owner }}/fisherman-mirror"
+          IMAGE_REPO=$(echo "$IMAGE_REPO" | tr '[:upper:]' '[:lower:]')
+          IMAGE_TAG_REF="$IMAGE_REPO:$IMAGE_TAG"
+          echo "Resolving mirror image digest: $IMAGE_TAG_REF"
+          IMAGE_DIGEST=$(docker buildx imagetools inspect "$IMAGE_TAG_REF" --format '{{json .}}' | jq -r '.manifest.digest')
+          if [[ -z "$IMAGE_DIGEST" || "$IMAGE_DIGEST" == "null" || "$IMAGE_DIGEST" != sha256:* ]]; then
+            echo "::error::could not resolve digest for $IMAGE_TAG_REF"
+            exit 1
+          fi
+          IMAGE_REF="$IMAGE_REPO@$IMAGE_DIGEST"
+          echo "Deploying mirror image: $IMAGE_REF"
+          echo "Image commit: $IMAGE_COMMIT"
           export IMAGE_TAG
+          export IMAGE_REF
+          export IMAGE_COMMIT
+          export IMAGE_DIGEST
           RENDERED_COMPOSE="$RUNNER_TEMP/docker-compose.phala.$IMAGE_TAG.yaml"
           export RENDERED_COMPOSE
           python <<'PY'
@@ -119,11 +143,17 @@ jobs:
           from pathlib import Path
 
           src = Path(os.environ["COMPOSE_FILE"]).read_text()
-          needle = "${MIRROR_IMAGE_TAG:-latest}"
-          tag = os.environ["IMAGE_TAG"]
-          if needle not in src:
-              raise SystemExit(f"{needle} not found in compose template")
-          Path(os.environ["RENDERED_COMPOSE"]).write_text(src.replace(needle, tag))
+          replacements = {
+              "ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}": os.environ["IMAGE_REF"],
+              "${FISHERMAN_GIT_COMMIT:-dev}": os.environ["IMAGE_COMMIT"],
+              "${FISHERMAN_IMAGE_DIGEST:-sha256:dev}": os.environ["IMAGE_DIGEST"],
+          }
+          rendered = src
+          for needle, value in replacements.items():
+              if needle not in rendered:
+                  raise SystemExit(f"{needle} not found in compose template")
+              rendered = rendered.replace(needle, value)
+          Path(os.environ["RENDERED_COMPOSE"]).write_text(rendered)
           PY
           echo "Rendered compose sha256: $(sha256sum "$RENDERED_COMPOSE" | awk '{print $1}')"
           phala deploy \
