@@ -115,6 +115,12 @@ activity rows, and image keys are scoped by that pubkey.
 
 Header format: `Authorization: FishKey <pubkey_hex>:<timestamp>:<signature_hex>`
 
+**Deputies / Agent Access:** Owners can provision scoped deputy pubkeys
+under their tenant. A deputy authenticates with its own FishKey plus
+`X-Fisherman-User-Pubkey: <owner_pubkey>`. The backend checks the
+owner's deputy ACL before returning context, so Cloud and Self-hosted
+agents can query while the laptop is offline.
+
 **Bearer token:** Deployments may carry `INGEST_AUTH_TOKEN`. FishKey
 should be used for new deployments.
 
@@ -122,8 +128,13 @@ should be used for new deployments.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/api/current_activity` | Owner or tenant | Returns latest activity (emoji, category, status) |
-| `GET` | `/api/activity_history` | Owner or tenant | Returns recent activity history |
+| `GET` | `/api/current_activity` | Owner, tenant, or `read:status` deputy | Returns latest activity (emoji, category, status) |
+| `GET` | `/api/activity_history` | Owner, tenant, or `read:status` deputy | Returns recent activity history |
+| `GET` | `/api/query` | Owner, tenant, or `read:captures` deputy | Returns decrypted frame metadata/OCR/window/URLs for one tenant |
+| `GET` | `/api/transcripts` | Owner, tenant, or `read:transcripts` deputy | Returns decrypted meeting transcripts for one tenant |
+| `GET` | `/api/deputies` | Owner or tenant | Lists deputy ACL rows |
+| `PUT` | `/api/deputies/{pubkey}` | Owner or tenant | Upserts a scoped deputy ACL row |
+| `DELETE` | `/api/deputies/{pubkey}` | Owner or tenant | Revokes a deputy ACL row |
 
 Friend status uses the relay/E2EE model so Local, Cloud, and
 Self-Hosted users can interoperate without exposing raw context to
@@ -177,17 +188,24 @@ uv run fisherman show 9 -o meeting.jpg
 
 ### Agent Integration
 
-If you're an AI agent with shell access to this repo, this is how you get user context:
+If you're an AI agent on a user's machine, the owner should create an
+Agent Access token in the Fisherman app or with:
 
 ```bash
-cd /path/to/fisherman/server
-uv run fisherman query -j --limit 20          # recent activity as JSON
-uv run fisherman summary                       # high-level activity breakdown
-uv run fisherman query -j --search "keyword"   # search across all decrypted text
-uv run fisherman image "<image_key>" -o /tmp/frame.jpg  # decrypt a screenshot
+fisherman deputy new --name my-agent --scopes read:captures,read:status
 ```
 
-All fields (OCR, window titles, URLs, scenes) are returned fully decrypted. The `image_key` field in query results can be passed to `fisherman image` to retrieve the actual screenshot.
+On the agent host:
+
+```bash
+fisherman deputy register 'fishdep:...'
+fisherman query --limit 20       # uses Cloud/Self-hosted backend when present
+fisherman query --search keyword # falls back to relay-to-laptop in Local Only
+```
+
+All returned fields are decrypted for the authorized tenant. The backend
+does not return another user's rows because every query is tenant scoped
+by the owner pubkey and deputy ACL.
 
 ## Backup / Restore
 

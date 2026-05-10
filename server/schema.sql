@@ -62,3 +62,23 @@ ALTER TABLE audio_transcripts ADD COLUMN IF NOT EXISTS device_pubkey TEXT;
 CREATE INDEX IF NOT EXISTS idx_audio_ts ON audio_transcripts (ts);
 CREATE INDEX IF NOT EXISTS idx_audio_app ON audio_transcripts (meeting_app);
 CREATE INDEX IF NOT EXISTS idx_audio_user_ts ON audio_transcripts (user_pubkey, ts DESC);
+
+-- Agent/deputy access for backend-backed context reads. Deputies are
+-- scoped per user tenant and authenticate with their own FishKey. Owners
+-- provision and revoke these rows with their own FishKey.
+CREATE TABLE IF NOT EXISTS deputies (
+    user_pubkey   TEXT NOT NULL REFERENCES users(user_pubkey) ON DELETE CASCADE,
+    deputy_pubkey TEXT NOT NULL CHECK (length(deputy_pubkey) = 64),
+    name          TEXT,
+    scopes        JSONB NOT NULL DEFAULT '[]'::jsonb,
+    rate_per_hour INT,
+    expires_at    TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ,
+    added_at      TIMESTAMPTZ DEFAULT now(),
+    updated_at    TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (user_pubkey, deputy_pubkey)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deputies_user_active
+    ON deputies(user_pubkey, deputy_pubkey)
+    WHERE revoked_at IS NULL;

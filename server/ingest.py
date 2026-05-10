@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import datetime
 import json
 import os
 import re
@@ -39,7 +40,7 @@ from crypto import encrypt_json, encrypt_text, decrypt_text, decrypt_json
 from storage import R2Storage, create_storage
 from auth import (
     load_signing_key,
-    auth_context, is_multi_tenant_enabled,
+    auth_context, is_multi_tenant_enabled, verify_request,
     AuthContext,
 )
 
@@ -149,6 +150,91 @@ async def _backfill_single_tenant_owner(db: asyncpg.Pool, owner_pubkey: bytes) -
 def _require_http_context(request: "web.Request") -> AuthContext | None:
     auth_header = request.headers.get("Authorization", "")
     return auth_context(auth_header)
+
+
+def _valid_pubkey_hex(value: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{64}", (value or "").lower()))
+
+
+def _jsonb_scopes(value) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return set()
+    if not isinstance(value, list):
+        return set()
+    return {str(item) for item in value}
+
+
+async def _require_scoped_context(
+    request: "web.Request",
+    db: asyncpg.Pool,
+    required_scope: str,
+) -> AuthContext | None:
+    """Return owner/tenant context or an authorized backend deputy context."""
+    requested_user_hex = (
+        request.headers.get("X-Fisherman-User-Pubkey", "")
+        or request.query.get("user_pubkey", "")
+    ).strip().lower()
+    owner_ctx = _require_http_context(request)
+    if owner_ctx is not None:
+        # In Cloud mode any valid FishKey authenticates as its own tenant.
+        # If the request names a different user tenant, the actor is a deputy
+        # candidate and must pass that user's ACL instead of becoming owner of
+        # its own empty namespace.
+        if not requested_user_hex or requested_user_hex == owner_ctx.user_hex:
+            return owner_ctx
+        actor_pubkey = owner_ctx.actor_pubkey
+    else:
+        valid, actor_pubkey = verify_request(request.headers.get("Authorization", ""))
+        if not valid:
+            return None
+
+    user_hex = requested_user_hex
+    deputy_hex = actor_pubkey.hex()
+    if not _valid_pubkey_hex(user_hex):
+        return None
+
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT scopes
+            FROM deputies
+            WHERE user_pubkey = $1
+              AND deputy_pubkey = $2
+              AND revoked_at IS NULL
+              AND (expires_at IS NULL OR expires_at > now())
+            """,
+            user_hex,
+            deputy_hex,
+        )
+    if not row:
+        return None
+
+    scopes = _jsonb_scopes(row["scopes"])
+    if "*" not in scopes and required_scope not in scopes:
+        return None
+
+    return AuthContext(
+        actor_pubkey=actor_pubkey,
+        user_pubkey=bytes.fromhex(user_hex),
+        role="deputy",
+    )
+
+
+def _parse_query_time(value: str | None) -> datetime.datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(float(value), datetime.timezone.utc)
+    except ValueError:
+        dt = datetime.datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
 
 
 async def _init_db(pool: asyncpg.Pool) -> None:
@@ -473,14 +559,14 @@ When in doubt about privacy, use a generic topic descriptor.
 async def _http_current_activity(request: "web.Request") -> "web.Response":
     """HTTP endpoint: GET /api/current_activity - returns latest activity.
 
-    Auth: FishKey ed25519 signature (self-hosted owner or Cloud tenant).
+    Auth: FishKey ed25519 signature (owner/tenant or scoped deputy).
     """
-    ctx = _require_http_context(request)
+    db: asyncpg.Pool = request.app["db"]
+    ctx = await _require_scoped_context(request, db, "read:status")
     if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
 
-    db: asyncpg.Pool = request.app["db"]
     loop = asyncio.get_running_loop()
     user_hex = ctx.user_hex
 
@@ -588,17 +674,17 @@ async def _http_health(request: "web.Request") -> "web.Response":
 async def _http_activity_history(request: "web.Request") -> "web.Response":
     """HTTP endpoint: GET /api/activity_history - returns recent activity entries.
 
-    Auth: FishKey ed25519 signature (self-hosted owner or Cloud tenant).
+    Auth: FishKey ed25519 signature (owner/tenant or scoped deputy).
     Query params: limit (default 10, max 50)
     """
-    ctx = _require_http_context(request)
+    db: asyncpg.Pool = request.app["db"]
+    ctx = await _require_scoped_context(request, db, "read:status")
     if ctx is None:
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     limit = min(int(request.query.get("limit", "10")), 50)
 
-    db: asyncpg.Pool = request.app["db"]
     loop = asyncio.get_running_loop()
 
     try:
@@ -632,6 +718,282 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
 
     except Exception:
         log.error("http_activity_history_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+def _decrypted_frame_row(row) -> dict:
+    d = dict(row)
+    for field in ("ocr_text", "window"):
+        raw = d.get(field)
+        if raw:
+            try:
+                d[field] = decrypt_text(bytes(raw))
+            except Exception:
+                d[field] = None
+    urls_raw = d.get("urls")
+    if urls_raw:
+        try:
+            d["urls"] = decrypt_json(bytes(urls_raw))
+        except Exception:
+            d["urls"] = None
+    for field in ("ts", "created_at"):
+        if isinstance(d.get(field), datetime.datetime):
+            d[field] = d[field].isoformat()
+    d.pop("activity", None)
+    return d
+
+
+def _decrypted_audio_row(row) -> dict:
+    d = dict(row)
+    raw = d.get("transcript")
+    if raw:
+        try:
+            d["transcript"] = decrypt_text(bytes(raw))
+        except Exception:
+            d["transcript"] = None
+    for field in ("ts", "created_at"):
+        if isinstance(d.get(field), datetime.datetime):
+            d[field] = d[field].isoformat()
+    return d
+
+
+async def _http_query(request: "web.Request") -> "web.Response":
+    """Backend read path for owners and scoped deputies."""
+    db: asyncpg.Pool = request.app["db"]
+    ctx = await _require_scoped_context(request, db, "read:captures")
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        limit = max(1, min(int(request.query.get("limit", "50")), 200))
+    except ValueError:
+        limit = 50
+
+    try:
+        clauses = [_tenant_predicate()]
+        params: list[object] = [ctx.user_hex]
+        idx = 2
+        since = _parse_query_time(request.query.get("since_ts") or request.query.get("since"))
+        until = _parse_query_time(request.query.get("until_ts") or request.query.get("until"))
+        app = request.query.get("app")
+        bundle = request.query.get("bundle")
+        search = request.query.get("search")
+        if since is not None:
+            clauses.append(f"ts >= ${idx}")
+            params.append(since)
+            idx += 1
+        if until is not None:
+            clauses.append(f"ts <= ${idx}")
+            params.append(until)
+            idx += 1
+        if app:
+            clauses.append(f"LOWER(app) LIKE LOWER(${idx})")
+            params.append(f"%{app}%")
+            idx += 1
+        if bundle:
+            clauses.append(f"bundle_id = ${idx}")
+            params.append(bundle)
+            idx += 1
+        params.append(limit)
+
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT id, user_pubkey, device_pubkey, ts, app, bundle_id,
+                       "window", ocr_text, urls, image_key, width, height,
+                       tier_hint, routing, created_at
+                FROM frames
+                WHERE {" AND ".join(clauses)}
+                ORDER BY ts DESC
+                LIMIT ${idx}
+                """,
+                *params,
+            )
+
+        out = [_decrypted_frame_row(row) for row in rows]
+        if search:
+            needle = search.lower()
+            out = [
+                row for row in out
+                if needle in str(row.get("ocr_text") or "").lower()
+                or needle in str(row.get("window") or "").lower()
+            ]
+        return web.json_response(out)
+    except Exception:
+        log.error("http_query_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_transcripts(request: "web.Request") -> "web.Response":
+    db: asyncpg.Pool = request.app["db"]
+    ctx = await _require_scoped_context(request, db, "read:transcripts")
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        limit = max(1, min(int(request.query.get("limit", "200")), 500))
+    except ValueError:
+        limit = 200
+
+    try:
+        clauses = [_tenant_predicate()]
+        params: list[object] = [ctx.user_hex]
+        idx = 2
+        since = _parse_query_time(request.query.get("since_ts") or request.query.get("since"))
+        until = _parse_query_time(request.query.get("until_ts") or request.query.get("until"))
+        meeting_app = request.query.get("meeting_app")
+        search = request.query.get("search")
+        if since is not None:
+            clauses.append(f"ts >= ${idx}")
+            params.append(since)
+            idx += 1
+        if until is not None:
+            clauses.append(f"ts <= ${idx}")
+            params.append(until)
+            idx += 1
+        if meeting_app:
+            clauses.append(f"LOWER(meeting_app) LIKE LOWER(${idx})")
+            params.append(f"%{meeting_app}%")
+            idx += 1
+        params.append(limit)
+
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT id, user_pubkey, device_pubkey, ts, meeting_app,
+                       device_name, is_input_device, transcript, created_at
+                FROM audio_transcripts
+                WHERE {" AND ".join(clauses)}
+                ORDER BY ts DESC
+                LIMIT ${idx}
+                """,
+                *params,
+            )
+
+        out = [_decrypted_audio_row(row) for row in rows]
+        if search:
+            needle = search.lower()
+            out = [
+                row for row in out
+                if needle in str(row.get("transcript") or "").lower()
+            ]
+        return web.json_response(out)
+    except Exception:
+        log.error("http_transcripts_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_put_deputy(request: "web.Request") -> "web.Response":
+    db: asyncpg.Pool = request.app["db"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    deputy_pubkey = request.match_info["pubkey"].lower()
+    if not _valid_pubkey_hex(deputy_pubkey):
+        return web.json_response({"error": "invalid deputy pubkey"}, status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    scopes = body.get("scopes") or []
+    if not isinstance(scopes, list) or not all(isinstance(x, str) for x in scopes):
+        return web.json_response({"error": "scopes must be a string array"}, status=400)
+    expires_at = body.get("expires_at")
+    expires_dt = (
+        datetime.datetime.fromtimestamp(float(expires_at), datetime.timezone.utc)
+        if expires_at is not None else None
+    )
+    name = str(body.get("name") or deputy_pubkey[:12])
+    rate = body.get("rate_per_hour")
+    rate_int = int(rate) if rate is not None else None
+
+    try:
+        await _ensure_tenant(db, ctx)
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO deputies
+                    (user_pubkey, deputy_pubkey, name, scopes, rate_per_hour,
+                     expires_at, revoked_at, updated_at)
+                VALUES ($1, $2, $3, $4::jsonb, $5, $6, NULL, now())
+                ON CONFLICT (user_pubkey, deputy_pubkey) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    scopes = EXCLUDED.scopes,
+                    rate_per_hour = EXCLUDED.rate_per_hour,
+                    expires_at = EXCLUDED.expires_at,
+                    revoked_at = NULL,
+                    updated_at = now()
+                """,
+                ctx.user_hex,
+                deputy_pubkey,
+                name,
+                json.dumps(scopes),
+                rate_int,
+                expires_dt,
+            )
+        return web.json_response({"ok": True})
+    except Exception:
+        log.error("http_put_deputy_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_list_deputies(request: "web.Request") -> "web.Response":
+    db: asyncpg.Pool = request.app["db"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT deputy_pubkey, name, scopes, rate_per_hour,
+                       expires_at, revoked_at, added_at, updated_at
+                FROM deputies
+                WHERE user_pubkey = $1
+                ORDER BY added_at DESC
+                """,
+                ctx.user_hex,
+            )
+        out = []
+        for row in rows:
+            d = dict(row)
+            d["scopes"] = sorted(_jsonb_scopes(d.get("scopes")))
+            for field in ("expires_at", "revoked_at", "added_at", "updated_at"):
+                if isinstance(d.get(field), datetime.datetime):
+                    d[field] = d[field].isoformat()
+            out.append(d)
+        return web.json_response(out)
+    except Exception:
+        log.error("http_list_deputies_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
+async def _http_delete_deputy(request: "web.Request") -> "web.Response":
+    db: asyncpg.Pool = request.app["db"]
+    ctx = _require_http_context(request)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    deputy_pubkey = request.match_info["pubkey"].lower()
+    if not _valid_pubkey_hex(deputy_pubkey):
+        return web.json_response({"error": "invalid deputy pubkey"}, status=400)
+    try:
+        async with db.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE deputies
+                SET revoked_at = now(), updated_at = now()
+                WHERE user_pubkey = $1 AND deputy_pubkey = $2
+                """,
+                ctx.user_hex,
+                deputy_pubkey,
+            )
+        return web.json_response({"ok": True, "result": result})
+    except Exception:
+        log.error("http_delete_deputy_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
@@ -784,6 +1146,11 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/health", _http_health)
         app.router.add_get("/api/current_activity", _http_current_activity)
         app.router.add_get("/api/activity_history", _http_activity_history)
+        app.router.add_get("/api/query", _http_query)
+        app.router.add_get("/api/transcripts", _http_transcripts)
+        app.router.add_get("/api/deputies", _http_list_deputies)
+        app.router.add_put("/api/deputies/{pubkey}", _http_put_deputy)
+        app.router.add_delete("/api/deputies/{pubkey}", _http_delete_deputy)
         http_runner = web.AppRunner(app)
         await http_runner.setup()
         http_port = int(os.environ.get("HTTP_API_PORT", "9998"))

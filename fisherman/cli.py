@@ -114,6 +114,34 @@ def _build_query(**params) -> str:
     return "?" + urllib.parse.urlencode(clean)
 
 
+def _backend_api_url(base_url: str, path: str, params: dict | None = None) -> str:
+    parsed = urllib.parse.urlparse((base_url or "").strip())
+    if parsed.scheme == "ws":
+        parsed = parsed._replace(scheme="http")
+    elif parsed.scheme == "wss":
+        parsed = parsed._replace(scheme="https")
+    if parsed.path.endswith("/ingest"):
+        parsed = parsed._replace(path="")
+    base = urllib.parse.urlunparse(parsed._replace(query="", fragment="")).rstrip("/")
+    qs = urllib.parse.urlencode({k: v for k, v in (params or {}).items() if v not in (None, "")})
+    return base + path + (f"?{qs}" if qs else "")
+
+
+def _fishkey_header(seed_hex: str) -> tuple[str, str]:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+
+    seed = bytes.fromhex(seed_hex)
+    priv = Ed25519PrivateKey.from_private_bytes(seed)
+    pub = priv.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    ts = int(time.time())
+    sig = priv.sign(f"fisherman:{ts}".encode())
+    return f"FishKey {pub.hex()}:{ts}:{sig.hex()}", pub.hex()
+
+
 def _fmt_ts(ts: float) -> str:
     return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1891,6 +1919,11 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
     with open(cfg_path) as f:
         cfg = json.load(f)
 
+    if source_pref in (None, "auto"):
+        direct = _direct_backend_call(command, args, cfg)
+        if direct is not None:
+            return direct
+
     user_pubkey_hex = cfg["user_pubkey"]
     user_x25519_pub = bytes.fromhex(cfg["user_x25519_pub"])
     deputy_seed = bytes.fromhex(cfg["deputy_seed"])
@@ -1942,6 +1975,115 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
     return inner.get("data") if "data" in inner else inner
 
 
+def _direct_backend_call(command: str, args: dict, cfg: dict) -> dict | list | None:
+    """Use Cloud/self-hosted backend read APIs from a deputy config.
+
+    Returns None when the config has no backend URL or the backend read path
+    is unavailable, allowing the relay-to-laptop path to handle local-only and
+    old-token cases.
+    """
+    backend_url = (cfg.get("backend_url") or "").strip()
+    if not backend_url:
+        return None
+    if command == "query":
+        path = "/api/query"
+        params = {
+            "since_ts": args.get("since_ts"),
+            "until_ts": args.get("until_ts"),
+            "app": args.get("app"),
+            "bundle": args.get("bundle"),
+            "search": args.get("search"),
+            "limit": args.get("limit"),
+        }
+    elif command == "transcripts":
+        path = "/api/transcripts"
+        params = {
+            "since_ts": args.get("since_ts"),
+            "until_ts": args.get("until_ts"),
+            "meeting_app": args.get("meeting_app"),
+            "search": args.get("search"),
+            "limit": args.get("limit"),
+        }
+    elif command == "status":
+        path = "/api/current_activity"
+        params = {}
+    else:
+        return None
+
+    try:
+        auth, _pub = _fishkey_header(cfg["deputy_seed"])
+        req = urllib.request.Request(
+            _backend_api_url(backend_url, path, params),
+            method="GET",
+            headers={
+                "Authorization": auth,
+                "X-Fisherman-User-Pubkey": cfg["user_pubkey"],
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read())
+        if command == "status":
+            return {
+                "backend_mode": "backend",
+                "backend": backend_url,
+                "connected": True,
+                "activity": data,
+            }
+        return data
+    except Exception:
+        return None
+
+
+def _sync_deputy_to_backend(record: dict) -> str | None:
+    """Provision a deputy ACL on Cloud/self-hosted backend when configured."""
+    cfg = FishermanConfig()
+    if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
+        return None
+    try:
+        auth, _pub = _fishkey_header(cfg.private_key)
+        body = json.dumps({
+            "name": record.get("name"),
+            "scopes": record.get("scopes") or [],
+            "rate_per_hour": record.get("rate_per_hour"),
+            "expires_at": record.get("expires_at"),
+        }).encode()
+        req = urllib.request.Request(
+            _backend_api_url(cfg.backend_url, f"/api/deputies/{record['pubkey']}"),
+            data=body,
+            method="PUT",
+            headers={
+                "Authorization": auth,
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if not (200 <= resp.status < 300):
+                return f"backend sync returned HTTP {resp.status}"
+        return None
+    except Exception as e:
+        return f"backend sync failed: {e}"
+
+
+def _revoke_deputy_from_backend(pubkey_hex: str) -> str | None:
+    cfg = FishermanConfig()
+    if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
+        return None
+    try:
+        auth, _pub = _fishkey_header(cfg.private_key)
+        req = urllib.request.Request(
+            _backend_api_url(cfg.backend_url, f"/api/deputies/{pubkey_hex}"),
+            method="DELETE",
+            headers={"Authorization": auth},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            if not (200 <= resp.status < 300):
+                return f"backend revoke returned HTTP {resp.status}"
+        return None
+    except Exception as e:
+        return f"backend revoke failed: {e}"
+
+
 @main.group(name="deputy")
 def deputy_group():
     """Authorize remote agents to query your context."""
@@ -1958,6 +2100,7 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
     from fisherman import keys as _k
     import secrets as _s
 
+    cfg = FishermanConfig()
     priv, pub, _x_priv, _x_pub = _load_keys()  # ensures FISH_PRIVATE_KEY is valid
     user_seed = _k.load_seed()
     _, user_x_pub = _k.encryption_keypair(user_seed)
@@ -1996,8 +2139,12 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
         "s":  ",".join(scope_list),
         "rate": int(rate),
         "e":  expires_at,
+        "b":  cfg.backend_url if cfg.backend_mode in {"cloud", "self_hosted"} else None,
     })
+    sync_error = _sync_deputy_to_backend(record)
     click.echo(f"deputy authorized: {record['name']} ({record['pubkey'][:12]}…)")
+    if sync_error:
+        click.echo(f"warning: {sync_error}; agent can still use relay-to-laptop while this daemon is online", err=True)
     click.echo("")
     click.echo("Setup token (copy to agent host):")
     click.echo("")
@@ -2025,6 +2172,7 @@ def deputy_register(token: str, name: str | None):
         "deputy_name":     payload["n"],
         "deputy_seed":     payload["k"],
         "relay_url":       payload["r"],
+        "backend_url":     payload.get("b") or "",
         "scopes":          payload.get("s", "").split(","),
         "rate_per_hour":   payload.get("rate"),
         "expires_at":      payload.get("e"),
@@ -2034,6 +2182,8 @@ def deputy_register(token: str, name: str | None):
     click.echo(f"  config:  {saved}")
     click.echo(f"  user:    {payload['u'][:16]}…")
     click.echo(f"  relay:   {payload['r']}")
+    if payload.get("b"):
+        click.echo(f"  backend: {payload['b']}")
     click.echo(f"  scopes:  {payload.get('s', '')}")
 
 
@@ -2062,7 +2212,20 @@ def deputy_list(as_text: bool):
 def deputy_revoke(name_or_pubkey: str):
     """Revoke a deputy by name or pubkey."""
     from fisherman import deputy as _d
+    needle = name_or_pubkey.strip().lower()
+    existing = next(
+        (
+            row for row in _d.list_deputies()
+            if row.get("pubkey", "").lower() == needle
+            or row.get("name", "").lower() == needle
+        ),
+        None,
+    )
     if _d.remove_deputy(name_or_pubkey):
+        if existing and existing.get("pubkey"):
+            sync_error = _revoke_deputy_from_backend(existing["pubkey"])
+            if sync_error:
+                click.echo(f"warning: {sync_error}", err=True)
         click.echo(f"revoked: {name_or_pubkey}")
     else:
         click.echo(f"not found: {name_or_pubkey}", err=True)

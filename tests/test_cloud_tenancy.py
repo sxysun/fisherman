@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import datetime
 import importlib.util
 import json
 import os
@@ -108,15 +109,55 @@ class RecordingConn:
                     "image_key": args[8],
                 }
             )
+        elif normalized.startswith("INSERT INTO deputies"):
+            self._pool.deputies[(args[0], args[1])] = {
+                "user_pubkey": args[0],
+                "deputy_pubkey": args[1],
+                "name": args[2],
+                "scopes": json.loads(args[3]),
+                "rate_per_hour": args[4],
+                "expires_at": args[5],
+                "revoked_at": None,
+            }
+        elif normalized.startswith("UPDATE deputies"):
+            key = (args[0], args[1])
+            if key in self._pool.deputies:
+                self._pool.deputies[key]["revoked_at"] = time.time()
         return "OK"
 
     async def fetchrow(self, sql: str, *args):
         self._pool.fetches.append(("fetchrow", " ".join(sql.split()), args))
+        normalized = " ".join(sql.split())
         user_pubkey = args[0]
+        if "FROM deputies" in normalized:
+            row = self._pool.deputies.get((args[0], args[1]))
+            if row and row.get("revoked_at") is None:
+                return {"scopes": row["scopes"]}
+            return None
         return self._pool.activity_rows.get(user_pubkey)
 
     async def fetch(self, sql: str, *args):
-        self._pool.fetches.append(("fetch", " ".join(sql.split()), args))
+        normalized = " ".join(sql.split())
+        self._pool.fetches.append(("fetch", normalized, args))
+        if "FROM frames" in normalized:
+            return self._pool.query_rows
+        if "FROM audio_transcripts" in normalized:
+            return self._pool.transcript_rows
+        if "FROM deputies" in normalized:
+            return [
+                {
+                    "deputy_pubkey": row["deputy_pubkey"],
+                    "name": row["name"],
+                    "scopes": row["scopes"],
+                    "rate_per_hour": row["rate_per_hour"],
+                    "expires_at": row["expires_at"],
+                    "revoked_at": row["revoked_at"],
+                    "added_at": None,
+                    "updated_at": None,
+                }
+                for (user, _deputy), row in self._pool.deputies.items()
+                if user == args[0]
+            ]
         return []
 
 
@@ -137,6 +178,9 @@ class RecordingPool:
         self.fetches = []
         self.frames = []
         self.activity_rows = {}
+        self.query_rows = []
+        self.transcript_rows = []
+        self.deputies = {}
 
     def acquire(self):
         return RecordingAcquire(self)
@@ -160,11 +204,25 @@ class FakeStorage:
 
 
 class FakeRequest:
-    def __init__(self, auth_header: str, db: RecordingPool):
-        self.headers = {"Authorization": auth_header}
+    def __init__(
+        self,
+        auth_header: str,
+        db: RecordingPool,
+        *,
+        headers: dict | None = None,
+        query: dict | None = None,
+        match_info: dict | None = None,
+        body: dict | None = None,
+    ):
+        self.headers = {"Authorization": auth_header, **(headers or {})}
         self.remote = "127.0.0.1"
         self.app = {"db": db}
-        self.query = {}
+        self.query = query or {}
+        self.match_info = match_info or {}
+        self._body = body or {}
+
+    async def json(self):
+        return self._body
 
 
 class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
@@ -287,6 +345,105 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity["status"], "using terminal")
         self.assertNotIn("alice", activity["status"])
         self.assertNotIn("password", activity["status"])
+
+    async def test_backend_deputy_query_requires_scope_and_filters_tenant(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        crypto = sys.modules["crypto"]
+        pub_a = _pub_hex(SEED_A)
+        pub_b = _pub_hex(SEED_B)
+        db.deputies[(pub_a, pub_b)] = {
+            "user_pubkey": pub_a,
+            "deputy_pubkey": pub_b,
+            "name": "agent",
+            "scopes": ["read:captures"],
+            "rate_per_hour": 60,
+            "expires_at": None,
+            "revoked_at": None,
+        }
+        db.query_rows = [{
+            "id": 1,
+            "user_pubkey": pub_a,
+            "device_pubkey": pub_a,
+            "ts": datetime.datetime.now(datetime.timezone.utc),
+            "app": "Code",
+            "bundle_id": "com.example.Code",
+            "window": crypto.encrypt_text("Architecture notes"),
+            "ocr_text": crypto.encrypt_text("backend agent access"),
+            "urls": crypto.encrypt_json(["https://example.com"]),
+            "image_key": "users/a/frame.jpg.enc",
+            "width": 100,
+            "height": 100,
+            "tier_hint": None,
+            "routing": None,
+            "created_at": datetime.datetime.now(datetime.timezone.utc),
+        }]
+
+        resp = await ingest._http_query(FakeRequest(
+            _fishkey(SEED_B),
+            db,
+            headers={"X-Fisherman-User-Pubkey": pub_a},
+            query={"limit": "5"},
+        ))
+
+        body = json.loads(resp.text)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body[0]["ocr_text"], "backend agent access")
+        fetchrow_args = [entry[2] for entry in db.fetches if entry[0] == "fetchrow"]
+        self.assertIn((pub_a, pub_b), fetchrow_args)
+        fetch_args = [entry[2][0] for entry in db.fetches if entry[0] == "fetch"]
+        self.assertIn(pub_a, fetch_args)
+
+    async def test_backend_deputy_query_rejects_missing_scope(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        pub_a = _pub_hex(SEED_A)
+        pub_b = _pub_hex(SEED_B)
+        db.deputies[(pub_a, pub_b)] = {
+            "user_pubkey": pub_a,
+            "deputy_pubkey": pub_b,
+            "name": "agent",
+            "scopes": ["read:status"],
+            "rate_per_hour": 60,
+            "expires_at": None,
+            "revoked_at": None,
+        }
+
+        resp = await ingest._http_query(FakeRequest(
+            _fishkey(SEED_B),
+            db,
+            headers={"X-Fisherman-User-Pubkey": pub_a},
+        ))
+
+        self.assertEqual(resp.status, 401)
+
+    async def test_owner_can_provision_and_revoke_backend_deputy(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        pub_a = _pub_hex(SEED_A)
+        pub_b = _pub_hex(SEED_B)
+
+        put_resp = await ingest._http_put_deputy(FakeRequest(
+            _fishkey(SEED_A),
+            db,
+            match_info={"pubkey": pub_b},
+            body={
+                "name": "agent",
+                "scopes": ["read:captures"],
+                "rate_per_hour": 12,
+                "expires_at": None,
+            },
+        ))
+        self.assertEqual(put_resp.status, 200)
+        self.assertIn((pub_a, pub_b), db.deputies)
+
+        delete_resp = await ingest._http_delete_deputy(FakeRequest(
+            _fishkey(SEED_A),
+            db,
+            match_info={"pubkey": pub_b},
+        ))
+        self.assertEqual(delete_resp.status, 200)
+        self.assertIsNotNone(db.deputies[(pub_a, pub_b)]["revoked_at"])
 
 
 if __name__ == "__main__":

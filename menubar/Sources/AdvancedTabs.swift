@@ -34,7 +34,7 @@ struct DeputiesTab: View {
                     .buttonStyle(.bordered)
             }
 
-            Text("Authorize remote agents to query your Fisherman context. Each token is scope-bounded and revocable.")
+            Text("Authorize agents to query Fisherman through the active backend. Cloud and Self-hosted agents can read while this laptop is offline; Local Only falls back to the laptop relay path.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
 
