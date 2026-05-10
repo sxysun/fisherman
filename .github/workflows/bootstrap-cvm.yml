@@ -120,11 +120,32 @@ jobs:
           CLOUD_OPENAI_MODEL:  ${{ vars.FISHERMAN_CLOUD_OPENAI_MODEL }}
         run: |
           set -euo pipefail
-          echo ">>> phala deploy -n $CVM_NAME --node-id $NODE_ID -c $COMPOSE_FILE"
+          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay server pyproject.toml)
+          if [[ -z "$IMAGE_TAG" ]]; then
+            echo "::error::no commit touching image-relevant paths found"
+            exit 1
+          fi
+          export IMAGE_TAG
+          RENDERED_COMPOSE="$RUNNER_TEMP/docker-compose.phala.$IMAGE_TAG.yaml"
+          export RENDERED_COMPOSE
+          python <<'PY'
+          import os
+          from pathlib import Path
+
+          src = Path(os.environ["COMPOSE_FILE"]).read_text()
+          needle = "${MIRROR_IMAGE_TAG:-latest}"
+          tag = os.environ["IMAGE_TAG"]
+          if needle not in src:
+              raise SystemExit(f"{needle} not found in compose template")
+          Path(os.environ["RENDERED_COMPOSE"]).write_text(src.replace(needle, tag))
+          PY
+          echo ">>> phala deploy -n $CVM_NAME --node-id $NODE_ID -c $RENDERED_COMPOSE"
+          echo "Deploying mirror image tag: $IMAGE_TAG (last image-relevant commit)"
+          echo "Rendered compose sha256: $(sha256sum "$RENDERED_COMPOSE" | awk '{print $1}')"
           phala deploy \
             --api-token "$PHALA_CLOUD_API_KEY" \
             -n "$CVM_NAME" \
-            -c "$COMPOSE_FILE" \
+            -c "$RENDERED_COMPOSE" \
             --node-id "$NODE_ID" \
             -e CF_API_TOKEN="$CF_API_TOKEN" \
             -e CF_ZONE_ID="$CF_ZONE_ID" \

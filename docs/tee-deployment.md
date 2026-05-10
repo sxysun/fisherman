@@ -29,8 +29,9 @@ not Nitro. Reasons:
   DNS-01 ACME path issues a cert whose private key never leaves the
   enclave; the iOS / fisherman client pins the cert fingerprint
   embedded in the TDX quote's REPORT_DATA.
-- On-chain `addComposeHash()` governance lets us version-gate which
-  builds clients are willing to talk to.
+- On-chain `addComposeHash()` governance plus client-side trust pinning
+  lets us version-gate which builds clients are willing to stream raw
+  context to.
 
 ## Pieces we need (mirroring feedling's deploy/ tree)
 
@@ -99,8 +100,11 @@ byte-identical OCI tarballs (matches `feedling-mcp-v1/deploy/build-reproducible.
   signed ciphertext and is not allowed to decrypt, index, summarize, or
   store raw context.
 
-Every literal in this file enters the compose_hash. Cosmetic env vars
-(commit SHA, build timestamp) are explicitly category (A) — never
+Every literal in the rendered file enters the compose_hash. CI renders
+`${MIRROR_IMAGE_TAG:-latest}` to the exact per-commit image tag before
+`phala deploy`; this prevents the image code from changing while the
+attested compose_hash stays stable. Cosmetic build env vars (commit
+SHA, build timestamp) are explicitly category (A) — never
 security-relevant.
 
 ### 3. On-chain compose_hash governance
@@ -113,10 +117,12 @@ function addComposeHash(bytes32 composeHash) external onlyOwner;
 function isAppAllowed(bytes32 composeHash) external view returns (bool);
 ```
 
-Deploy on Base Sepolia (testnet) → Base mainnet (prod). Every release
-gets a new compose_hash committed with `addComposeHash()` before any
-client is willing to talk to it. Old compose_hashes stay allowed so
-older client builds keep working until users update.
+Deploy on Base Sepolia (testnet) → Base mainnet (prod). Every rendered
+release gets a new compose_hash committed with `addComposeHash()`.
+Clients also persist the exact Cloud release they approved in
+`~/.fisherman/cloud-trust.json`; raw-context streaming is disabled if
+the live compose_hash/app_id/git identity later diverges until the user
+reconfigures Cloud and accepts the new attestation.
 
 ### 4. Pairing flow
 
@@ -140,7 +146,10 @@ files. The intended self-serve flow:
 5. For private-context ingest, the daemon opens
    `wss://fisherman.teleport.computer/ingest` with FishKey auth. In
    Cloud multi-tenant mode, each valid FishKey pubkey becomes its own
-   tenant namespace in Postgres and object storage keys.
+   tenant namespace in Postgres and object storage keys. Before opening
+   that websocket, the daemon re-runs the Cloud audit and compares it to
+   the persisted trust record; if it does not match, capture continues
+   but frames stay in the local durable upload outbox.
 6. For mirror/RPC pairing, menubar derives a per-pair envelope key from
    the user's seed and `enclave_content_pk` (returned by `/v1/pair/init`).
    The user's X25519 priv + `K_blob_at_rest` are encrypted to this

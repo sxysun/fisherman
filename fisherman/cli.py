@@ -57,6 +57,7 @@ def start(server_url: str | None, backend_mode: str | None, backend_url: str | N
         overrides["backend_url"] = backend_url
 
     config = FishermanConfig(**overrides)
+    _ensure_cloud_trust_or_disable(config)
 
     click.echo("Fisherman daemon starting")
     click.echo(f"  Backend:  {config.backend_summary}")
@@ -299,6 +300,49 @@ def _live_tls_fingerprint(url: str, timeout: float, *, quiet: bool = False) -> s
         if not quiet:
             click.echo(f"  (skipping live TLS fingerprint capture: {e})", err=True)
         return None
+
+
+def _ensure_cloud_trust_or_disable(config: FishermanConfig) -> None:
+    """Refuse raw-context streaming to Cloud unless the approved deploy
+    still matches the live attested deploy. Capture continues and the
+    durable upload outbox queues frames locally while trust is unresolved.
+    """
+    if config.backend_mode != "cloud" or not config.streaming_enabled:
+        return
+
+    from fisherman import cloud_trust
+    from fisherman.config import (
+        DEFAULT_APP_AUTH_CONTRACT,
+        DEFAULT_APP_AUTH_RPC_URL,
+        DEFAULT_SERVER_URL,
+    )
+
+    timeout = float(os.environ.get("FISH_CLOUD_TRUST_TIMEOUT", "15") or "15")
+    result = cloud_trust.verify_or_approve(
+        config.backend_url,
+        timeout=timeout,
+        rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or DEFAULT_APP_AUTH_RPC_URL,
+        contract_address=(
+            os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
+            or DEFAULT_APP_AUTH_CONTRACT
+        ),
+        live_tls_fingerprint_func=lambda url, t: _live_tls_fingerprint(
+            url, t, quiet=True
+        ),
+    )
+    if result.ok:
+        status = "approved" if result.bootstrapped else "verified"
+        current = result.current or result.record or {}
+        compose = current.get("compose_hash") or "?"
+        git = current.get("git_commit") or "?"
+        click.echo(f"  Cloud trust: {status} compose=0x{compose[:12]} git={git[:12]}")
+        return
+
+    click.echo("  Cloud trust: FAILED — raw ingest disabled; capture will queue locally", err=True)
+    click.echo(f"    {result.reason}", err=True)
+    for failure in result.failures[:5]:
+        click.echo(f"    - {failure}", err=True)
+    config.server_url = DEFAULT_SERVER_URL
 
 
 @main.command()
@@ -914,6 +958,7 @@ def backend_configure_cloud(
     )
 
     url = backend_url or DEFAULT_CLOUD_BACKEND_URL
+    trust_record = None
     if not skip_audit:
         live_tls_fp = _live_tls_fingerprint(url, timeout)
         res = _att.verify_attestation(
@@ -941,6 +986,12 @@ def backend_configure_cloud(
                 click.echo(f"cloud guarantee missing: {failure}", err=True)
             click.echo("refusing to configure Fisherman Cloud until attestation passes", err=True)
             sys.exit(1)
+        from fisherman import cloud_trust
+        try:
+            trust_record = cloud_trust.approve(url, res, live_tls_fp)
+        except cloud_trust.CloudTrustError as e:
+            click.echo(f"cloud trust approval failed: {e}", err=True)
+            sys.exit(1)
 
     capabilities = _cloud_capability_health(url, timeout=timeout)
     ingest_ready = bool(
@@ -958,6 +1009,12 @@ def backend_configure_cloud(
     click.echo(f"  backend: {cfg.backend_url}")
     click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until Cloud ingest is enabled for this account'}")
     click.echo(f"  relay:   {cfg.status_relay_url}")
+    if trust_record:
+        compose = trust_record.get("compose_hash") or "?"
+        git = trust_record.get("git_commit") or "?"
+        click.echo(f"  trust:   approved compose=0x{compose[:12]} git={git[:12]}")
+    elif skip_audit:
+        click.echo("  trust:   skipped; daemon will audit before streaming raw context")
     if isinstance(capabilities, dict):
         att_ready = (capabilities.get("attestation") or {}).get("ready")
         relay_ready = (capabilities.get("relay") or {}).get("ready")

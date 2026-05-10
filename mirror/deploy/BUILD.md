@@ -11,8 +11,10 @@ Releases containing:
 - The base image digest (from `mirror/deploy/Dockerfile`,
   `ARG PYTHON_IMAGE=python@sha256:…`)
 - The expected output OCI tarball sha256
-- The sha256 of `mirror/deploy/docker-compose.phala.yaml` at that
-  commit (this is the plaintext input to the on-chain `compose_hash`)
+- The rendered `mirror/deploy/docker-compose.phala.yaml` used for
+  `phala deploy`, with `${MIRROR_IMAGE_TAG:-latest}` replaced by the
+  exact per-commit image tag. This rendered file is the plaintext input
+  to the on-chain `compose_hash`.
 
 ## Prerequisites
 
@@ -64,16 +66,17 @@ uv pip compile mirror/requirements.txt \
 # (exact versions + content hashes we ship with).
 ```
 
-Any change to either pin invalidates the build digest, which
-invalidates the compose_hash, which requires a new on-chain
+Any change to either pin invalidates the build digest, which invalidates
+the rendered compose_hash, which requires a new on-chain
 `addComposeHash()` + user-visible audit-card prompt before the menubar
-will talk to the new deployment.
+will stream raw context to the new deployment.
 
 ## On-chain compose_hash publication
 
 ```bash
-# Compute the hash from the current compose file
-./mirror/deploy/publish-compose-hash.sh
+# Compute the rendered compose that CI gives to phala deploy
+IMAGE_TAG=$(git rev-parse --short HEAD)
+MIRROR_IMAGE_TAG=$IMAGE_TAG ./mirror/deploy/publish-compose-hash.sh
 
 # Publish via foundry's cast (replace placeholders)
 cast send $FISHERMAN_APP_AUTH 'addComposeHash(bytes32)' 0x<hash> \

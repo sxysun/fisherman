@@ -88,28 +88,49 @@ jobs:
           # --cvm-id <uuid>` does the same in-place upgrade and accepts
           # -e correctly. See `phala deploy --help`.
           #
-          # MIRROR_IMAGE_TAG forces a pull of the freshly-built image
-          # (compose pins to ${MIRROR_IMAGE_TAG:-latest}); without this,
-          # docker reuses the cached :latest and never sees the new code.
+          # Render the image tag into the compose file itself before
+          # deploy. dstack's compose_hash covers the rendered compose,
+          # not encrypted env vars; keeping MIRROR_IMAGE_TAG in `-e`
+          # would let code change while the attested compose_hash stays
+          # stable.
           #
-          # Use the last commit that would have triggered docker-publish
-          # (matches its `paths:` filter), so the tag is guaranteed to
-          # exist on ghcr — workflow-only commits don't get an image.
-          IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay server pyproject.toml)
+          # On workflow_run, deploy the exact commit docker-publish just
+          # built. On manual dispatch, fall back to the most recent
+          # image-relevant commit that should already have a GHCR tag.
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            IMAGE_TAG="${{ github.event.workflow_run.head_sha }}"
+            IMAGE_TAG="${IMAGE_TAG:0:7}"
+          else
+            IMAGE_TAG=$(git log -1 --pretty=%h -- fisherman mirror relay server pyproject.toml)
+          fi
           if [[ -z "$IMAGE_TAG" ]]; then
             echo "::error::no commit touching image-relevant paths found"
             exit 1
           fi
-          echo "Deploying mirror image tag: $IMAGE_TAG (last image-relevant commit)"
+          echo "Deploying mirror image tag: $IMAGE_TAG"
+          export IMAGE_TAG
+          RENDERED_COMPOSE="$RUNNER_TEMP/docker-compose.phala.$IMAGE_TAG.yaml"
+          export RENDERED_COMPOSE
+          python <<'PY'
+          import os
+          from pathlib import Path
+
+          src = Path(os.environ["COMPOSE_FILE"]).read_text()
+          needle = "${MIRROR_IMAGE_TAG:-latest}"
+          tag = os.environ["IMAGE_TAG"]
+          if needle not in src:
+              raise SystemExit(f"{needle} not found in compose template")
+          Path(os.environ["RENDERED_COMPOSE"]).write_text(src.replace(needle, tag))
+          PY
+          echo "Rendered compose sha256: $(sha256sum "$RENDERED_COMPOSE" | awk '{print $1}')"
           phala deploy \
             --api-token "$PHALA_CLOUD_API_KEY" \
             --cvm-id ${{ vars.CVM_VM_UUID }} \
-            -c "$COMPOSE_FILE" \
+            -c "$RENDERED_COMPOSE" \
             -e CF_API_TOKEN="$CF_API_TOKEN" \
             -e CF_ZONE_ID="$CF_ZONE_ID" \
             -e DOMAIN="$MIRROR_DOMAIN" \
             -e RELAY_DOMAIN="$RELAY_DOMAIN" \
-            -e MIRROR_IMAGE_TAG="$IMAGE_TAG" \
             -e FISHERMAN_CLOUD_DATABASE_URL="$CLOUD_DATABASE_URL" \
             -e FISHERMAN_CLOUD_ENCRYPTION_KEY="$CLOUD_ENCRYPTION_KEY" \
             -e FISHERMAN_CLOUD_R2_ACCOUNT_ID="$CLOUD_R2_ACCOUNT_ID" \

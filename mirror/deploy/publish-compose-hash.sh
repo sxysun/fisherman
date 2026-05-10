@@ -3,20 +3,45 @@
 # addComposeHash() calldata for FishermanAppAuth.
 #
 # Same primitive as feedling-mcp-v1: compose_hash = sha256 of the
-# compose YAML's bytes. Anything that affects which container runs
-# affects this hash.
+# rendered compose YAML's bytes. CI renders ${MIRROR_IMAGE_TAG:-latest}
+# to a literal per-commit tag before phala deploy so code rollouts
+# affect this hash.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-COMPOSE_FILE="${1:-docker-compose.phala.yaml}"
-if [[ ! -f "$COMPOSE_FILE" ]]; then
-    echo "compose file not found: $COMPOSE_FILE" >&2
+COMPOSE_TEMPLATE="${1:-docker-compose.phala.yaml}"
+IMAGE_TAG="${2:-${MIRROR_IMAGE_TAG:-}}"
+if [[ -z "$IMAGE_TAG" ]] && command -v git >/dev/null 2>&1; then
+    IMAGE_TAG=$(git -C ../.. log -1 --pretty=%h -- fisherman mirror relay server pyproject.toml 2>/dev/null || true)
+fi
+if [[ -z "$IMAGE_TAG" ]]; then
+    echo "image tag required: pass as argv[2] or MIRROR_IMAGE_TAG" >&2
+    exit 1
+fi
+if [[ ! -f "$COMPOSE_TEMPLATE" ]]; then
+    echo "compose template not found: $COMPOSE_TEMPLATE" >&2
     exit 1
 fi
 
-HASH=$(sha256sum "$COMPOSE_FILE" | awk '{print $1}')
-echo "compose_file:  $COMPOSE_FILE"
+RENDERED=$(mktemp)
+trap 'rm -f "$RENDERED"' EXIT
+export COMPOSE_TEMPLATE IMAGE_TAG RENDERED
+python3 - <<'PY'
+import os
+from pathlib import Path
+
+src = Path(os.environ["COMPOSE_TEMPLATE"]).read_text()
+needle = "${MIRROR_IMAGE_TAG:-latest}"
+tag = os.environ["IMAGE_TAG"]
+if needle not in src:
+    raise SystemExit(f"{needle} not found in compose template")
+Path(os.environ["RENDERED"]).write_text(src.replace(needle, tag))
+PY
+
+HASH=$(sha256sum "$RENDERED" | awk '{print $1}')
+echo "compose_template:  $COMPOSE_TEMPLATE"
+echo "image_tag:         $IMAGE_TAG"
 echo "compose_hash:  0x$HASH"
 echo
 echo "addComposeHash() calldata:"

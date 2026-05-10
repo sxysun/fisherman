@@ -37,7 +37,7 @@ jobs:
     outputs:
       image: ${{ steps.tags.outputs.image }}
       digest: ${{ steps.build.outputs.digest }}
-      compose_hash: ${{ steps.compose_hash.outputs.hash }}
+      compose_template_hash: ${{ steps.compose_template_hash.outputs.hash }}
 
     steps:
       - uses: actions/checkout@v6
@@ -85,11 +85,11 @@ jobs:
           echo "Published: ${{ steps.tags.outputs.tags }}"
           echo "Digest: ${{ steps.build.outputs.digest }}"
 
-      - name: Compute compose_hash for Phala compose file
-        id: compose_hash
+      - name: Compute Phala compose template sha256
+        id: compose_template_hash
         run: |
           HASH=$(sha256sum mirror/deploy/docker-compose.phala.yaml | awk '{print $1}')
-          echo "compose_hash=0x$HASH"
+          echo "compose_template_sha256=$HASH"
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Make package public so Phala CVMs can pull anonymously
@@ -114,5 +114,6 @@ jobs:
             echo "## Published"
             echo "- Image: \`${{ steps.tags.outputs.tags }}\`"
             echo "- Digest: \`${{ steps.build.outputs.digest }}\`"
-            echo "- compose_hash: \`0x${{ steps.compose_hash.outputs.hash }}\`"
+            echo "- Compose template sha256: \`${{ steps.compose_template_hash.outputs.hash }}\`"
+            echo "- Phala compose_hash is read from the CVM after deploy of the rendered compose."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -24,10 +24,13 @@
 #              no encrypted env key is injected, and stores encrypted frames
 #              on the CVM volume unless R2 credentials are supplied.
 #
-# IMPORTANT: every literal in this file enters the compose_hash that
-# we publish on-chain via FishermanAppAuth.addComposeHash(). Cosmetic
-# env vars (commit SHA, build time) are explicitly category (A) and
-# never security-relevant. See deploy/BUILD.md.
+# IMPORTANT: every literal in the rendered compose enters the
+# compose_hash that we publish on-chain via
+# FishermanAppAuth.addComposeHash(). CI replaces
+# ${MIRROR_IMAGE_TAG:-latest} with the exact per-commit image tag before
+# `phala deploy` so code rollouts produce a new attested compose_hash.
+# Cosmetic build env vars (commit SHA, build time) are explicitly
+# category (A) and never security-relevant. See deploy/BUILD.md.
 
 name: fisherman-mirror
 
@@ -113,11 +116,9 @@ services:
       retries: 20
 
   mirror:
-    # Pinned to a per-commit tag (substituted at deploy time via
-    # `phala deploy -e MIRROR_IMAGE_TAG=<sha>`) so each rollout forces
-    # a pull. Without this, `:latest` gets cached on the host and
-    # `phala deploy` keeps the previous image. Defaults to `:latest`
-    # for local dev.
+    # CI renders this placeholder to a literal per-commit image tag
+    # before `phala deploy`; the rendered tag is part of the attested
+    # compose_hash. Defaults to `:latest` only for local dev.
     image: ghcr.io/sxysun/fisherman-mirror:${MIRROR_IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
