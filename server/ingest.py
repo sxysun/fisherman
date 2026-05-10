@@ -326,6 +326,70 @@ def _sanitize_status(status: str) -> str:
     return status
 
 
+def _heuristic_activity(app: str | None, window: str, ocr_text: str) -> dict:
+    """Conservative local fallback when no model key is configured.
+
+    This deliberately avoids copying window titles or visible text into the
+    status. It is less specific than the model path, but it prevents the UI
+    from going blank and keeps the fallback privacy posture predictable.
+    """
+    haystack = " ".join(
+        part.lower()
+        for part in (app or "", window or "", ocr_text or "")
+        if part
+    )
+    app_name = (app or "").lower()
+
+    rules = [
+        (
+            ("terminal", "iterm", "warp", "zsh", "bash", "shell"),
+            ("💻", "terminal", "using terminal"),
+        ),
+        (
+            ("cursor", "visual studio code", "vscode", "xcode", "pycharm", "zed"),
+            ("💻", "coding", "writing code"),
+        ),
+        (
+            ("github", "pull request", "code review", "diff"),
+            ("🔍", "code review", "reviewing code"),
+        ),
+        (
+            ("docs", "documentation", "readme", "api reference"),
+            ("📚", "reading docs", "reading docs"),
+        ),
+        (
+            ("figma", "sketch", "canvas"),
+            ("🎨", "design", "designing"),
+        ),
+        (
+            ("slack", "discord", "messages", "telegram", "whatsapp"),
+            ("💬", "chat", "chatting"),
+        ),
+        (
+            ("mail", "gmail", "outlook", "superhuman"),
+            ("✉️", "email", "checking email"),
+        ),
+        (
+            ("zoom", "meet", "teams", "facetime"),
+            ("📞", "meeting", "in a meeting"),
+        ),
+        (
+            ("notes", "docs", "word", "notion", "obsidian"),
+            ("✍️", "writing", "writing"),
+        ),
+        (
+            ("safari", "chrome", "arc", "firefox", "browser"),
+            ("🌐", "browsing", "browsing web"),
+        ),
+    ]
+    for needles, activity in rules:
+        if any(needle in app_name or needle in haystack for needle in needles):
+            emoji, category, status = activity
+            return {"emoji": emoji, "category": category, "status": status}
+
+    return {"emoji": "🟢", "category": "active", "status": "active"}
+
+
 async def _categorize_activity(
     app: str | None,
     window: str,
@@ -335,8 +399,9 @@ async def _categorize_activity(
 
     Returns {"emoji": "...", "category": "...", "status": "..."} or None on error.
     """
+    fallback = _heuristic_activity(app, window, ocr_text)
     if not _openai_client:
-        return None
+        return fallback
 
     prompt = f"""Generate a short ambient status (max 30 chars) describing what this person is doing, based on their screen.
 
@@ -402,7 +467,7 @@ When in doubt about privacy, use a generic topic descriptor.
             if attempt < 2:
                 await asyncio.sleep(2 ** attempt)
 
-    return None
+    return fallback
 
 
 async def _http_current_activity(request: "web.Request") -> "web.Response":

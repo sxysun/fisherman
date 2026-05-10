@@ -273,6 +273,21 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         fetchrow_args = [entry[2][0] for entry in db.fetches if entry[0] == "fetchrow"]
         self.assertEqual(fetchrow_args, [pub_a, pub_b])
 
+    async def test_activity_categorizer_has_private_heuristic_fallback(self):
+        ingest = _load_ingest_module()
+        ingest._openai_client = None
+
+        activity = await ingest._categorize_activity(
+            "Terminal",
+            "secret customer incident",
+            "alice@example.com password token",
+        )
+
+        self.assertEqual(activity["category"], "terminal")
+        self.assertEqual(activity["status"], "using terminal")
+        self.assertNotIn("alice", activity["status"])
+        self.assertNotIn("password", activity["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

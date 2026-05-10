@@ -239,7 +239,8 @@ final class StatusPoller: @unchecked Sendable {
         }
 
         let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
-        let httpURL = "\(scheme)://\(host):\(activityPort)/api/current_activity"
+        let portSegment = activityPort.isEmpty ? "" : ":\(activityPort)"
+        let httpURL = "\(scheme)://\(host)\(portSegment)/api/current_activity"
 
         guard let url = URL(string: httpURL) else {
             completion(nil)
@@ -379,7 +380,8 @@ final class StatusPoller: @unchecked Sendable {
         }
 
         let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
-        let httpURL = "\(scheme)://\(host):\(activityPort)/api/activity_history?limit=10"
+        let portSegment = activityPort.isEmpty ? "" : ":\(activityPort)"
+        let httpURL = "\(scheme)://\(host)\(portSegment)/api/activity_history?limit=10"
 
         guard let url = URL(string: httpURL) else {
             completion(id, [])

@@ -288,6 +288,11 @@ final class ConfigManager {
 
     func ownActivityPortCandidates() -> [String] {
         var ports: [String] = []
+        // Fisherman Cloud exposes /api/* through the public HTTPS gateway.
+        // Self-hosted installs still commonly expose activity on a side port.
+        if backendMode == "cloud" {
+            appendUniquePort("", to: &ports)
+        }
         appendUniquePort(activityPort, to: &ports)
         // Historical self-hosted installs used either 9998 (repo default) or
         // 9996 (current EC2/systemd setup). Try both so settings can expose a
@@ -474,7 +479,11 @@ final class ConfigManager {
 
     private func appendUniquePort(_ raw: String, to ports: inout [String]) {
         let port = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !port.isEmpty, Int(port) != nil, !ports.contains(port) else { return }
+        if port.isEmpty {
+            if !ports.contains(port) { ports.append(port) }
+            return
+        }
+        guard Int(port) != nil, !ports.contains(port) else { return }
         ports.append(port)
     }
 
