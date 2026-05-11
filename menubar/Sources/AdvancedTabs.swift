@@ -265,7 +265,7 @@ struct ActivityStatusTab: View {
             Text("Activity Status")
                 .font(.system(size: 14, weight: .semibold))
 
-            Text("Controls how Fisherman turns private screen context into the short status shown to you and published to friends.")
+            Text("Controls how Fisherman turns private screen context into the short status shown to you. Friend-specific publishing uses the status-loop processor and each friend's policy.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -19,9 +19,12 @@ struct CompactTrailing: View {
 
     var body: some View {
         HStack(spacing: 3) {
+            let compactActivities = state.allActivity.filter { user in
+                user.id == "me" || !user.stale
+            }
             // Emoji + flow badge only — duration/timeline live in expanded view
             // to keep the compact strip narrow and the menu bar visible.
-            ForEach(state.allActivity.prefix(5)) { user in
+            ForEach(compactActivities.prefix(5)) { user in
                 HStack(spacing: 1) {
                     Text(user.emoji)
                         .font(.system(size: 12))
@@ -43,7 +46,7 @@ struct CompactTrailing: View {
                     .opacity(0.9)
             }
 
-            if state.allActivity.isEmpty {
+            if compactActivities.isEmpty {
                 Text("\(state.primaryFrameCount)")
                     .font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary)

@@ -127,6 +127,7 @@ final class StatusPoller: @unchecked Sendable {
     private func pollRelayFriendActivity() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
+            let friends = self.config.relayFriends
             let result = CliBridge.run(["friend", "status", "--limit", "1"], timeout: 8)
             guard result.exitCode == 0,
                   let data = result.stdout.data(using: .utf8),
@@ -134,29 +135,50 @@ final class StatusPoller: @unchecked Sendable {
             else { return }
 
             let now = Date().timeIntervalSince1970
-            let activities: [UserActivity] = rows.compactMap { row in
-                guard let friend = row["friend"] as? String,
-                      let pubkey = row["pubkey"] as? String,
-                      let ts = row["ts"] as? Double,
-                      let digest = row["digest"] as? [String: Any]
-                else { return nil }
+            let activeByPubkey = Dictionary(
+                rows.compactMap { row -> (String, UserActivity)? in
+                    guard let friend = row["friend"] as? String,
+                          let pubkey = row["pubkey"] as? String,
+                          let ts = row["ts"] as? Double,
+                          let digest = row["digest"] as? [String: Any]
+                    else { return nil }
 
-                let emoji = digest["emoji"] as? String ?? "?"
-                let category = digest["category"] as? String ?? "idle"
-                let status = digest["status"] as? String ?? ""
-                let stale = now - ts > 15 * 60
-                var activity = UserActivity(
-                    id: "relay:\(pubkey)",
-                    name: friend,
-                    emoji: emoji,
-                    category: category,
-                    status: status,
-                    stale: stale
-                )
-                activity.inFlow = digest["flow"] as? Bool ?? false
-                return activity
+                    let emoji = digest["emoji"] as? String ?? "?"
+                    let category = digest["category"] as? String ?? "idle"
+                    let status = digest["status"] as? String ?? ""
+                    let stale = now - ts > 15 * 60
+                    var activity = UserActivity(
+                        id: "relay:\(pubkey)",
+                        name: friend,
+                        emoji: emoji,
+                        category: category,
+                        status: status,
+                        stale: stale
+                    )
+                    activity.inFlow = digest["flow"] as? Bool ?? false
+                    return (pubkey, activity)
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
+
+            let activities: [UserActivity]
+            if friends.isEmpty {
+                activities = Array(activeByPubkey.values)
+            } else {
+                activities = friends.map { friend in
+                    if let active = activeByPubkey[friend.pubkeyHex] {
+                        return active
+                    }
+                    return UserActivity(
+                        id: "relay:\(friend.pubkeyHex)",
+                        name: friend.name,
+                        emoji: "…",
+                        category: "waiting",
+                        status: "no recent status",
+                        stale: true
+                    )
+                }
             }
-            guard !activities.isEmpty else { return }
 
             DispatchQueue.main.async { [weak self] in
                 self?.commitActivities(activities, preservingRelay: false)

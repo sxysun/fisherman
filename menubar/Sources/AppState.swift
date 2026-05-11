@@ -20,7 +20,7 @@ struct ActivityEntry: Identifiable {
 enum ActivityCategory: String {
     case coding, debugging, codeReview = "code review", readingDocs = "reading docs"
     case design, writing, chat, email, meeting
-    case browsing, news, reading, gaming, terminal, idle
+    case browsing, news, reading, gaming, terminal, idle, waiting
 
     var color: NSColor {
         switch self {
@@ -38,7 +38,7 @@ enum ActivityCategory: String {
             return .systemRed
         case .gaming:
             return .systemPink
-        case .idle:
+        case .idle, .waiting:
             return .systemGray
         }
     }

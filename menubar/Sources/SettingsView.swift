@@ -509,7 +509,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionHeader("Friends")
 
-            hintText("Paste a friend code to add someone. Both sides must add each other.")
+            hintText("Paste a friend code to add someone. Both sides must add each other; a friend appears as no recent status until they publish to you.")
 
             // Friend code paste field
             VStack(alignment: .leading, spacing: 6) {
@@ -684,11 +684,15 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 Picker("", selection: $editingFriendAudience) {
                     ForEach(friendAudiences, id: \.self) { audience in
-                        Text(audience.capitalized).tag(audience)
+                        Text(audienceLabel(audience)).tag(audience)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
+                Text(audienceDescription(editingFriendAudience))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -701,7 +705,7 @@ struct SettingsView: View {
                     .scrollContentBackground(.hidden)
                     .background(Color.secondary.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
-                hintText("Optional. Used by the status agent after hard privacy filters.")
+                hintText("Optional. Added to the status-generation prompt after baseline privacy rules.")
             }
 
             Text(editingPolicyPreview(friend))
@@ -759,9 +763,31 @@ struct SettingsView: View {
     ) -> String {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let promptPart = trimmedPrompt.isEmpty
-            ? "default privacy filters"
-            : "custom instruction plus privacy filters"
-        return "Preview: \(name) gets a separate \(audience) status using \(promptPart), then encrypted to \(encryptionPubkey.prefix(12))..."
+            ? "the \(audienceLabel(audience)) preset"
+            : "the \(audienceLabel(audience)) preset plus your custom instruction"
+        return "Preview: when status-loop runs, \(name) uses \(promptPart). Fisherman groups matching policies into one LLM call, then encrypts \(name)'s copy to \(encryptionPubkey.prefix(12))... Seeing \(name)'s status requires them to add you and publish back."
+    }
+
+    private func audienceLabel(_ audience: String) -> String {
+        switch audience {
+        case "work": return "Work"
+        case "close": return "Close"
+        case "custom": return "Custom"
+        default: return "Friends"
+        }
+    }
+
+    private func audienceDescription(_ audience: String) -> String {
+        switch audience {
+        case "work":
+            return "Work shares only work-relevant activity, project area, tools, docs, and broad availability. It should hide personal apps, private messages, entertainment, health, finance, legal, and relationship context."
+        case "close":
+            return "Close can share richer activity and availability with a trusted person, but still hides secrets, message content, health, finance, legal, NSFW, and sensitive document details."
+        case "custom":
+            return "Custom follows the instruction below after the baseline privacy rules. Use it for per-person conditions like \"only share work context\" or \"hide client names.\""
+        default:
+            return "Friends shares lightweight activity and availability. It prefers broad topic and vibe over detailed work or private context."
+        }
     }
 
     private func fieldRow(_ label: String, placeholder: String, text: Binding<String>) -> some View {
