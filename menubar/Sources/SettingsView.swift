@@ -33,6 +33,8 @@ struct SettingsView: View {
     @State private var cloudReview: CloudReleaseReview?
     @State private var reviewingCloud = false
     @State private var approvingCloud = false
+    @State private var dataOperationInProgress = false
+    @State private var dataOperationSummary: String?
 
     @State private var displayName: String = ""
 
@@ -106,7 +108,11 @@ struct SettingsView: View {
                     case .agent:
                         ActivityStatusTab(config: config)
                     case .data:
-                        ContextDataTab(config: config)
+                        ContextDataTab(
+                            config: config,
+                            operationInProgress: $dataOperationInProgress,
+                            operationSummary: $dataOperationSummary
+                        )
                     case .diagnostics:
                         DiagnosticsTab()
                     }
@@ -118,12 +124,23 @@ struct SettingsView: View {
 
             // Bottom buttons
             HStack {
-                Text("Saved to ~/.fisherman/.env")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                if dataOperationInProgress {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(dataOperationSummary ?? "Data operation in progress...")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                } else {
+                    Text("Saved to ~/.fisherman/.env")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
                 Button("Cancel") { onCancel() }
                     .keyboardShortcut(.cancelAction)
+                    .disabled(dataOperationInProgress)
                 Button("Save") {
                     let trimmedSelfHostedURL = selfHostedURL.trimmingCharacters(in: .whitespacesAndNewlines)
                     let trimmedCloudURL = cloudURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -173,6 +190,7 @@ struct SettingsView: View {
                     onSave()
                 }
                 .keyboardShortcut(.defaultAction)
+                .disabled(dataOperationInProgress)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)

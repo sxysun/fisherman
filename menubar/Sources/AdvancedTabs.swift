@@ -429,6 +429,8 @@ struct ActivityStatusTab: View {
 
 struct ContextDataTab: View {
     var config: ConfigManager
+    @Binding var operationInProgress: Bool
+    @Binding var operationSummary: String?
 
     @State private var exportSince: String = ""
     @State private var exportLimit: String = "5000"
@@ -457,7 +459,7 @@ struct ContextDataTab: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(operationMessage ?? "Working...")
                             .font(.system(size: 11, weight: .medium))
-                        Text("You can close Settings; the operation continues while the Fisherman menu bar app stays open. Reopen Settings -> Data to check the result.")
+                        Text("The final file appears when the operation finishes. Leave the Fisherman menu bar app running; Save and Cancel are disabled while this is active.")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -491,9 +493,17 @@ struct ContextDataTab: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 72)
             }
-            Toggle("Include screenshots", isOn: $includeImages)
+            Toggle("Include screenshots", isOn: Binding(
+                get: { includeImages },
+                set: { value in
+                    includeImages = value
+                    if value && exportLimit.trimmingCharacters(in: .whitespacesAndNewlines) == "5000" {
+                        exportLimit = "100"
+                    }
+                }
+            ))
                 .font(.system(size: 11))
-            Text(includeImages ? "The history file will contain raw screenshots and may take minutes for large limits. Treat it like highly private data." : "Default export includes OCR, app/window metadata, URLs, and transcripts, but not screenshots.")
+            Text(includeImages ? "The history file will contain raw screenshots. Screenshot exports default to 100 frames; increase the limit only when you need a large private file." : "Default export includes OCR, app/window metadata, URLs, and transcripts, but not screenshots.")
                 .font(.system(size: 10))
                 .foregroundStyle(includeImages ? .orange : .secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -562,14 +572,19 @@ struct ContextDataTab: View {
         panel.message = "Exports a Fisherman history JSON file. This is not a zip archive."
         guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
         let url = Self.jsonFileURL(selectedURL)
-        busy = true
-        operationMessage = includeImages ? "Exporting history file with screenshots..." : "Exporting history file..."
-        statusMessage = "Exporting history file..."
+        let displayPath = Self.displayPath(url.path)
+        let limit = exportLimit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "5000" : exportLimit
+        startOperation(
+            includeImages
+                ? "Exporting screenshots to \(displayPath)"
+                : "Exporting history to \(displayPath)"
+        )
+        statusMessage = "Export started: \(displayPath)\nThe file appears when export finishes."
         var args = [
             "context", "export",
             "--home", "active",
             "--output", url.path,
-            "--limit", exportLimit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "5000" : exportLimit,
+            "--limit", limit,
         ]
         let since = exportSince.trimmingCharacters(in: .whitespacesAndNewlines)
         if !since.isEmpty { args += ["--since", since] }
@@ -586,8 +601,7 @@ struct ContextDataTab: View {
         panel.allowsOtherFileTypes = false
         panel.message = "Choose a Fisherman history JSON file exported from Settings -> Data."
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        busy = true
-        operationMessage = "Importing history file..."
+        startOperation("Importing \(Self.displayPath(url.path))")
         statusMessage = "Importing history file..."
         runLong(["context", "import", url.path, "--home", "active"], successPrefix: "Import complete.")
     }
@@ -600,8 +614,7 @@ struct ContextDataTab: View {
     }
 
     private func deleteContext(dryRun: Bool) {
-        busy = true
-        operationMessage = dryRun ? "Counting matching context..." : "Deleting matching context..."
+        startOperation(dryRun ? "Counting matching context..." : "Deleting matching context...")
         statusMessage = dryRun ? "Counting matching context..." : "Deleting matching context..."
         var args = ["context", "delete", "--home", "active"]
         let since = deleteSince.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -618,12 +631,21 @@ struct ContextDataTab: View {
         runLong(args, successPrefix: dryRun ? "Dry run complete." : "Delete complete.")
     }
 
+    private func startOperation(_ message: String) {
+        busy = true
+        operationMessage = message
+        operationInProgress = true
+        operationSummary = message
+    }
+
     private func runLong(_ args: [String], successPrefix: String) {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = CliBridge.run(args, timeout: 1800)
             DispatchQueue.main.async {
                 busy = false
                 operationMessage = nil
+                operationInProgress = false
+                operationSummary = nil
                 if result.exitCode == 0 {
                     statusMessage = successPrefix + "\n" + result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
                 } else {
@@ -633,6 +655,10 @@ struct ContextDataTab: View {
                 }
             }
         }
+    }
+
+    private static func displayPath(_ path: String) -> String {
+        path.replacingOccurrences(of: NSHomeDirectory(), with: "~")
     }
 
     private static func friendlyCommandError(_ raw: String) -> String {
