@@ -14,7 +14,7 @@ The safe switch pattern is:
 
 ```bash
 # 1. Export from the source while it is still active.
-fisherman context export --home active --output fisherman-context.json --since 30d
+fisherman context export --home active --output fisherman-history.json --since 30d
 
 # 2. Point Fisherman at the destination.
 fisherman backend configure self-hosted --url wss://your-host/ingest
@@ -24,7 +24,7 @@ fisherman backend configure cloud
 fisherman backend configure local
 
 # 3. Import into the destination.
-fisherman context import fisherman-context.json --home active
+fisherman context import fisherman-history.json --home active
 
 # 4. Optional cleanup after a dry run.
 fisherman context delete --home active --since 30d --dry-run
@@ -38,7 +38,7 @@ still has the data.
 ## Export
 
 ```bash
-fisherman context export --home active --output context.json --since 30d
+fisherman context export --home active --output fisherman-history.json --since 30d
 ```
 
 Targets:
@@ -50,10 +50,11 @@ Targets:
 Screenshots are excluded by default:
 
 ```bash
-fisherman context export --home active --output context-with-images.json --since 7d --include-images
+fisherman context export --home active --output fisherman-history-with-images.json --since 7d --include-images
 ```
 
-Treat image archives as highly private. They are chmod `0600` on export.
+History exports are plain JSON files, not zip archives. Treat image
+exports as highly private. They are chmod `0600` on export.
 
 ## Import
 
@@ -61,7 +62,7 @@ Switch to the destination context home first, then import:
 
 ```bash
 fisherman backend configure self-hosted --url wss://your-host:9999/ingest
-fisherman context import context.json --home active
+fisherman context import fisherman-history.json --home active
 ```
 
 Import adds rows to the destination. It does not delete the source.

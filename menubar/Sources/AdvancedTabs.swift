@@ -473,11 +473,11 @@ struct ContextDataTab: View {
             }
             Toggle("Include screenshots", isOn: $includeImages)
                 .font(.system(size: 11))
-            Text(includeImages ? "The archive will contain raw screenshots and may take minutes for large limits. Treat it like highly private data." : "Default export includes OCR, app/window metadata, URLs, and transcripts, but not screenshots.")
+            Text(includeImages ? "The history file will contain raw screenshots and may take minutes for large limits. Treat it like highly private data." : "Default export includes OCR, app/window metadata, URLs, and transcripts, but not screenshots.")
                 .font(.system(size: 10))
                 .foregroundStyle(includeImages ? .orange : .secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Export Archive") { exportArchive() }
+            Button("Export History File") { exportArchive() }
                 .buttonStyle(.borderedProminent)
                 .disabled(busy)
 
@@ -485,10 +485,10 @@ struct ContextDataTab: View {
 
             Text("Import")
                 .font(.system(size: 12, weight: .semibold))
-            Text("Import writes archive contents into the active home. It does not delete the source home.")
+            Text("Import writes a Fisherman history JSON file into the active home. It does not delete the source home.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            Button("Import Archive") { importArchive() }
+            Button("Import History File") { importArchive() }
                 .buttonStyle(.bordered)
                 .disabled(busy)
 
@@ -535,11 +535,15 @@ struct ContextDataTab: View {
     private func exportArchive() {
         let panel = NSSavePanel()
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = "fisherman-context-\(Self.dateSlug()).json"
+        panel.nameFieldStringValue = "Fisherman History \(Self.dateSlug()).json"
         panel.allowedContentTypes = [.json]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        panel.allowsOtherFileTypes = false
+        panel.isExtensionHidden = false
+        panel.message = "Exports a Fisherman history JSON file. This is not a zip archive."
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+        let url = Self.jsonFileURL(selectedURL)
         busy = true
-        statusMessage = "Exporting context..."
+        statusMessage = "Exporting history file..."
         var args = [
             "context", "export",
             "--home", "active",
@@ -549,7 +553,7 @@ struct ContextDataTab: View {
         let since = exportSince.trimmingCharacters(in: .whitespacesAndNewlines)
         if !since.isEmpty { args += ["--since", since] }
         if includeImages { args += ["--include-images"] }
-        runLong(args, successPrefix: "Export complete.")
+        runLong(args, successPrefix: "Export complete. Open this .json file with a text editor or import it with Fisherman; it is not a zip archive.")
     }
 
     private func importArchive() {
@@ -558,10 +562,19 @@ struct ContextDataTab: View {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.json]
+        panel.allowsOtherFileTypes = false
+        panel.message = "Choose a Fisherman history JSON file exported from Settings -> Data."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         busy = true
-        statusMessage = "Importing context..."
+        statusMessage = "Importing history file..."
         runLong(["context", "import", url.path, "--home", "active"], successPrefix: "Import complete.")
+    }
+
+    private static func jsonFileURL(_ url: URL) -> URL {
+        if url.pathExtension.lowercased() == "json" {
+            return url
+        }
+        return url.appendingPathExtension("json")
     }
 
     private func deleteContext(dryRun: Bool) {

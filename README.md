@@ -1,3 +1,17 @@
+<p align="center">
+  <img alt="Fisherman" src="https://img.shields.io/badge/Fisherman-context%20home-0B84FF?style=for-the-badge">
+</p>
+
+<p align="center">
+  <a href="https://github.com/sxysun/fisherman/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sxysun/fisherman/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <a href="https://github.com/sxysun/fisherman/actions/workflows/deploy-cvm.yml"><img alt="CVM deploy" src="https://img.shields.io/github/actions/workflow/status/sxysun/fisherman/deploy-cvm.yml?branch=main&style=flat-square&label=TEE%20deploy"></a>
+  <img alt="macOS" src="https://img.shields.io/badge/macOS-13%2B-111827?style=flat-square&logo=apple">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white">
+  <img alt="Relay" src="https://img.shields.io/badge/friend%20relay-E2EE-16A34A?style=flat-square">
+  <img alt="Cloud" src="https://img.shields.io/badge/cloud-TDX%20attested-7C3AED?style=flat-square">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
+</p>
+
 # Fisherman
 
 Fisherman captures your screen locally, distills private context into a
@@ -126,27 +140,28 @@ trust domains should be explicit. Use Settings -> Data or the CLI to
 move data:
 
 ```bash
-# Download recent history from the active context home
-fisherman context export --home active --output context.json --since 30d
+# Download recent history from the active context home as JSON
+fisherman context export --home active --output fisherman-history.json --since 30d
 
-# Include screenshots when you explicitly need a full-fidelity archive
-fisherman context export --home active --output context-with-images.json --since 7d --include-images
+# Include screenshots when you explicitly need a full-fidelity file
+fisherman context export --home active --output fisherman-history-with-images.json --since 7d --include-images
 
-# Upload an archive into the active context home
-fisherman context import context.json --home active
+# Upload a history file into the active context home
+fisherman context import fisherman-history.json --home active
 
 # Delete matching history from the active context home
 fisherman context delete --home active --since 30d --confirm DELETE
 ```
 
-Archives are plain JSON. Screenshots are excluded by default because they
-are large and highly private.
+History exports are plain JSON files, not zip archives. Open them with a
+text editor or import them back through Fisherman. Screenshots are
+excluded by default because they are large and highly private.
 
 Recommended switch flow:
 
 1. Export from the current home.
 2. Switch to the destination home.
-3. Import the archive into the destination.
+3. Import the history file into the destination.
 4. Only delete from the source after a dry run and spot check.
 
 ## Friends
