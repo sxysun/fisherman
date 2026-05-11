@@ -436,6 +436,7 @@ struct ContextDataTab: View {
     @State private var deleteSince: String = "30d"
     @State private var deleteConfirm: String = ""
     @State private var statusMessage: String?
+    @State private var operationMessage: String?
     @State private var busy: Bool = false
 
     var body: some View {
@@ -447,6 +448,25 @@ struct ContextDataTab: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if busy {
+                HStack(alignment: .top, spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(operationMessage ?? "Working...")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("You can close Settings; the operation continues while the Fisherman menu bar app stays open. Reopen Settings -> Data to check the result.")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(8)
+                .background(Color.accentColor.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text("Active home")
@@ -543,6 +563,7 @@ struct ContextDataTab: View {
         guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
         let url = Self.jsonFileURL(selectedURL)
         busy = true
+        operationMessage = includeImages ? "Exporting history file with screenshots..." : "Exporting history file..."
         statusMessage = "Exporting history file..."
         var args = [
             "context", "export",
@@ -566,6 +587,7 @@ struct ContextDataTab: View {
         panel.message = "Choose a Fisherman history JSON file exported from Settings -> Data."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         busy = true
+        operationMessage = "Importing history file..."
         statusMessage = "Importing history file..."
         runLong(["context", "import", url.path, "--home", "active"], successPrefix: "Import complete.")
     }
@@ -579,6 +601,7 @@ struct ContextDataTab: View {
 
     private func deleteContext(dryRun: Bool) {
         busy = true
+        operationMessage = dryRun ? "Counting matching context..." : "Deleting matching context..."
         statusMessage = dryRun ? "Counting matching context..." : "Deleting matching context..."
         var args = ["context", "delete", "--home", "active"]
         let since = deleteSince.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -597,9 +620,10 @@ struct ContextDataTab: View {
 
     private func runLong(_ args: [String], successPrefix: String) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = CliBridge.run(args, timeout: 600)
+            let result = CliBridge.run(args, timeout: 1800)
             DispatchQueue.main.async {
                 busy = false
+                operationMessage = nil
                 if result.exitCode == 0 {
                     statusMessage = successPrefix + "\n" + result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
                 } else {
