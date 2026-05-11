@@ -31,7 +31,11 @@ final class ProcessManager: @unchecked Sendable {
 
     func startAll() {
         stopped = false
-        startScreenpipe()
+        if configuredCaptureBackend() == "screenpipe" {
+            startScreenpipe()
+        } else {
+            NSLog("[Fisherman] capture backend is \(configuredCaptureBackend()); skipping screenpipe launch")
+        }
         startCleanupTimer()
         startWatchdog()
         // Delay fisherman launch to let screenpipe bind its port
@@ -134,8 +138,11 @@ final class ProcessManager: @unchecked Sendable {
         proc.currentDirectoryURL = URL(fileURLWithPath: projectDir)
 
         var env = buildEnvironment()
-        env["FISH_CAPTURE_BACKEND"] = "screenpipe"
-        env["FISH_SCREENPIPE_POLL_INTERVAL"] = "3"
+        let backend = configuredCaptureBackend()
+        env["FISH_CAPTURE_BACKEND"] = backend
+        if backend == "screenpipe" {
+            env["FISH_SCREENPIPE_POLL_INTERVAL"] = readEnvValue("FISH_SCREENPIPE_POLL_INTERVAL") ?? "3"
+        }
         proc.environment = env
 
         let log = logFileHandle(name: "fisherman")
@@ -159,6 +166,16 @@ final class ProcessManager: @unchecked Sendable {
         } catch {
             NSLog("[Fisherman] failed to launch fisherman daemon: \(error)")
         }
+    }
+
+    private func configuredCaptureBackend() -> String {
+        let raw = readEnvValue("FISH_CAPTURE_BACKEND")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let raw, raw == "native" || raw == "swift" || raw == "screenpipe" {
+            return raw
+        }
+        return "screenpipe"
     }
 
     // MARK: - Restart fisherman
