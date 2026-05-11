@@ -236,3 +236,65 @@ class ContextHomeTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         self.assertEqual(calls, 2)
+
+    def test_backend_context_import_chunks_large_screenshot_archives(self):
+        archive = {
+            "format": "fisherman.context.v1",
+            "source": {"kind": "backend"},
+            "options": {"include_images": True},
+            "frames": [
+                {"id": f"f{i}", "ts": 1_710_000_000 + i, "image_b64": "x" * 80}
+                for i in range(5)
+            ],
+            "audio_transcripts": [
+                {"id": "a1", "ts": 1_710_000_010, "transcript": "hello"},
+            ],
+        }
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "FISH_CONTEXT_IMAGE_IMPORT_BATCH": "2",
+                "FISH_CONTEXT_IMPORT_MAX_BYTES": "1048576",
+            },
+        ):
+            chunks = cli._context_import_chunks(archive)
+
+        self.assertEqual(len(chunks), 3)
+        self.assertEqual([len(chunk["frames"]) for chunk in chunks], [2, 2, 1])
+        self.assertEqual(sum(len(chunk["audio_transcripts"]) for chunk in chunks), 1)
+        self.assertEqual(chunks[0]["format"], "fisherman.context.v1")
+
+    def test_backend_context_import_archive_sums_chunk_results(self):
+        cfg = FishermanConfig(
+            backend_mode="self_hosted",
+            backend_url="https://backend.example",
+            private_key="01" * 32,
+        )
+        archive = {
+            "format": "fisherman.context.v1",
+            "source": {"kind": "backend"},
+            "frames": [
+                {"id": f"f{i}", "ts": 1_710_000_000 + i, "image_b64": "x"}
+                for i in range(3)
+            ],
+            "audio_transcripts": [],
+        }
+        posted = []
+
+        def fake_request(_cfg, method, path, *, params=None, body=None, timeout=60.0):
+            posted.append(body)
+            return {
+                "ok": True,
+                "imported_frames": len(body["frames"]),
+                "imported_audio_transcripts": len(body["audio_transcripts"]),
+            }
+
+        with mock.patch.dict("os.environ", {"FISH_CONTEXT_IMAGE_IMPORT_BATCH": "2"}), \
+             mock.patch.object(cli, "_backend_context_request", side_effect=fake_request):
+            result = cli._backend_context_import_archive(cfg, archive, timeout=10.0)
+
+        self.assertEqual(result["imported_frames"], 3)
+        self.assertEqual(result["imported_audio_transcripts"], 0)
+        self.assertEqual(result["chunks"], 2)
+        self.assertEqual([len(body["frames"]) for body in posted], [2, 1])

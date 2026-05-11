@@ -1344,7 +1344,7 @@ def _backend_context_request(
     data = None
     headers = _backend_owner_headers(cfg, content_type="application/json" if body is not None else None)
     if body is not None:
-        data = json.dumps(body).encode("utf-8")
+        data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         _backend_api_url(cfg.backend_url, path, params),
         method=method,
@@ -1371,6 +1371,114 @@ def _backend_context_request(
                 continue
             raise click.ClickException(f"backend context request failed: {e}") from e
     raise click.ClickException(f"backend context request failed: {last_error}")
+
+
+def _context_import_chunks(archive: dict) -> list[dict]:
+    """Split a migration archive into backend-sized POST bodies.
+
+    Screenshot-bearing exports can be hundreds of megabytes. The backend keeps
+    a request-size ceiling so one accidental import cannot monopolize the API,
+    so imports must page the same way image exports do.
+    """
+    frames = archive.get("frames") or []
+    audio = archive.get("audio_transcripts") or []
+    has_images = any(isinstance(row, dict) and row.get("image_b64") for row in frames)
+    max_bytes = max(
+        1024 * 1024,
+        int(os.environ.get("FISH_CONTEXT_IMPORT_MAX_BYTES", str(32 * 1024 * 1024)) or "0"),
+    )
+    max_records = max(
+        1,
+        int(
+            os.environ.get(
+                "FISH_CONTEXT_IMAGE_IMPORT_BATCH" if has_images else "FISH_CONTEXT_IMPORT_BATCH",
+                "25" if has_images else "2000",
+            )
+            or "0"
+        ),
+    )
+    base = {k: v for k, v in archive.items() if k not in {"frames", "audio_transcripts"}}
+    empty_payload = dict(base)
+    empty_payload["frames"] = []
+    empty_payload["audio_transcripts"] = []
+    base_bytes = len(
+        json.dumps(empty_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ) + 1024
+
+    chunks: list[dict] = []
+    current_frames: list[dict] = []
+    current_audio: list[dict] = []
+    current_bytes = base_bytes
+
+    def row_bytes(row: dict) -> int:
+        return len(json.dumps(row, separators=(",", ":"), ensure_ascii=False).encode("utf-8")) + 2
+
+    def flush() -> None:
+        nonlocal current_frames, current_audio, current_bytes
+        if not current_frames and not current_audio:
+            return
+        chunk = dict(base)
+        chunk["frames"] = current_frames
+        chunk["audio_transcripts"] = current_audio
+        chunks.append(chunk)
+        current_frames = []
+        current_audio = []
+        current_bytes = base_bytes
+
+    def add(kind: str, row: dict) -> None:
+        nonlocal current_bytes
+        size = row_bytes(row)
+        records = len(current_frames) + len(current_audio)
+        if records and (records >= max_records or current_bytes + size > max_bytes):
+            flush()
+        if kind == "frame":
+            current_frames.append(row)
+        else:
+            current_audio.append(row)
+        current_bytes += size
+
+    for row in frames:
+        if isinstance(row, dict):
+            add("frame", row)
+    for row in audio:
+        if isinstance(row, dict):
+            add("audio", row)
+    flush()
+    return chunks or [empty_payload]
+
+
+def _backend_context_import_archive(
+    cfg: FishermanConfig,
+    archive: dict,
+    *,
+    timeout: float,
+) -> dict:
+    chunks = _context_import_chunks(archive)
+    total_frames = 0
+    total_audio = 0
+    for index, chunk in enumerate(chunks, start=1):
+        result = _backend_context_request(
+            cfg,
+            "POST",
+            "/api/context/import",
+            body=chunk,
+            timeout=timeout,
+        )
+        total_frames += int(result.get("imported_frames", 0) or 0)
+        total_audio += int(result.get("imported_audio_transcripts", 0) or 0)
+        if len(chunks) > 1:
+            click.echo(
+                f"import chunk {index}/{len(chunks)}: "
+                f"{result.get('imported_frames', 0)} frames, "
+                f"{result.get('imported_audio_transcripts', 0)} transcripts",
+                err=True,
+            )
+    return {
+        "ok": True,
+        "imported_frames": total_frames,
+        "imported_audio_transcripts": total_audio,
+        "chunks": len(chunks),
+    }
 
 
 def _context_row_ts_seconds(row: dict) -> float | None:
@@ -1575,16 +1683,12 @@ def context_import(archive, home, timeout):
         result = _ctx.import_local_context(archive, cfg)
     else:
         body = _ctx.load_archive(archive)
-        result = _backend_context_request(
-            cfg,
-            "POST",
-            "/api/context/import",
-            body=body,
-            timeout=timeout,
-        )
+        result = _backend_context_import_archive(cfg, body, timeout=timeout)
     click.echo("imported context")
     click.echo(f"  frames:      {result.get('imported_frames', 0)}")
     click.echo(f"  transcripts: {result.get('imported_audio_transcripts', 0)}")
+    if int(result.get("chunks", 1) or 1) > 1:
+        click.echo(f"  chunks:      {result.get('chunks')}")
 
 
 @context_group.command(name="delete")
