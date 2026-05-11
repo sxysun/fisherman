@@ -65,10 +65,6 @@ def _command_to_scope(command: str) -> str | None:
         "status":         "read:status",
         "query":          "read:captures",
         "transcripts":    "read:transcripts",
-        "screenshot":     "read:screenshots",
-        "publish-status": "publish:status",
-        "pause":          "control:pause",
-        "resume":         "control:pause",
     }.get(command)
 
 

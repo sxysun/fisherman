@@ -704,6 +704,25 @@ class FishermanDaemon:
             )
             return {"ok": True, "data": rows}
 
+        if cmd == "friends":
+            from fisherman.friends import list_friends
+            rows = await loop.run_in_executor(self._pool, list_friends)
+            return {"ok": True, "data": rows}
+
+        if cmd == "friend-status":
+            result = await loop.run_in_executor(
+                self._pool,
+                lambda: self._dispatch_friend_status(args),
+            )
+            return result
+
+        if cmd == "publish-status":
+            result = await loop.run_in_executor(
+                self._pool,
+                lambda: self._dispatch_publish_status(args),
+            )
+            return result
+
         if cmd == "pause":
             self._privacy.pause()
             return {"ok": True}
@@ -713,6 +732,115 @@ class FishermanDaemon:
             return {"ok": True}
 
         return {"error": f"unknown_command:{cmd}"}
+
+    def _dispatch_friend_status(self, args: dict) -> dict:
+        from fisherman.friends import find_friend, list_friends
+        from fisherman.ledger import fetch_friend_status, LedgerError
+
+        if self._x25519_priv is None or not self._signing_pub:
+            return {"error": "no_private_key"}
+
+        name_or_pubkey = (args.get("name_or_pubkey") or "").strip()
+        limit = max(1, min(int(args.get("limit") or 10), 50))
+        since_ts = args.get("since_ts")
+        targets: list[dict]
+        if name_or_pubkey:
+            friend = find_friend(name_or_pubkey)
+            if not friend:
+                return {"error": f"friend_not_found:{name_or_pubkey}"}
+            targets = [friend]
+        else:
+            targets = list_friends()
+
+        out: list[dict] = []
+        for friend in targets:
+            friend_x = friend.get("encryption_pubkey")
+            name = friend.get("name") or friend.get("pubkey_hex", "")[:12]
+            if not friend_x:
+                out.append({
+                    "friend": name,
+                    "pubkey": friend.get("pubkey_hex"),
+                    "error": "friend_missing_encryption_pubkey",
+                })
+                continue
+            try:
+                events = fetch_friend_status(
+                    relay_url=friend.get("relay_url") or self._config.status_relay_url,
+                    friend_pubkey_hex=friend["pubkey_hex"],
+                    friend_x25519_pubkey_hex=friend_x,
+                    recipient_pubkey_bytes=self._signing_pub,
+                    recipient_x25519_priv=self._x25519_priv,
+                    since_ts=since_ts,
+                    limit=limit,
+                )
+            except LedgerError as e:
+                out.append({
+                    "friend": name,
+                    "pubkey": friend.get("pubkey_hex"),
+                    "error": str(e),
+                })
+                continue
+            for ev in events:
+                out.append({
+                    "friend": name,
+                    "pubkey": friend["pubkey_hex"],
+                    **ev,
+                })
+        return {"ok": True, "data": out}
+
+    def _dispatch_publish_status(self, args: dict) -> dict:
+        from fisherman.friends import find_friend, list_friends
+        from fisherman.ledger import publish_status, LedgerError
+
+        if self._signing_priv is None or self._x25519_priv is None or not self._signing_pub:
+            return {"error": "no_private_key"}
+
+        digest = args.get("digest")
+        if not isinstance(digest, dict) or not digest:
+            return {"error": "invalid_digest"}
+
+        recipients = [
+            str(value).strip()
+            for value in (args.get("recipients") or [])
+            if str(value).strip()
+        ]
+        targets: list[dict] = []
+        if recipients:
+            for recipient in recipients:
+                friend = find_friend(recipient)
+                if not friend:
+                    return {"error": f"friend_not_found:{recipient}"}
+                targets.append(friend)
+        else:
+            targets = list_friends()
+
+        if not targets:
+            return {"error": "no_friends"}
+
+        published: list[dict] = []
+        for friend in targets:
+            name = friend.get("name") or friend.get("pubkey_hex", "")[:12]
+            friend_x = friend.get("encryption_pubkey")
+            if not friend_x:
+                return {"error": f"friend_missing_encryption_pubkey:{name}"}
+            try:
+                event_id = publish_status(
+                    relay_url=friend.get("relay_url") or self._config.status_relay_url,
+                    priv=self._signing_priv,
+                    pubkey_bytes=self._signing_pub,
+                    author_x25519_priv=self._x25519_priv,
+                    recipient_pubkey_hex=friend["pubkey_hex"],
+                    recipient_x25519_pubkey_hex=friend_x,
+                    digest=digest,
+                )
+            except LedgerError as e:
+                return {"error": f"publish_failed:{name}:{e}"}
+            published.append({
+                "name": name,
+                "pubkey": friend["pubkey_hex"],
+                "event_id": event_id,
+            })
+        return {"ok": True, "data": {"published": published}}
 
     async def _processor_schedule_loop(self) -> None:
         """Run due processor schedules from ~/.fisherman/processor-schedules.json."""

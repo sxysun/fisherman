@@ -54,6 +54,7 @@ class FriendCliTests(unittest.TestCase):
                         since=None,
                         limit=10,
                         as_text=False,
+                        source_pref=None,
                     )
 
         self.assertEqual(json.loads(out.getvalue()), [])

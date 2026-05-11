@@ -20,9 +20,8 @@ self-hosted server maintenance, and memory-wiki jobs.
   logs, or send it to any service other than the local Fisherman CLI.
 - Stay inside the granted scopes. If a command is denied, ask the user for a new
   Agent Access token with the right scope.
-- Prefer concise summaries over dumping raw OCR, transcripts, or screenshots.
-- Do not export screenshots unless the user explicitly asks and the token grants
-  screenshot access.
+- Prefer concise summaries over dumping raw OCR or transcripts.
+- Remote screenshot export is not currently implemented for deputy tokens.
 
 ## Register
 
@@ -83,6 +82,28 @@ Transcripts:
 fisherman transcripts --since 2h --limit 20 --text
 ```
 
+Friends, when the token grants `read:friends`:
+
+```bash
+fisherman friend list --text
+fisherman friend status --text
+fisherman friend status alice --text
+```
+
+Publish a status, when the token grants `publish:status`:
+
+```bash
+echo '{"emoji":"💻","category":"coding","status":"reviewing deploy"}' \
+  | fisherman publish-status --from-stdin
+```
+
+Pause/resume capture, when the token grants `control:pause`:
+
+```bash
+fisherman pause
+fisherman resume
+```
+
 ## Routing
 
 Default to `--source auto`. It uses Cloud or Self-hosted backend when the token
@@ -104,18 +125,21 @@ Use laptop relay when the user specifically wants laptop-local context:
 fisherman query --source primary --since 30m --limit 20 --text
 ```
 
-If `primary` fails, the user's laptop daemon is probably offline or not
-connected to the relay. If `secondary` fails, the Cloud/Self-hosted backend may
-not be configured, approved, or reachable.
+Cloud/Self-hosted direct routing currently supports `status`, `query`, and
+`transcripts`. Commands that need laptop-local state, such as `friend status`,
+`publish-status`, `pause`, and `resume`, use the laptop relay path. If `primary`
+fails, the user's laptop daemon is probably offline or not connected to the
+relay. If `secondary` fails, the Cloud/Self-hosted backend may not be configured,
+approved, reachable, or may not support that command.
 
 ## Scope Map
 
 - `read:status` allows `fisherman status`.
 - `read:captures` allows `fisherman query`.
 - `read:transcripts` allows `fisherman transcripts`.
-- `read:screenshots` allows screenshot export paths when supported.
-- `publish:status` allows status publishing.
-- `control:pause` allows pause/resume control commands.
+- `read:friends` allows `fisherman friend list` and `fisherman friend status`.
+- `publish:status` allows `fisherman publish-status`.
+- `control:pause` allows `fisherman pause` and `fisherman resume`.
 
 Ask the user to revoke the token when the job is complete:
 

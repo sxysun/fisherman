@@ -20,7 +20,6 @@ struct DeputiesTab: View {
     let allScopes = [
         "read:captures",
         "read:transcripts",
-        "read:screenshots",
         "read:status",
         "read:friends",
         "publish:status",
@@ -233,9 +232,11 @@ struct DeputiesTab: View {
         fisherman status --text
         fisherman query --since 30m --limit 20 --text
         fisherman transcripts --since 2h --limit 20 --text
+        fisherman friend list --text
+        fisherman friend status --text
         ```
 
-        Use `--source secondary` for Cloud/Self-hosted, `--source primary` for laptop relay, and `--source auto` by default.
+        Use `--source secondary` for Cloud/Self-hosted status/query/transcripts, `--source primary` for laptop relay, and `--source auto` by default. Friend status, publish-status, pause, and resume need the laptop relay path.
 
         Allowed scopes: \(scopes.joined(separator: ", "))
         """

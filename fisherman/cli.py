@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -151,7 +152,7 @@ def _fmt_ts(ts: float) -> str:
 @click.option("--port", default=7892, help="Control server port")
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
-              default=None, help="Force routing through laptop (primary) or backend relay path (secondary)")
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def status(port: int, as_text: bool, source_pref: str | None):
     """Show daemon status."""
     if _is_remote_mode():
@@ -181,16 +182,28 @@ def status(port: int, as_text: bool, source_pref: str | None):
 
 @main.command()
 @click.option("--port", default=7892, help="Control server port")
-def pause(port: int):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
+def pause(port: int, source_pref: str | None):
     """Pause screen capture."""
+    if _is_remote_mode():
+        _remote_call("pause", {}, source_pref=source_pref)
+        click.echo("Paused.")
+        return
     data = _control_request("POST", "/pause", port)
     click.echo("Paused." if data.get("paused") else "Failed.")
 
 
 @main.command()
 @click.option("--port", default=7892, help="Control server port")
-def resume(port: int):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
+def resume(port: int, source_pref: str | None):
     """Resume screen capture."""
+    if _is_remote_mode():
+        _remote_call("resume", {}, source_pref=source_pref)
+        click.echo("Resumed.")
+        return
     data = _control_request("POST", "/resume", port)
     click.echo("Resumed." if not data.get("paused") else "Failed.")
 
@@ -205,7 +218,7 @@ def resume(port: int):
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--port", default=7892, help="Control server port")
 @click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
-              default=None, help="Force routing through laptop (primary) or backend relay path (secondary)")
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def query(since, until, app, bundle, search, limit, as_text, port, source_pref):
     """Read your local capture history (OCR + window + URLs).
 
@@ -250,7 +263,7 @@ def query(since, until, app, bundle, search, limit, as_text, port, source_pref):
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
 @click.option("--port", default=7892, help="Control server port")
 @click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
-              default=None, help="Force routing through laptop (primary) or backend relay path (secondary)")
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def transcripts(since, until, meeting_app, search, limit, as_text, port, source_pref):
     """Read meeting audio transcripts captured during calls."""
     if _is_remote_mode():
@@ -2259,10 +2272,19 @@ def friend_add(code: str, name: str | None, audience: str, policy_prompt: str | 
 
 @friend_group.command(name="list")
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
-def friend_list(as_text: bool):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
+def friend_list(as_text: bool, source_pref: str | None):
     """List your friends."""
-    from fisherman.friends import list_friends
-    rows = list_friends()
+    if _is_remote_mode():
+        rows = _remote_call("friends", {}, source_pref=source_pref) or []
+    else:
+        from fisherman.friends import list_friends
+        rows = list_friends()
+    _echo_friend_list(rows, as_text)
+
+
+def _echo_friend_list(rows: list[dict], as_text: bool) -> None:
     if not as_text:
         click.echo(json.dumps(rows, indent=2))
         return
@@ -2351,10 +2373,32 @@ def friend_policy(
 @click.option("--since", default=None, help="Time window start, e.g. '5m', '2h', '1d'")
 @click.option("--limit", "-n", default=10, show_default=True)
 @click.option("--text", "as_text", is_flag=True, help="Human-readable output instead of JSON")
-def friend_status(name_or_pubkey: str | None, since: str | None, limit: int, as_text: bool):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
+def friend_status(
+    name_or_pubkey: str | None,
+    since: str | None,
+    limit: int,
+    as_text: bool,
+    source_pref: str | None,
+):
     """Fetch a friend's recent status from the relay."""
     from fisherman.friends import find_friend, list_friends
     from fisherman.ledger import fetch_friend_status, LedgerError
+
+    since_ts = _parse_since_to_ts(since)
+    if _is_remote_mode():
+        out = _remote_call(
+            "friend-status",
+            {
+                "name_or_pubkey": name_or_pubkey,
+                "since_ts": since_ts,
+                "limit": limit,
+            },
+            source_pref=source_pref,
+        ) or []
+        _echo_friend_status(out, as_text)
+        return
 
     targets = []
     if name_or_pubkey:
@@ -2371,13 +2415,6 @@ def friend_status(name_or_pubkey: str | None, since: str | None, limit: int, as_
             else:
                 click.echo("(no friends added yet — try `fisherman friend add <code>`)")
             return
-
-    since_ts = None
-    if since:
-        delta = _parse_duration(since)
-        if delta is not None:
-            import time as _t
-            since_ts = _t.time() - delta
 
     _priv, my_pub, my_x_priv, _my_x_pub = _load_keys()
     out: list[dict] = []
@@ -2403,19 +2440,27 @@ def friend_status(name_or_pubkey: str | None, since: str | None, limit: int, as_
         for ev in events:
             out.append({"friend": f["name"], "pubkey": f["pubkey_hex"], **ev})
 
+    _echo_friend_status(out, as_text)
+
+
+def _echo_friend_status(out: list[dict], as_text: bool) -> None:
     if not as_text:
         click.echo(json.dumps(out, indent=2))
         return
     if not out:
         click.echo("(no recent status)")
         return
-    for ev in sorted(out, key=lambda e: e["ts"], reverse=True):
-        ts = _fmt_ts(ev["ts"])
-        d = ev["digest"]
+    for ev in sorted(out, key=lambda e: e.get("ts") or 0, reverse=True):
+        if ev.get("error"):
+            name = ev.get("friend") or ev.get("pubkey") or "friend"
+            click.echo(f"  [{name}] error: {ev['error']}", err=True)
+            continue
+        ts = _fmt_ts(float(ev.get("ts") or 0))
+        d = ev.get("digest") or {}
         emoji = d.get("emoji", "")
         cat = d.get("category", "")
         status = d.get("status", "")
-        click.echo(f"[{ts}] {ev['friend']:18} {emoji}  {cat:12} {status}")
+        click.echo(f"[{ts}] {ev.get('friend', '?'):18} {emoji}  {cat:12} {status}")
 
 
 def _parse_duration(s: str) -> float | None:
@@ -2453,7 +2498,9 @@ def _parse_since_to_ts(s: str | None) -> float | None:
     multiple=True,
     help="Friend name or pubkey to publish to. Defaults to all friends.",
 )
-def publish_status(emoji, category, status, flow, from_stdin, recipients):
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
+def publish_status(emoji, category, status, flow, from_stdin, recipients, source_pref):
     """Sign + encrypt + post per-recipient status events to the relay.
 
     Either pass --emoji/--category/--status or pipe JSON to stdin:
@@ -2478,6 +2525,15 @@ def publish_status(emoji, category, status, flow, from_stdin, recipients):
         if not digest:
             click.echo("nothing to publish: pass --emoji/--category/--status or --from-stdin", err=True)
             sys.exit(2)
+
+    if _is_remote_mode():
+        result = _remote_call(
+            "publish-status",
+            {"digest": digest, "recipients": list(recipients)},
+            source_pref=source_pref,
+        )
+        _echo_publish_result(result if isinstance(result, dict) else {})
+        return
 
     targets = []
     if recipients:
@@ -2519,6 +2575,15 @@ def publish_status(emoji, category, status, flow, from_stdin, recipients):
 
     if len(published) == 1:
         click.echo(f"published to {published[0][0]} event_id={published[0][1]}")
+    else:
+        click.echo(f"published to {len(published)} friends")
+
+
+def _echo_publish_result(result: dict) -> None:
+    published = result.get("published") or []
+    if len(published) == 1:
+        row = published[0]
+        click.echo(f"published to {row.get('name') or row.get('pubkey', 'friend')} event_id={row.get('event_id')}")
     else:
         click.echo(f"published to {len(published)} friends")
 
@@ -2739,6 +2804,9 @@ def _is_remote_mode() -> bool:
     return _deputy_config_path() is not None
 
 
+_DIRECT_BACKEND_COMMANDS = {"status", "query", "transcripts"}
+
+
 def _remote_call(command: str, args: dict, source_pref: str | None = None) -> dict:
     """Run an RPC call from a deputy host through the relay. Returns the
     decrypted response dict (which itself has {ok, data} or {error}).
@@ -2757,10 +2825,27 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
     with open(cfg_path) as f:
         cfg = json.load(f)
 
-    if source_pref in (None, "auto"):
-        direct = _direct_backend_call(command, args, cfg)
+    backend_url = (cfg.get("backend_url") or "").strip()
+    forced_backend = source_pref == "secondary" and bool(backend_url)
+    if forced_backend and command not in _DIRECT_BACKEND_COMMANDS:
+        click.echo(
+            f"backend route does not support `{command}` yet; use --source primary "
+            "while the laptop daemon is online.",
+            err=True,
+        )
+        sys.exit(1)
+
+    if source_pref in (None, "auto") or forced_backend:
+        direct = _direct_backend_call(command, args, cfg, fail_hard=forced_backend)
         if direct is not None:
             return direct
+        if forced_backend:
+            click.echo(
+                f"backend route does not support `{command}` yet; use --source primary "
+                "while the laptop daemon is online.",
+                err=True,
+            )
+            sys.exit(1)
 
     user_pubkey_hex = cfg["user_pubkey"]
     user_x25519_pub = bytes.fromhex(cfg["user_x25519_pub"])
@@ -2813,7 +2898,13 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
     return inner.get("data") if "data" in inner else inner
 
 
-def _direct_backend_call(command: str, args: dict, cfg: dict) -> dict | list | None:
+def _direct_backend_call(
+    command: str,
+    args: dict,
+    cfg: dict,
+    *,
+    fail_hard: bool = False,
+) -> dict | list | None:
     """Use Cloud/self-hosted backend read APIs from a deputy config.
 
     Returns None when the config has no backend URL or the backend read path
@@ -2863,13 +2954,28 @@ def _direct_backend_call(command: str, args: dict, cfg: dict) -> dict | list | N
             data = json.loads(resp.read())
         if command == "status":
             return {
+                "running": True,
+                "paused": None,
                 "backend_mode": "backend",
                 "backend": backend_url,
                 "connected": True,
                 "activity": data,
             }
         return data
-    except Exception:
+    except urllib.error.HTTPError as e:
+        if fail_hard:
+            try:
+                body = json.loads(e.read())
+                detail = body.get("error") or body
+            except Exception:
+                detail = e.reason
+            click.echo(f"backend error: HTTP {e.code}: {detail}", err=True)
+            sys.exit(1)
+        return None
+    except Exception as e:
+        if fail_hard:
+            click.echo(f"backend unreachable: {e}", err=True)
+            sys.exit(1)
         return None
 
 
@@ -2950,6 +3056,8 @@ when needed:
 fisherman status --text
 fisherman query --since 30m --limit 20 --text
 fisherman transcripts --since 2h --limit 20 --text
+fisherman friend list --text
+fisherman friend status --text
 ```
 
 Routing controls:
@@ -2959,6 +3067,10 @@ fisherman query --source auto --since 30m --limit 20 --text
 fisherman query --source secondary --since 30m --limit 20 --text  # Cloud/Self-hosted
 fisherman query --source primary --since 30m --limit 20 --text    # laptop relay
 ```
+
+Cloud/Self-hosted direct routing currently supports status, query, and
+transcripts. Friend status, publish-status, pause, and resume use the laptop
+relay path, so the user's laptop daemon must be online for those commands.
 
 Allowed scopes: {scope_text}
 Relay URL: {relay_url}

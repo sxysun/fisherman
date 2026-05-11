@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from unittest import mock
 
 from fisherman import cli
 from fisherman import config as config_mod
+from fisherman import deputy
 
 
 TEST_SEED_HEX = "11" * 32
@@ -346,6 +348,72 @@ class ConfigIdentityTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, 2)
             self.assertIn("FISH_PRIVATE_KEY=not-hex\n", user_env.read_text(encoding="utf-8"))
+
+    def test_deputy_scope_map_matches_remote_commands(self) -> None:
+        self.assertEqual(deputy._command_to_scope("status"), "read:status")
+        self.assertEqual(deputy._command_to_scope("query"), "read:captures")
+        self.assertEqual(deputy._command_to_scope("transcripts"), "read:transcripts")
+        self.assertEqual(deputy._command_to_scope("friends"), "read:friends")
+        self.assertEqual(deputy._command_to_scope("friend-status"), "read:friends")
+        self.assertEqual(deputy._command_to_scope("publish-status"), "publish:status")
+        self.assertEqual(deputy._command_to_scope("pause"), "control:pause")
+        self.assertIsNone(deputy._command_to_scope("screenshot"))
+
+    def test_remote_secondary_uses_direct_backend_when_backend_url_present(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            cfg_path = Path(home_dir) / "deputy.json"
+            cfg_path.write_text(
+                json.dumps({
+                    "user_pubkey": "11" * 32,
+                    "user_x25519_pub": "22" * 32,
+                    "deputy_seed": "33" * 32,
+                    "relay_url": "https://relay.example",
+                    "backend_url": "https://backend.example",
+                }),
+                encoding="utf-8",
+            )
+            marker = {"backend": "direct"}
+
+            with mock.patch.object(cli, "_deputy_config_path", return_value=str(cfg_path)):
+                with mock.patch.object(cli, "_direct_backend_call", return_value=marker) as direct:
+                    with mock.patch("urllib.request.urlopen") as urlopen:
+                        self.assertEqual(
+                            cli._remote_call("status", {}, source_pref="secondary"),
+                            marker,
+                        )
+
+            direct.assert_called_once()
+            self.assertTrue(direct.call_args.kwargs["fail_hard"])
+            urlopen.assert_not_called()
+
+    def test_remote_secondary_with_backend_url_rejects_unsupported_command_locally(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            cfg_path = Path(home_dir) / "deputy.json"
+            cfg_path.write_text(
+                json.dumps({
+                    "user_pubkey": "11" * 32,
+                    "user_x25519_pub": "22" * 32,
+                    "deputy_seed": "33" * 32,
+                    "relay_url": "https://relay.example",
+                    "backend_url": "https://backend.example",
+                }),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(cli, "_deputy_config_path", return_value=str(cfg_path)):
+                with mock.patch("urllib.request.urlopen") as urlopen:
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit) as raised:
+                            cli._remote_call(
+                                "publish-status",
+                                {"digest": {"status": "test"}},
+                                source_pref="secondary",
+                            )
+
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn("backend route does not support `publish-status`", stderr.getvalue())
+            urlopen.assert_not_called()
 
 
 if __name__ == "__main__":
