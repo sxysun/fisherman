@@ -358,9 +358,10 @@ def sync_python_code(src: Path, install_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 def find_uv() -> str:
-    for p in (Path.home() / ".local/bin/uv",
-              Path("/usr/local/bin/uv"),
-              Path("/opt/homebrew/bin/uv")):
+    for p in (Path.home() / ".cargo/bin/uv",
+              Path.home() / ".local/bin/uv",
+              Path("/opt/homebrew/bin/uv"),
+              Path("/usr/local/bin/uv")):
         if p.exists():
             return str(p)
     found = shutil.which("uv")
@@ -374,6 +375,25 @@ def uv_sync(install_dir: Path, *, quiet: bool = True) -> None:
     args = [uv, "sync"]
     if quiet:
         args.append("--quiet")
+    if os.uname().machine == "arm64":
+        python_exe = install_dir / ".venv" / "bin" / "python"
+        if python_exe.exists():
+            try:
+                arch = subprocess.run(
+                    [
+                        str(python_exe),
+                        "-c",
+                        "import platform; print(platform.machine())",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).stdout.strip()
+                if arch == "x86_64":
+                    shutil.rmtree(install_dir / ".venv")
+            except OSError:
+                pass
+        args.extend(["--python", "3.12", "--python-preference", "managed"])
     subprocess.run(args, cwd=str(install_dir), check=True)
 
 
@@ -732,8 +752,8 @@ def diagnose() -> dict:
 def repair() -> dict:
     """Try to bring everything back to a healthy state.
 
-    Order matters: screenpipe binary must exist, then menubar must
-    launch, then the menubar (re)spawns screenpipe + daemon.
+    Order matters: the menubar must launch, then it starts the daemon and
+    only starts Screenpipe when the user explicitly selected that backend.
     Returns the post-repair diagnose() snapshot.
     """
     # 1. Refresh LaunchServices registration for the .app — this clears
@@ -747,10 +767,10 @@ def repair() -> dict:
             [lsregister, "-f", "/Applications/Fisherman.app"],
             capture_output=True,
         )
-    # 2. Flush zombies of menubar + screenpipe (menubar will respawn screenpipe).
+    # 2. Flush zombies of menubar + any Fisherman-owned Screenpipe process.
     _kill_and_wait("FishermanMenu", timeout=5.0)
     _kill_and_wait("screenpipe.*fisherman", timeout=3.0)
-    # 3. Bring the menubar back up (which spawns daemon + screenpipe).
+    # 3. Bring the menubar back up (which starts the daemon).
     launch_app(retries=3)
     _maybe_start_local_relay()
     # 4. Give it a moment for screenpipe + daemon to come up.

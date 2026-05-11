@@ -42,6 +42,7 @@ log = structlog.get_logger()
 _DEFAULT_BUFFER_SIZE = 200
 _DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 _MAX_CIPHERTEXT_BYTES = 64 * 1024  # 64 KiB ceiling per event
+_DEFAULT_RPC_WS_MAX_BYTES = 8 * 1024 * 1024
 _MAX_FUTURE_DRIFT = 60             # reject events claiming > now+60s
 _MAX_PAST_DRIFT = 7 * 24 * 3600    # reject events older than 7d at submit time
 _DEFAULT_EVENTS_PER_IP_HOUR = 600
@@ -61,6 +62,19 @@ def _client_ip(request: web.Request) -> str:
         return cloudflare_ip
     peer = request.remote or "unknown"
     return peer
+
+
+def _rpc_ws_max_bytes() -> int:
+    """Max daemon-relay WebSocket message size.
+
+    Friend-status events stay capped by _MAX_CIPHERTEXT_BYTES. Deputy RPC
+    responses can legitimately contain a bounded screenshot JPEG, so the
+    daemon mailbox needs a larger transport envelope.
+    """
+    return max(
+        2 * _MAX_CIPHERTEXT_BYTES,
+        _env_int("FISH_RELAY_RPC_MAX_BYTES", _DEFAULT_RPC_WS_MAX_BYTES),
+    )
 
 
 class SlidingWindowRateLimiter:
@@ -564,7 +578,7 @@ def _verify_hello(signing_pubkey_hex: str, ts: float, nonce_hex: str, sig_hex: s
 
 
 async def ws_handler(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=2 * _MAX_CIPHERTEXT_BYTES)
+    ws = web.WebSocketResponse(heartbeat=30, max_msg_size=_rpc_ws_max_bytes())
     await ws.prepare(request)
     router: Router = request.app["router"]
 

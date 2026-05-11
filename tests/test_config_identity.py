@@ -71,6 +71,11 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertEqual(cfg.backend_mode, "local")
             self.assertFalse(cfg.streaming_enabled)
             self.assertEqual(cfg.status_relay_url, config_mod.DEFAULT_STATUS_RELAY_URL)
+            self.assertEqual(cfg.capture_backend, "native")
+
+    def test_cli_formats_backend_iso_timestamps(self) -> None:
+        rendered = cli._fmt_ts("2026-05-11T17:48:35+00:00")
+        self.assertRegex(rendered, r"^2026-05-11 \d\d:\d\d:\d\d$")
 
     def test_backend_mode_local_overrides_server_url(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:

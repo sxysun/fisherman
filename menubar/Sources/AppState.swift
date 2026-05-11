@@ -76,9 +76,9 @@ struct UserActivity: Identifiable {
 final class AppState {
     var status: AppStatus = .starting
 
-    // Screenpipe
+    // Capture
     var screenpipeHealthy = false
-    var captureBackend: String = "screenpipe"
+    var captureBackend: String = "native"
 
     // Fisherman daemon
     var fishermanRunning = false

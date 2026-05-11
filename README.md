@@ -35,10 +35,11 @@ store by default.
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
 ```
 
-This installs Screenpipe, the Python daemon, and the macOS menu bar app.
-New installs start in **Local Only** mode with a persistent identity key.
-Grant Screen Recording permission when macOS asks, then use Settings to
-choose Fisherman Cloud or Self-hosted if you want an always-on backend.
+This installs the Python daemon, the native macOS capture path, and the
+macOS menu bar app. New installs start in **Local Only** mode with a
+persistent identity key. Grant Screen Recording permission when macOS
+asks, then use Settings to choose Fisherman Cloud or Self-hosted if you
+want an always-on backend.
 
 ## Backend Modes
 
@@ -263,7 +264,7 @@ All primary config lives in `~/.fisherman/.env`.
 | `FISH_BACKEND_URL` | empty | Cloud/self-hosted backend base URL |
 | `FISH_STATUS_RELAY_URL` | `https://relay.fisherman.teleport.computer` | E2EE status relay URL |
 | `FISH_PRIVATE_KEY` | auto-generated | Persistent Ed25519 seed |
-| `FISH_CAPTURE_BACKEND` | `screenpipe` | `screenpipe` or `native` |
+| `FISH_CAPTURE_BACKEND` | `native` | `native` or `screenpipe` |
 | `FISH_CONTROL_PORT` | `7892` | Local daemon control API |
 
 Useful commands:
@@ -322,4 +323,5 @@ cat docs/tee-deployment.md
 
 ## Requirements
 
-macOS 13+, Python 3.12+, Screenpipe.
+macOS 13+ and Python 3.12+. Screenpipe is optional legacy capture for
+users who explicitly set `FISH_CAPTURE_BACKEND=screenpipe`.

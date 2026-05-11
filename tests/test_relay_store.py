@@ -1,8 +1,11 @@
+import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
+from relay import server as relay_server
 from relay.server import SQLiteEventStore, SlidingWindowRateLimiter
 
 
@@ -132,6 +135,23 @@ class SlidingWindowRateLimiterTests(unittest.TestCase):
         self.assertTrue(limiter.allow("1.2.3.4", now=101))
         self.assertFalse(limiter.allow("1.2.3.4", now=102))
         self.assertTrue(limiter.allow("1.2.3.4", now=112))
+
+
+class RelayRpcEnvelopeTests(unittest.TestCase):
+    def test_rpc_ws_max_defaults_to_screenshot_sized_envelope(self) -> None:
+        self.assertGreater(
+            relay_server._rpc_ws_max_bytes(),
+            2 * relay_server._MAX_CIPHERTEXT_BYTES,
+        )
+
+    def test_rpc_ws_max_does_not_lower_below_event_envelope_floor(self) -> None:
+        floor = 2 * relay_server._MAX_CIPHERTEXT_BYTES
+        with mock.patch.dict(os.environ, {"FISH_RELAY_RPC_MAX_BYTES": str(floor - 1)}):
+            self.assertEqual(relay_server._rpc_ws_max_bytes(), floor)
+
+    def test_rpc_ws_max_can_be_overridden_upward(self) -> None:
+        with mock.patch.dict(os.environ, {"FISH_RELAY_RPC_MAX_BYTES": "1048576"}):
+            self.assertEqual(relay_server._rpc_ws_max_bytes(), 1048576)
 
 
 if __name__ == "__main__":

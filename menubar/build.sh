@@ -64,10 +64,29 @@ fi
 # .venv/bin/python — never via `uv run` at launch time. Launching via uv
 # re-resolves/installs on every start, and we've hit cases where that
 # race wedges pyobjc imports and hangs the daemon forever.
-if command -v uv &>/dev/null; then
+UV_BIN=""
+for candidate in "$HOME/.cargo/bin/uv" "$HOME/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
+    if [ -x "$candidate" ]; then
+        UV_BIN="$candidate"
+        break
+    fi
+done
+
+if [ -n "$UV_BIN" ]; then
     for DIR in "$(cd .. && pwd)" "$FISH_DIR"; do
         if [ -f "$DIR/pyproject.toml" ]; then
-            (cd "$DIR" && uv sync --quiet 2>&1 | tail -5) && echo "Synced venv in $DIR"
+            SYNC_ARGS=(sync --quiet)
+            if [ "$(uname -m)" = "arm64" ]; then
+                SYNC_ARGS+=(--python 3.12 --python-preference managed)
+                if [ -x "$DIR/.venv/bin/python" ]; then
+                    PY_ARCH=$("$DIR/.venv/bin/python" -c 'import platform; print(platform.machine())' 2>/dev/null || true)
+                    if [ "$PY_ARCH" = "x86_64" ]; then
+                        echo "Recreating x86_64 venv as arm64 in $DIR"
+                        rm -rf "$DIR/.venv"
+                    fi
+                fi
+            fi
+            (cd "$DIR" && "$UV_BIN" "${SYNC_ARGS[@]}" 2>&1 | tail -5) && echo "Synced venv in $DIR"
         fi
     done
 fi

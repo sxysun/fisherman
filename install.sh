@@ -20,7 +20,7 @@ fi
 
 # 3. Check/install uv
 UV=""
-for candidate in "$HOME/.local/bin/uv" "$HOME/.cargo/bin/uv" /usr/local/bin/uv /opt/homebrew/bin/uv; do
+for candidate in "$HOME/.cargo/bin/uv" "$HOME/.local/bin/uv" /opt/homebrew/bin/uv /usr/local/bin/uv; do
     if [ -x "$candidate" ]; then
         UV="$candidate"
         break
@@ -38,53 +38,18 @@ if [ -z "$UV" ]; then
 fi
 echo "Using uv: $UV"
 
-# 4. Check/install screenpipe.
-# IMPORTANT: brew's `screenpipe` formula was deprecated and is being
-# disabled on 2026-08-25 (the brew formula no longer builds — they
-# pulled the bottle 0.2.13 as the last). After that date, this `brew
-# install` step will fail; upstream now ships only the .app and MCP
-# server, not a standalone CLI. We try in priority order:
-#   1. Already-installed on PATH (most users have it)
-#   2. brew install (works until 2026-08-25)
-#   3. Bail with explicit upstream-doc link
-if ! command -v screenpipe &>/dev/null; then
-    echo "Installing screenpipe..."
-    INSTALLED=0
-    if command -v brew &>/dev/null; then
-        # Brew may already print the deprecation warning; let it through.
-        if brew install screenpipe 2>&1; then
-            INSTALLED=1
-        else
-            echo
-            echo "Warning: brew install screenpipe failed."
-        fi
-    fi
-    if [ "$INSTALLED" -ne 1 ]; then
-        echo
-        echo "ERROR: could not install screenpipe automatically."
-        echo
-        echo "  brew's screenpipe formula was deprecated (and may now be removed)."
-        echo "  Install screenpipe manually from upstream, then re-run this script:"
-        echo
-        echo "      https://docs.screenpi.pe/getting-started"
-        echo "      https://github.com/mediar-ai/screenpipe"
-        echo
-        echo "  Make sure 'screenpipe --version' works in your shell, then re-run."
+# 4. Screenpipe is optional legacy capture. New installs use native macOS
+# capture by default because Screenpipe can burn CPU and its brew formula is
+# deprecated. Power users can opt in explicitly with FISH_CAPTURE_BACKEND=screenpipe.
+if [ "${FISH_CAPTURE_BACKEND:-native}" = "screenpipe" ]; then
+    if ! command -v screenpipe &>/dev/null; then
+        echo "ERROR: FISH_CAPTURE_BACKEND=screenpipe but screenpipe is not installed."
+        echo "Install it from upstream or unset FISH_CAPTURE_BACKEND for native capture:"
+        echo "  https://docs.screenpi.pe/getting-started"
         exit 1
     fi
-fi
-SCREENPIPE_VERSION=$(screenpipe --version 2>&1 | head -1 | tr -d '\n' || echo "?")
-echo "Using screenpipe: $(command -v screenpipe)  (${SCREENPIPE_VERSION})"
-
-# Heads-up if the user is running the deprecated brew bottle.
-if command -v brew &>/dev/null && brew list --formula 2>/dev/null | grep -qx screenpipe; then
-    if brew info --json screenpipe 2>/dev/null | grep -q '"deprecated":true'; then
-        echo
-        echo "  ⚠  screenpipe is installed via brew but the formula is deprecated."
-        echo "  ⚠  brew will disable it on 2026-08-25; plan a manual install before then."
-        echo "  ⚠  Track upstream: https://github.com/mediar-ai/screenpipe/issues"
-        echo
-    fi
+    SCREENPIPE_VERSION=$(screenpipe --version 2>&1 | head -1 | tr -d '\n' || echo "?")
+    echo "Using screenpipe: $(command -v screenpipe)  (${SCREENPIPE_VERSION})"
 fi
 
 # 5. Clone repo if missing. For upgrades, hand off to `fisherman upgrade`
@@ -127,7 +92,18 @@ fi
 
 # 6. Set up Python environment
 echo "Setting up Python environment..."
-"$UV" sync
+UV_SYNC_ARGS=(sync)
+if [ "$(uname -m)" = "arm64" ]; then
+    UV_SYNC_ARGS+=(--python 3.12 --python-preference managed)
+    if [ -x "$FISH_DIR/.venv/bin/python" ]; then
+        PY_ARCH=$("$FISH_DIR/.venv/bin/python" -c 'import platform; print(platform.machine())' 2>/dev/null || true)
+        if [ "$PY_ARCH" = "x86_64" ]; then
+            echo "Recreating x86_64 Python environment as arm64..."
+            rm -rf "$FISH_DIR/.venv"
+        fi
+    fi
+fi
+"$UV" "${UV_SYNC_ARGS[@]}"
 
 # 7. Auto-generate .env if missing. New installs start Local Only: capture
 # stays on this Mac, friend status uses the hosted E2EE relay, and users can
@@ -148,8 +124,11 @@ FISH_BACKEND_URL=
 FISH_SERVER_URL=ws://localhost:9999/ingest
 FISH_STATUS_RELAY_URL=https://relay.fisherman.teleport.computer
 
-# === Capture (screenpipe backend) ===
-FISH_CAPTURE_BACKEND=screenpipe
+# === Capture (native macOS backend) ===
+FISH_CAPTURE_BACKEND=native
+FISH_CAPTURE_INTERVAL=5.0
+FISH_BATTERY_CAPTURE_INTERVAL=15.0
+FISH_MAX_DIMENSION=960
 FISH_SCREENPIPE_URL=http://127.0.0.1:3030
 FISH_SCREENPIPE_POLL_INTERVAL=5.0
 FISH_SCREENPIPE_SEARCH_LIMIT=10
@@ -206,7 +185,7 @@ echo
 echo "To start Fisherman:"
 echo "  open /Applications/Fisherman.app"
 echo
-echo "The app manages screenpipe and the fisherman daemon automatically."
+echo "The app manages the fisherman daemon automatically."
 echo "Configure at: ~/.fisherman/.env"
 echo
 echo "To upgrade later:"

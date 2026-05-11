@@ -39,7 +39,7 @@ fisherman backend status
 ```
 
 Use `doctor` before debugging missing context. It checks the menubar, daemon,
-screenpipe, relay, backend, app bundle, and local screenpipe DB.
+capture backend, relay, backend, app bundle, and local capture storage.
 
 ## Query Captures
 
@@ -207,8 +207,9 @@ client UX and should not be handed to regular users.
 - Run `fisherman doctor` first.
 - If the daemon is down, open `/Applications/Fisherman.app` or run
   `fisherman repair`.
-- If Screenpipe is unhealthy, confirm `screenpipe --version` works and that
-  Screen Recording permission is granted.
+- If capture is native and permission is blocked, grant Screen Recording to
+  Fisherman in macOS Settings. If the user explicitly selected Screenpipe,
+  confirm `screenpipe --version` works.
 - If Cloud/Self-hosted reads fail, check `fisherman backend status` and whether
   Cloud ingest is approved/enabled.
 - If a deputy command fails on `primary`, the user's laptop relay path may be

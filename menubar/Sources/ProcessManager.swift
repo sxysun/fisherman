@@ -19,8 +19,8 @@ final class ProcessManager: @unchecked Sendable {
     private let watchdogTimeoutSec: TimeInterval = 2.0
     private let watchdogFailureThreshold: Int = 4
     // Grace period after launch before the watchdog starts. The daemon
-    // imports pyobjc + starts screenpipe polling, so it can legitimately
-    // take ~15s to answer /status the first time.
+    // imports pyobjc and may initialize native capture, so it can
+    // legitimately take a few seconds to answer /status the first time.
     private let watchdogStartupGraceSec: TimeInterval = 25.0
 
     init(controlPort: String) {
@@ -36,10 +36,12 @@ final class ProcessManager: @unchecked Sendable {
         } else {
             NSLog("[Fisherman] capture backend is \(configuredCaptureBackend()); skipping screenpipe launch")
         }
-        startCleanupTimer()
+        if configuredCaptureBackend() == "screenpipe" {
+            startCleanupTimer()
+        }
         startWatchdog()
-        // Delay fisherman launch to let screenpipe bind its port
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) { [weak self] in
+        let launchDelay: TimeInterval = configuredCaptureBackend() == "screenpipe" ? 2.0 : 0.2
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + launchDelay) { [weak self] in
             self?.startFisherman()
         }
     }
@@ -177,7 +179,7 @@ final class ProcessManager: @unchecked Sendable {
         if let raw, raw == "native" || raw == "swift" || raw == "screenpipe" {
             return raw
         }
-        return "screenpipe"
+        return "native"
     }
 
     // MARK: - Restart fisherman
@@ -225,7 +227,7 @@ final class ProcessManager: @unchecked Sendable {
 
     private func watchdogTick() {
         guard !stopped, let startedAt = fishermanStartedAt else { return }
-        // Startup grace: pyobjc + screenpipe handshake can take ~15s.
+        // Startup grace: pyobjc import/capture setup can take a few seconds.
         if Date().timeIntervalSince(startedAt) < watchdogStartupGraceSec { return }
 
         let port = Int(controlPort) ?? 7892

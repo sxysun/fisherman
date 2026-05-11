@@ -245,9 +245,9 @@ class FishermanConfig(BaseSettings):
     auth_token: str = ""  # bearer setup token material
 
     # Capture
-    capture_backend: str = "screenpipe"
-    capture_interval: float = 3.0
-    battery_capture_interval: float = 10.0  # slower on battery
+    capture_backend: str = "native"
+    capture_interval: float = 5.0
+    battery_capture_interval: float = 15.0  # slower on battery
     diff_threshold: int = 3
     jpeg_quality: int = 60
     max_dimension: int = 1920

@@ -145,8 +145,26 @@ def _fishkey_header(seed_hex: str) -> tuple[str, str]:
     return f"FishKey {pub.hex()}:{ts}:{sig.hex()}", pub.hex()
 
 
-def _fmt_ts(ts: float) -> str:
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+def _fmt_ts(ts: object) -> str:
+    """Format timestamps from local SQLite or backend JSON rows."""
+    if ts in (None, ""):
+        return "?"
+    if isinstance(ts, str):
+        raw = ts.strip()
+        try:
+            ts = float(raw)
+        except ValueError:
+            try:
+                dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return raw
+            if dt.tzinfo is not None:
+                dt = dt.astimezone()
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        return datetime.datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError, OSError):
+        return str(ts)
 
 
 @main.command()

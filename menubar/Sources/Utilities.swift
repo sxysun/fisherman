@@ -5,10 +5,10 @@ import Foundation
 func findUV() -> String? {
     let home = NSHomeDirectory()
     for candidate in [
-        "\(home)/.local/bin/uv",
         "\(home)/.cargo/bin/uv",
-        "/usr/local/bin/uv",
+        "\(home)/.local/bin/uv",
         "/opt/homebrew/bin/uv",
+        "/usr/local/bin/uv",
     ] {
         if FileManager.default.isExecutableFile(atPath: candidate) {
             return candidate
