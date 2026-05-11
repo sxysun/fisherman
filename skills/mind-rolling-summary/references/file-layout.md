@@ -1,55 +1,58 @@
-# Recommended file layout for `/home/ubuntu/mind`
+# Recommended file layout for `<mind-root>`
 
-This is the practical layout for the current live system, plus the intended direction for a more Obsidian-native compiled wiki.
+This is the practical layout for a Fisherman-derived mind wiki. `<mind-root>`
+is usually `~/mind`, unless the user names a different path or an existing
+hosted setup already uses `/home/ubuntu/mind`.
 
 ## Mental model
-Treat `/home/ubuntu/mind` as three layers:
+Treat `<mind-root>` as three layers:
 1. raw sources
 2. compiled wiki
 3. system / maintenance docs
 
-The compiled wiki should be the first place Hermes searches. Raw sources should be consulted only after the compiled layer is insufficient.
+The compiled wiki should be the first place an agent searches. Raw sources
+should be consulted only after the compiled layer is insufficient.
 
-## Current live core files
-- `/home/ubuntu/mind/rolling-summary.md`
-- `/home/ubuntu/mind/INDEX.md`
-- `/home/ubuntu/mind/wiki-upgrade-plan.md`
+## Core files
+- `<mind-root>/rolling-summary.md`
+- `<mind-root>/INDEX.md`
+- `<mind-root>/wiki-upgrade-plan.md` when a migration is in progress
 
-## Current live rolling-memory layer
-- `/home/ubuntu/mind/fisherman-digests/YYYY-MM-DD_HHMM.md`
-- `/home/ubuntu/mind/context-hours/YYYY-MM-DD/HH.md`
-- `/home/ubuntu/mind/context-entities/*.md`
+## Rolling-memory layer
+- `<mind-root>/fisherman-digests/YYYY-MM-DD_HHMM.md`
+- `<mind-root>/context-hours/YYYY-MM-DD/HH.md`
+- `<mind-root>/context-entities/*.md`
 
-## Current live source layer
-- `/home/ubuntu/mind/writings/`
-- `/home/ubuntu/mind/what-problem-next-5-years.txt`
+## Source layer
+- `<mind-root>/writings/`
+- `<mind-root>/sources/`
 - other imported docs/assets as needed
 
 ## Intended next-version structure
 
 ### Raw sources (immutable)
-- `/home/ubuntu/mind/sources/writings/`
-- `/home/ubuntu/mind/sources/docs/`
-- `/home/ubuntu/mind/sources/assets/`
-- `/home/ubuntu/mind/sources/fisherman-exports/` (optional)
+- `<mind-root>/sources/writings/`
+- `<mind-root>/sources/docs/`
+- `<mind-root>/sources/assets/`
+- `<mind-root>/sources/fisherman-exports/` (optional)
 
 ### Compiled wiki (LLM-maintained)
-- `/home/ubuntu/mind/wiki/mocs/`
-- `/home/ubuntu/mind/wiki/entities/people/`
-- `/home/ubuntu/mind/wiki/entities/projects/`
-- `/home/ubuntu/mind/wiki/entities/companies/`
-- `/home/ubuntu/mind/wiki/entities/motifs/`
-- `/home/ubuntu/mind/wiki/areas/`
-- `/home/ubuntu/mind/wiki/timelines/hours/YYYY-MM-DD/HH.md`
-- `/home/ubuntu/mind/wiki/timelines/digests/YYYY-MM-DD_HHMM.md`
-- `/home/ubuntu/mind/wiki/syntheses/`
+- `<mind-root>/wiki/mocs/`
+- `<mind-root>/wiki/entities/people/`
+- `<mind-root>/wiki/entities/projects/`
+- `<mind-root>/wiki/entities/companies/`
+- `<mind-root>/wiki/entities/motifs/`
+- `<mind-root>/wiki/areas/`
+- `<mind-root>/wiki/timelines/hours/YYYY-MM-DD/HH.md`
+- `<mind-root>/wiki/timelines/digests/YYYY-MM-DD_HHMM.md`
+- `<mind-root>/wiki/syntheses/`
 
 ### System layer
-- `/home/ubuntu/mind/system/INDEX.md`
-- `/home/ubuntu/mind/system/file-structure.md`
-- `/home/ubuntu/mind/system/page-types.md`
-- `/home/ubuntu/mind/system/retrieval-order.md`
-- `/home/ubuntu/mind/system/search-playbook.md`
+- `<mind-root>/system/INDEX.md`
+- `<mind-root>/system/file-structure.md`
+- `<mind-root>/system/page-types.md`
+- `<mind-root>/system/retrieval-order.md`
+- `<mind-root>/system/search-playbook.md`
 
 ## Recommended page types
 - MOC page
@@ -91,7 +94,7 @@ When trying to recover context later:
 6. search `context-hours/` for names, products, chats, or phrases
 7. only then go back to raw sources
 
-## Search discipline for Hermes
+## Search discipline for agents
 When updating or searching the wiki:
 - prefer the compiled layer before raw files
 - preserve searchable names/terms exactly

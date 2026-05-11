@@ -27,8 +27,8 @@ moc: []
 - ...
 
 ## Source files
-- `/home/ubuntu/mind/fisherman-digests/...`
-- `/home/ubuntu/mind/context-hours/...`
+- `<mind-root>/fisherman-digests/...`
+- `<mind-root>/context-hours/...`
 
 ## Related pages
 - [[MOC - Collaborators]]

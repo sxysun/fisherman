@@ -11,8 +11,9 @@ There are two different agent handoff modes:
 
 This folder also holds deeper, longer-form reference material:
 
-- `fisherman-cli/SKILL.md` — full local-query playbook with every OCR/screenshot
-  mismatch trap encountered in production and the recovery patterns for each
+- `fisherman-cli/SKILL.md` — current packaged-CLI playbook for context reads,
+  backend/source routing, context migration, processors, and self-hosted
+  debugging
 - `mind-rolling-summary/SKILL.md` — full memory-wiki maintenance procedure
 - `mind-rolling-summary/templates/` — page templates for digests, hour notes, entity pages, and area pages
 - `mind-rolling-summary/references/` — file-layout reference and the Obsidian-native LLM wiki design notes

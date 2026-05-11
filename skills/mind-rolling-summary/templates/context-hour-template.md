@@ -35,7 +35,7 @@ moc: ["MOC - Fisherman Timeline"]
 - ...
 
 ## Source digests
-- `/home/ubuntu/mind/fisherman-digests/YYYY-MM-DD_HHMM.md`
+- `<mind-root>/fisherman-digests/YYYY-MM-DD_HHMM.md`
 
 ## Related pages
 - [[MOC - Fisherman Timeline]]

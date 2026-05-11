@@ -1,9 +1,9 @@
-# Obsidian-native LLM wiki pattern for `/home/ubuntu/mind`
+# Obsidian-native LLM wiki pattern for `<mind-root>`
 
 This reference captures the intended pattern for the next version of the mind system.
 
 ## Core idea
-Do not treat `/home/ubuntu/mind` as a passive RAG dump or a folder of raw notes that must be rediscovered from scratch each time.
+Do not treat `<mind-root>` as a passive RAG dump or a folder of raw notes that must be rediscovered from scratch each time.
 Treat it as a persistent compiled wiki that sits between raw sources and future reasoning.
 
 The LLM should:
@@ -109,7 +109,7 @@ Whenever updating a page, ask:
 - which MOC should include this page?
 - which entities should become wikilinks?
 
-## Retrieval order for Hermes
+## Retrieval order for agents
 Default retrieval order should be:
 1. MOC pages
 2. synthesis pages
@@ -119,7 +119,7 @@ Default retrieval order should be:
 
 This makes the wiki the first-class memory layer.
 
-## Search order for Hermes
+## Search order for agents
 When trying to find something later:
 1. search MOCs and synthesis pages
 2. search entity pages
@@ -136,7 +136,7 @@ When trying to find something later:
 - easy browsing in Obsidian graph/search/backlinks/Dataview
 
 ## Important rule for future rolling-summary maintenance
-When updating `/home/ubuntu/mind`, write as if you are maintaining a real wiki, not just appending logs.
+When updating `<mind-root>`, write as if you are maintaining a real wiki, not just appending logs.
 That means:
 - update summaries instead of duplicating them
 - connect related pages

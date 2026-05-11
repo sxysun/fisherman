@@ -146,39 +146,41 @@ the user explicitly asks for a custom private deployment.
 
 Use this when the user asks something like *"what was I doing in the last hour?"*, *"find the chat where we discussed X"*, or *"show me the screenshot from when I was looking at Y"*.
 
-Run from `server/`. The reliable invocation is `uv run python cli.py ...` (the `uv run fisherman` console script may not be installed in unpackaged checkouts).
+Use the packaged `fisherman` command first. It queries the active context
+home: Local Only, Fisherman Cloud, Self-hosted, or a registered deputy config.
+The older `server/cli.py` path is only for low-level self-hosted server
+debugging.
 
 ```bash
-cd server
-
 # Recent activity as JSON (best for agent reasoning)
-uv run python cli.py query -j --limit 20
+fisherman query --since 30m --limit 20
 
 # Search across OCR text, window titles, scene text
-uv run python cli.py query -j --search "keyword" --limit 20
+fisherman query --since 4h --search "keyword" --limit 20
 
 # Filter by app and time
-uv run python cli.py query -j --app "Chrome" --since "2h ago"
-uv run python cli.py query -j --app "Telegram" --since "2026-04-01T09:00:00"
+fisherman query --app "Chrome" --since "2h" --limit 30
+fisherman query --app "Telegram" --since "2026-04-01T09:00:00"
 
-# Activity summary grouped by app
-uv run python cli.py summary --since "2h ago"
+# Human-readable output
+fisherman query --since 30m --limit 20 --text
 
-# Full detail for a specific frame (optionally export the screenshot)
-uv run python cli.py show 123 -o /tmp/frame_123.jpg
+# Meeting/audio transcripts
+fisherman transcripts --since 2h --limit 50 --text
 
-# Decrypt a screenshot directly from its image_key
-uv run python cli.py image "frames/2026-04-01/12345.jpg.enc" -o /tmp/frame.jpg
+# Route explicitly while debugging
+fisherman query --source primary --since 30m --limit 20 --text
+fisherman query --source secondary --since 30m --limit 20 --text
 ```
 
 Output is decrypted at the CLI boundary, so OCR text, window titles, and image bytes are in plaintext only on the operator's machine.
 
 ### Recommended pull pattern
 
-1. Start broad: `summary --since "2h ago"`
-2. Then `query -j --limit 20` for the structured frame detail
+1. Start broad: `fisherman query --since 2h --limit 50`
+2. Use `--text` for quick human review or JSON output for agent reasoning
 3. Narrow by app or keyword if the broad pull is noisy
-4. For high-signal frames, export the screenshot with `show <id> -o /tmp/frame.jpg` and inspect it visually
+4. Use `fisherman context export --include-images` only when the user explicitly needs screenshot archives
 
 ### Operational nuance — read this before trusting any single frame
 
@@ -215,7 +217,7 @@ The system maintains an Obsidian-native compiled wiki under `~/mind` (or `/home/
 
 ### Operating procedure (per pass)
 
-1. Load Phase 2 commands to gather evidence.
+1. Load Phase 3 commands to gather evidence.
 2. Identify the pass type: *fresh active window* / *continuity-clarification* / *correction*.
 3. Separate **direct evidence** from **inference** from **uncertainty**.
 4. Write a new digest in `fisherman-digests/`.
