@@ -4,6 +4,37 @@ Fisherman never copies history automatically when you switch context
 homes. New context goes to the selected home; old context stays where it
 was until you export, import, or delete it.
 
+That behavior is deliberate. Local Only, Fisherman Cloud, and
+Self-hosted are different trust domains, so migration is an explicit
+user action rather than silent background sync.
+
+## Switching Homes
+
+The safe switch pattern is:
+
+```bash
+# 1. Export from the source while it is still active.
+fisherman context export --home active --output fisherman-context.json --since 30d
+
+# 2. Point Fisherman at the destination.
+fisherman backend configure self-hosted --url wss://your-host/ingest
+# or:
+fisherman backend configure cloud
+# or:
+fisherman backend configure local
+
+# 3. Import into the destination.
+fisherman context import fisherman-context.json --home active
+
+# 4. Optional cleanup after a dry run.
+fisherman context delete --home active --since 30d --dry-run
+fisherman context delete --home active --since 30d --confirm DELETE
+```
+
+This is copy-then-optionally-delete, not live bidirectional sync. That
+keeps the failure mode simple: if an import fails, the original home
+still has the data.
+
 ## Export
 
 ```bash

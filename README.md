@@ -97,15 +97,33 @@ Use this when you want to operate your own backend:
 fisherman backend configure self-hosted --url wss://your-host:9999/ingest
 ```
 
-The self-hosted backend implementation lives in `server/`. The relay can
-be hosted separately or you can keep using the official E2EE relay. The
-`mirror/` package is an internal Cloud gateway/deployment package, not a
-separate setup mode users need to understand.
+The self-hosted backend implementation lives in `server/`. For a remote
+server, allowlist your Mac's signing public key instead of copying
+private keys between machines:
+
+```bash
+# on the Mac
+fisherman friend code --text   # copy the "signing:" public key
+
+# on the server
+cd server
+bash bootstrap-agent.sh --start \
+  --public-url wss://your-host/ingest \
+  --client-pubkey <mac-signing-public-key>
+```
+
+The relay can be hosted separately, but most self-hosted users should
+keep using the official E2EE relay so friend status still interoperates
+with Cloud and Local Only users. The `mirror/` package is an internal
+Cloud gateway/deployment package, not a separate setup mode users need
+to understand.
 
 ## Context Portability
 
 Changing context homes affects new uploads only; history is never copied
-behind your back. Use Settings -> Data or the CLI to move data:
+behind your back. That is intentional: copying private context between
+trust domains should be explicit. Use Settings -> Data or the CLI to
+move data:
 
 ```bash
 # Download recent history from the active context home
@@ -123,6 +141,13 @@ fisherman context delete --home active --since 30d --confirm DELETE
 
 Archives are plain JSON. Screenshots are excluded by default because they
 are large and highly private.
+
+Recommended switch flow:
+
+1. Export from the current home.
+2. Switch to the destination home.
+3. Import the archive into the destination.
+4. Only delete from the source after a dry run and spot check.
 
 ## Friends
 

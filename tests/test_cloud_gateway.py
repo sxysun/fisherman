@@ -106,6 +106,8 @@ class CloudIngestReadinessTests(unittest.TestCase):
             "FISH_CLOUD_DEFAULT_MAX_FRAMES_PER_HOUR",
             "FISH_CLOUD_ENROLLMENT_MODE",
             "FISH_CLOUD_KEY_MODE",
+            "FISH_ENROLLMENT_MODE",
+            "FISH_KEY_MODE",
             "FISH_CLOUD_LEGACY_DECRYPT_ENABLED",
             "OPENAI_API_KEY",
             "OPENROUTER_API_KEY",
@@ -160,6 +162,24 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertEqual(payload["encryption_key_source"], "client_provided")
         self.assertEqual(payload["tenant_key_mode"], "client_provided")
         self.assertFalse(Path(os.environ["FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE"]).exists())
+
+    def test_self_hosted_aliases_are_reflected_in_readiness_payload(self):
+        os.environ.update(
+            {
+                "DATABASE_URL": "postgresql://example",
+                "FISH_MULTI_TENANT": "1",
+                "FISH_ENROLLMENT_MODE": "allowlist",
+                "FISH_KEY_MODE": "client_provided",
+            }
+        )
+        cloud_ingest = _load_cloud_ingest_module()
+
+        payload = cloud_ingest.readiness_payload()
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["ingest_ready"])
+        self.assertEqual(payload["enrollment_mode"], "allowlist")
+        self.assertEqual(payload["tenant_key_mode"], "client_provided")
 
     def test_cloud_ingest_ready_with_local_storage(self):
         os.environ.update(

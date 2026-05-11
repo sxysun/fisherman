@@ -26,7 +26,7 @@ Fisherman has three user-facing backend modes:
 
 - `local`: raw context stays on the laptop; friend status can still use the encrypted relay.
 - `cloud`: managed Fisherman Cloud backend; do not pair unless attestation passes.
-- `self_hosted`: user-operated backend using the `server/`, `relay/`, and `mirror/` pieces.
+- `self_hosted`: user-operated backend using `server/`. Keep using the official E2EE relay unless the user explicitly asks to self-host relay too. `mirror/` is Cloud deployment internals, not a user setup step.
 
 Commands:
 
@@ -49,7 +49,7 @@ Privacy rules:
 
 ## Phase 2 — Self-hosted server setup
 
-**Goal:** stand up the ingest server, generate auth + encryption material, and report back a one-line setup code the user pastes into the macOS client.
+**Goal:** stand up the ingest server, generate encryption material, allowlist the user's Mac signing public key, and report back the backend URL plus the exact `fisherman backend configure self-hosted ...` command.
 
 ### Step 1. Get the repo
 
@@ -64,18 +64,28 @@ If you are already inside the repo, skip this.
 
 ### Step 2. Bootstrap
 
-From the repo root:
+First ask the user for their Mac signing public key. They can get it on
+the Mac with:
+
+```bash
+fisherman friend code --text
+```
+
+Use the `signing:` value. Do **not** ask for the Mac private key.
+
+From the repo root on the server:
 
 ```bash
 cd server
-bash bootstrap-agent.sh --start
+bash bootstrap-agent.sh --start --public-url wss://your-host/ingest --client-pubkey <mac-signing-public-key>
 ```
 
 This is the self-hosted backend entry point. It will:
 
-- run `setup.sh` (creates `.env`, installs Python deps via `uv`, sets up local Postgres, generates an encryption key, generates `INGEST_AUTH_TOKEN` if missing)
+- run `setup.sh` (creates `.env`, installs Python deps via `uv`, sets up local Postgres, generates an encryption key, and generates a server FishKey identity if missing)
 - start `ingest.py` in the background via `nohup`, logging to `server/ingest.log`
-- print `SERVER_WS_URL`, `CLIENT_AUTH_TOKEN`, and a base64 `SETUP_CODE`
+- set `FISH_MULTI_TENANT=1`, `FISH_ENROLLMENT_MODE=allowlist`, and `FISH_ALLOWED_PUBKEYS=<mac-signing-public-key>`
+- print `SERVER_WS_URL` and the exact client configure command
 
 If `bootstrap-agent.sh` is unavailable, do the equivalent by hand:
 
@@ -85,7 +95,7 @@ bash setup.sh
 nohup uv run python ingest.py > ingest.log 2>&1 &
 ```
 
-Then read `INGEST_HOST`, `INGEST_PORT`, and `INGEST_AUTH_TOKEN` from `server/.env`.
+Then read `INGEST_HOST` and `INGEST_PORT` from `server/.env`.
 
 ### Step 3. Resolve the public host
 
@@ -93,19 +103,16 @@ Then read `INGEST_HOST`, `INGEST_PORT`, and `INGEST_AUTH_TOKEN` from `server/.en
 
 - If the server is reachable at a public hostname, replace `localhost` with that hostname.
 - If TLS is terminated by a reverse proxy, use `wss://your-host/ingest`.
-- Recompute the setup code with the corrected URL:
+- Re-run bootstrap with the corrected public URL:
 
 ```bash
-SETUP_JSON='{"url":"wss://your-host/ingest","token":"<the token from .env>"}'
-echo -n "$SETUP_JSON" | base64 | tr -d '\n' | sed 's/^/fishsetup:/'
+bash bootstrap-agent.sh --public-url wss://your-host/ingest --client-pubkey <mac-signing-public-key>
 ```
-
-> **Note:** `fishsetup:` is for server connection codes. `fish:` is for friend codes (sharing identity with other users). Don't mix them up.
 
 ### Step 4. Verify the server is up
 
 ```bash
-curl -fsS http://127.0.0.1:9999/healthz || tail -n 50 server/ingest.log
+curl -fsS http://127.0.0.1:9998/health || tail -n 50 server/ingest.log
 ```
 
 If it isn't responding, look at `server/ingest.log` for the actual error and fix the root cause (port collision, missing dep, Postgres unreachable, etc.). Don't paper over it.
@@ -115,25 +122,18 @@ If it isn't responding, look at `server/ingest.log` for the actual error and fix
 Tell the user, in this exact shape:
 
 - **Server WebSocket URL:** `ws://...` or `wss://...`
-- **Auth token:** the value of `INGEST_AUTH_TOKEN`
-- **Setup code:** `fishsetup:...` (or just the raw URL + token for manual entry)
+- **Client allowlist:** the Mac signing public key you configured
+- **Client command:** `fisherman backend configure self-hosted --url <url>`
 - **Server storage:** local disk under `server/frames/` *or* R2 (whichever is configured)
 - **Process status:** running as PID `<pid>`, logs at `server/ingest.log`
 
-If a token already existed in `.env`, say so and confirm you reused it rather than overwriting it.
-
 ### Auth model (for your understanding)
 
-**Ed25519 key auth (primary):** The server and client share an ed25519 key pair via `FISH_PRIVATE_KEY`. The client signs each request with a timestamp; the server verifies the signature. This is used for WebSocket ingest, the activity API, and the friends API.
+**Ed25519 key auth (primary):** The Mac owns a persistent ed25519 key pair. The client signs each request with a timestamp; the server verifies the signature. In recommended remote self-hosted mode, the server allowlists the Mac public key and the Mac never shares its private key.
 
-**Bearer token auth:** Setup scripts still mint `INGEST_AUTH_TOKEN`. Current client/server auth should use FishKey. Verify the code path before relying on bearer auth.
-
-**Server-direct friends:** The server maintains a `friends.json`
-allow-list of friend public keys. Friends can query your activity via
-`GET /api/current_activity`. The current menubar uses relay/E2EE friend
-codes by default.
-
-**Friend codes:** Friend status should use the relay/E2EE model from `fisherman friend code`.
+**Friend codes:** Friend status should use the relay/E2EE model from
+`fisherman friend code`. Do not set up server-direct friend access unless
+the user explicitly asks for a custom private deployment.
 
 ---
 
@@ -261,6 +261,6 @@ This top-level skill is the orientation; those files are the deep reference.
 
 ## What this skill is not
 
-- It is **not** a place to store the user's auth token. Tokens live in `server/.env` only.
+- It is **not** a place to store shared auth secrets. The client uses its own FishKey private key and the server allowlists the public key.
 - It is **not** a substitute for the deep references — when in doubt about query nuance or wiki structure, open the linked files in `skills/`.
-- It does **not** automate the macOS client install — the user runs `install.sh` themselves on their Mac. Your job ends at handing them the setup code.
+- It does **not** automate the macOS client install — the user runs `install.sh` themselves on their Mac. Your job ends at handing them the backend URL and `fisherman backend configure self-hosted --url ...` command.

@@ -67,7 +67,11 @@ def _managed_status_llm_model() -> str:
 
 
 def _client_key_mode() -> bool:
-    return os.environ.get("FISH_CLOUD_KEY_MODE", "").strip().lower() in {
+    return (
+        os.environ.get("FISH_KEY_MODE")
+        or os.environ.get("FISH_CLOUD_KEY_MODE")
+        or ""
+    ).strip().lower() in {
         "client",
         "client-held",
         "client_held",
@@ -127,7 +131,11 @@ def _storage_backend() -> str:
 
 
 def _enrollment_mode() -> str:
-    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "closed").strip().lower()
+    mode = (
+        os.environ.get("FISH_ENROLLMENT_MODE")
+        or os.environ.get("FISH_CLOUD_ENROLLMENT_MODE")
+        or "closed"
+    ).strip().lower()
     return mode if mode in {"open", "allowlist", "closed"} else "closed"
 
 

@@ -151,7 +151,11 @@ def _env_int(name: str, default: int | None = None) -> int | None:
 
 
 def _cloud_enrollment_mode() -> str:
-    mode = os.environ.get("FISH_CLOUD_ENROLLMENT_MODE", "closed").strip().lower()
+    mode = (
+        os.environ.get("FISH_ENROLLMENT_MODE")
+        or os.environ.get("FISH_CLOUD_ENROLLMENT_MODE")
+        or "closed"
+    ).strip().lower()
     return mode if mode in {"open", "allowlist", "closed"} else "closed"
 
 
@@ -162,7 +166,11 @@ def _cloud_key_mode() -> str:
     the managed Cloud privacy mode: the tenant key arrives only from an
     attestation-approved client session and is kept in memory.
     """
-    mode = os.environ.get("FISH_CLOUD_KEY_MODE", "").strip().lower()
+    mode = (
+        os.environ.get("FISH_KEY_MODE")
+        or os.environ.get("FISH_CLOUD_KEY_MODE")
+        or ""
+    ).strip().lower()
     if mode in {_KEY_SOURCE_CLIENT, "client", "client-held", "client_held"}:
         return _KEY_SOURCE_CLIENT
     return _KEY_SOURCE_SERVER
@@ -173,7 +181,14 @@ def _client_keys_required() -> bool:
 
 
 def _allowed_tenant_pubkeys() -> set[str]:
-    raw = os.environ.get("FISH_CLOUD_ALLOWED_PUBKEYS", "")
+    raw = " ".join(
+        value
+        for value in (
+            os.environ.get("FISH_ALLOWED_PUBKEYS", ""),
+            os.environ.get("FISH_CLOUD_ALLOWED_PUBKEYS", ""),
+        )
+        if value
+    )
     return {
         item.strip().lower()
         for item in re.split(r"[\s,]+", raw)

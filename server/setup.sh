@@ -51,16 +51,13 @@ echo "    Postgres ready: fisherman@localhost:5432/fisherman"
 
 # --- Generate secrets ---
 ENCRYPTION_KEY=$($PY -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" 2>/dev/null || true)
-AUTH_TOKEN=$($PY -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || true)
 
 if [ -z "$ENCRYPTION_KEY" ] && command -v uv &>/dev/null; then
     echo "==> Installing dependencies..."
     uv sync --quiet
     ENCRYPTION_KEY=$(uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
-    AUTH_TOKEN=$(uv run python -c "import secrets; print(secrets.token_urlsafe(32))")
 elif [ -z "$ENCRYPTION_KEY" ]; then
     ENCRYPTION_KEY=$(python3 -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())")
-    AUTH_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 fi
 
 # --- Ed25519 key pair (for FishKey auth + friend codes) ---
@@ -105,8 +102,16 @@ INGEST_HOST=0.0.0.0
 INGEST_PORT=9999
 HTTP_API_PORT=9998
 
-# Compatibility bearer token (FishKey is the primary auth path)
-INGEST_AUTH_TOKEN=${AUTH_TOKEN}
+# Tenant enrollment for self-hosted public servers.
+# Leave disabled for a single-process local dev server. For a remote
+# self-hosted backend, prefer:
+#   FISH_MULTI_TENANT=1
+#   FISH_ENROLLMENT_MODE=allowlist
+#   FISH_ALLOWED_PUBKEYS=<your Mac signing public key>
+FISH_MULTI_TENANT=
+FISH_ENROLLMENT_MODE=closed
+FISH_ALLOWED_PUBKEYS=
+FISH_KEY_MODE=server_wrapped
 
 # Ed25519 identity (auto-generated — used for FishKey auth and friend codes)
 FISH_PRIVATE_KEY=${FISH_PRIVATE_KEY}
@@ -129,5 +134,10 @@ echo "      uv run python ingest.py"
 echo ""
 echo "    Then configure a client with:"
 echo "      fisherman backend configure self-hosted --url ws://YOUR_HOST:9999/ingest"
+echo ""
+echo "    For a remote self-hosted server, run bootstrap-agent.sh with the"
+echo "    client's signing public key so the server can allowlist the Mac"
+echo "    without copying private keys:"
+echo "      bash bootstrap-agent.sh --start --public-url wss://YOUR_HOST/ingest --client-pubkey <signing-pubkey>"
 echo ""
 echo "    R2 is optional. Without R2 credentials, frames are stored locally in ./frames/"

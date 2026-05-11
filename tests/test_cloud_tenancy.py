@@ -491,6 +491,41 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ingest.TenantEnrollmentError):
             await ingest._ensure_tenant(db, ctx_b)
 
+    async def test_self_hosted_aliases_can_allowlist_client_pubkey(self):
+        os.environ["FISH_ENROLLMENT_MODE"] = "allowlist"
+        os.environ["FISH_ALLOWED_PUBKEYS"] = _pub_hex(SEED_A)
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            role="tenant",
+        )
+        ctx_b = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_B)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_B)),
+            role="tenant",
+        )
+
+        self.assertEqual(ingest._cloud_enrollment_mode(), "allowlist")
+        self.assertIsInstance(await ingest._ensure_tenant(db, ctx_a), str)
+        with self.assertRaises(ingest.TenantEnrollmentError):
+            await ingest._ensure_tenant(db, ctx_b)
+
+    async def test_self_hosted_key_mode_alias_selects_client_provided_keys(self):
+        os.environ["FISH_ENROLLMENT_MODE"] = "open"
+        os.environ["FISH_KEY_MODE"] = "client_provided"
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        ctx_a = ingest.AuthContext(
+            actor_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            user_pubkey=bytes.fromhex(_pub_hex(SEED_A)),
+            role="tenant",
+        )
+
+        with self.assertRaises(ingest.TenantKeyUnavailableError):
+            await ingest._ensure_tenant(db, ctx_a)
+
     async def test_closed_enrollment_rejects_new_cloud_tenant_by_default(self):
         ingest = _load_ingest_module()
         db = RecordingPool()
