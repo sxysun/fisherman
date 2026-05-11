@@ -36,7 +36,7 @@ def ocr_fast(jpeg_data: bytes) -> tuple[str, list[str]]:
     if sys.platform != "darwin" or objc is None or Quartz is None or Vision is None:
         raise RuntimeError(
             "native OCR is only supported on macOS; "
-            "use FISH_CAPTURE_BACKEND=screenpipe or provide OCR text upstream on Windows"
+            "Fisherman OCR currently requires Apple Vision"
         )
     with objc.autorelease_pool():
         # Create CGImage from JPEG bytes

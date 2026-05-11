@@ -33,7 +33,7 @@ class FrameStore:
         day_dir = os.path.join(self._base, dt.strftime("%Y-%m-%d"))
         os.makedirs(day_dir, exist_ok=True)
 
-        # Save JPEG (skip if empty — screenpipe sometimes can't extract frames)
+        # Save JPEG when present; imported metadata-only rows may not have one.
         img_path = os.path.join(day_dir, f"{ts_ms}.jpg")
         if frame.jpeg_data:
             try:

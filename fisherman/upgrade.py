@@ -24,7 +24,6 @@ What is NEVER touched:
   ~/.fisherman/.env          (FISH_PRIVATE_KEY, friends, deputies)
   ~/.fisherman/frames/       (real captures)
   ~/.fisherman/audio/
-  ~/.fisherman/screenpipe-data/
   ~/.fisherman/logs/
   ~/.fisherman/.git/         (the install's git history is preserved)
 
@@ -648,6 +647,18 @@ def diagnose() -> dict:
         "ok": daemon is not None and not daemon_error and not stream_error,
         "detail": daemon_detail,
     }
+    capture_backend = (
+        str(daemon.get("capture_backend") or "").strip().lower()
+        if daemon else ""
+    ) or "native"
+    out["capture"] = {
+        "ok": daemon is not None and daemon_error is None,
+        "detail": (
+            f"{capture_backend} capture"
+            if daemon_error is None
+            else f"{capture_backend} capture error: {daemon_error}"
+        ),
+    }
     if "backend" in out:
         try:
             cfg = FishermanConfig()
@@ -655,105 +666,19 @@ def diagnose() -> dict:
             out["status_relay"] = {"ok": relay_ok, "detail": relay_detail}
         except Exception as e:
             out["status_relay"] = {"ok": False, "detail": f"relay config error: {e}"}
-    capture_backend = (
-        str(daemon.get("capture_backend") or "").strip().lower()
-        if daemon else ""
-    ) or FishermanConfig().capture_backend
-    needs_screenpipe = capture_backend == "screenpipe"
-    sp_path = shutil.which("screenpipe")
-    sp_detail = sp_path or "not on PATH (install from https://docs.screenpi.pe/)"
-    if sp_path:
-        # Surface the deprecated-brew-bottle situation so users plan
-        # the migration before 2026-08-25 (when the formula is removed).
-        try:
-            r = subprocess.run(
-                ["brew", "info", "--json", "screenpipe"],
-                capture_output=True, text=True, timeout=4,
-            )
-            if r.returncode == 0 and '"deprecated":true' in r.stdout:
-                sp_detail += "  ⚠ brew formula deprecated; disabled 2026-08-25"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
-    out["screenpipe_binary"] = {
-        "ok": (sp_path is not None) if needs_screenpipe else True,
-        "detail": sp_detail if needs_screenpipe else f"not required; capture_backend={capture_backend}",
-    }
-    sp_running = False
-    if needs_screenpipe:
-        sp_running = subprocess.run(
-            ["pgrep", "-f", "screenpipe"], capture_output=True,
-        ).returncode == 0
-    out["screenpipe_process"] = {
-        "ok": sp_running if needs_screenpipe else True,
-        "detail": "screenpipe process found"
-                  if sp_running else (
-                      "screenpipe NOT running (menubar should spawn it)"
-                      if needs_screenpipe else f"not required; capture_backend={capture_backend}"
-                  ),
-    }
-    sp_http = False
-    if needs_screenpipe:
-        try:
-            with urllib.request.urlopen("http://127.0.0.1:3030/health", timeout=2) as r:
-                sp_http = r.status == 200
-        except (urllib.error.URLError, OSError):
-            sp_http = False
-    out["screenpipe_http"] = {
-        "ok": sp_http if needs_screenpipe else True,
-        "detail": (
-            "127.0.0.1:3030 reachable" if sp_http else
-            ("127.0.0.1:3030 not reachable" if needs_screenpipe else f"not required; capture_backend={capture_backend}")
-        ),
-    }
     out["app_bundle"] = {
         "ok": Path("/Applications/Fisherman.app").exists(),
         "detail": "/Applications/Fisherman.app exists"
                   if Path("/Applications/Fisherman.app").exists()
                   else "/Applications/Fisherman.app MISSING",
     }
-    # Screenpipe DB — surfaces both the size and the age of the
-    # oldest frame, plus whether the daemon's auto-cleanup has a
-    # safety bound to work with. Reuses fisherman.cleanup so the row
-    # text matches what `fisherman cleanup --dry-run` would say.
-    try:
-        from fisherman import cleanup as _cl
-        stats = _cl.get_db_stats()
-        last_safe = _cl.get_last_uploaded_ts()
-    except Exception:
-        stats = None
-        last_safe = None
-
-    if stats is not None:
-        size_mb = stats.size_bytes / (1024 * 1024)
-        oldest_age_h = (
-            (time.time() - stats.oldest_ts) / 3600
-            if stats.oldest_ts else None
-        )
-        bits = [f"{size_mb:.0f} MB", f"{stats.frames_count:,} frames"]
-        if oldest_age_h is not None:
-            bits.append(f"oldest {oldest_age_h:.1f}h ago")
-        # Auto-cleanup safety status — never deletes unbacked-up data.
-        if last_safe is None:
-            bits.append("auto-cleanup waiting (no upload bound yet)")
-            ok = size_mb < 1000  # warn on huge DB even without bound
-        else:
-            mark_age_h = (time.time() - last_safe) / 3600
-            bits.append(f"upload bound {mark_age_h:.1f}h ago")
-            ok = True
-        # Hard warn at 2 GB regardless — at that point /search is slow
-        # enough that frames probably aren't flowing.
-        if size_mb > 2000:
-            ok = False
-            bits.append("⚠ raise FISH_SCREENPIPE_SEARCH_TIMEOUT or run `fisherman cleanup`")
-        out["screenpipe_db"] = {"ok": ok, "detail": "; ".join(bits)}
     return out
 
 
 def repair() -> dict:
     """Try to bring everything back to a healthy state.
 
-    Order matters: the menubar must launch, then it starts the daemon and
-    only starts Screenpipe when the user explicitly selected that backend.
+    Order matters: the menubar must launch, then it starts the daemon.
     Returns the post-repair diagnose() snapshot.
     """
     # 1. Refresh LaunchServices registration for the .app — this clears
@@ -767,13 +692,12 @@ def repair() -> dict:
             [lsregister, "-f", "/Applications/Fisherman.app"],
             capture_output=True,
         )
-    # 2. Flush zombies of menubar + any Fisherman-owned Screenpipe process.
+    # 2. Flush zombies of menubar and daemon processes.
     _kill_and_wait("FishermanMenu", timeout=5.0)
-    _kill_and_wait("screenpipe.*fisherman", timeout=3.0)
     # 3. Bring the menubar back up (which starts the daemon).
     launch_app(retries=3)
     _maybe_start_local_relay()
-    # 4. Give it a moment for screenpipe + daemon to come up.
+    # 4. Give it a moment for the daemon to come up.
     time.sleep(3.0)
     return diagnose()
 

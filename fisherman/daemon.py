@@ -21,16 +21,13 @@ from fisherman.config import DEFAULT_SERVER_URL, FishermanConfig, ingest_url_fro
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
-from fisherman.meeting_detector import MeetingDetector
 from fisherman.ocr import maybe_extract_pdf_context, ocr_fast
 from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
 from fisherman.relay_client import RelayClient
 from fisherman.router import TierRouter
-from fisherman.screenpipe_capture import ScreenpipeCaptureClient, ScreenpipeCaptureError
 from fisherman.streamer import (
     Streamer,
-    build_audio_payload,
     build_frame_payload,
 )
 from fisherman.sync import MirrorSync
@@ -55,7 +52,8 @@ def _live_tls_fingerprint(url: str, timeout: float = 15.0) -> str | None:
 class FishermanDaemon:
     def __init__(self, config: FishermanConfig):
         self._config = config
-        self._capture_backend = (config.capture_backend or "native").strip().lower()
+        raw_capture_backend = (config.capture_backend or "native").strip().lower()
+        self._capture_backend = "swift" if raw_capture_backend == "swift" else "native"
         self._running = False
         self._capture_ok = False
         self._backend_block_code: str | None = None
@@ -89,15 +87,9 @@ class FishermanDaemon:
         )
         self._frame_store = FrameStore(config.frames_dir, config.local_frames_max)
         self._audio_store = AudioStore(config.audio_dir, config.audio_max_days)
-        self._screenpipe = ScreenpipeCaptureClient(
-            config.screenpipe_url,
-            search_limit=config.screenpipe_search_limit,
-            timeout=config.screenpipe_search_timeout,
-        )
         self._pool = ThreadPoolExecutor(max_workers=2)
         self._frames_sent = 0
         self._consecutive_capture_failures = 0
-        self._meeting_detector = MeetingDetector()
         self._in_call = False
         self._call_app: str | None = None
         self._audio_sent = 0
@@ -282,8 +274,6 @@ class FishermanDaemon:
             frame_store=self._frame_store,
             audio_store=self._audio_store,
             frame_queue=self._frame_queue if _SWIFT_CAPTURE else None,
-            screenpipe_data_dir=os.path.expanduser(self._config.screenpipe_data_dir)
-            if self._capture_backend == "screenpipe" else None,
         )
         await control.start()
 
@@ -303,20 +293,6 @@ class FishermanDaemon:
             swift_capture=_SWIFT_CAPTURE,
             capture_backend=self._capture_backend,
         )
-
-        audio_task: asyncio.Task | None = None
-        if self._config.audio_enabled and self._capture_backend == "screenpipe":
-            audio_task = asyncio.create_task(self._audio_loop())
-
-        # Background DB cleanup. Trims local screenpipe SQLite to the
-        # configured retention window — but only the rows whose
-        # timestamps the streamer has confirmed forwarded upstream.
-        # Never deletes unbacked-up data.
-        cleanup_task: asyncio.Task | None = None
-        if (self._streamer is not None
-                and self._config.screenpipe_cleanup_enabled
-                and self._capture_backend == "screenpipe"):
-            cleanup_task = asyncio.create_task(self._cleanup_loop())
 
         # Recurring processors are Fisherman's first-class "cron" path.
         # The scheduler is lightweight when no schedules exist and lets
@@ -355,26 +331,12 @@ class FishermanDaemon:
         try:
             if _SWIFT_CAPTURE:
                 await self._process_loop()
-            elif self._capture_backend == "screenpipe":
-                await self._screenpipe_capture_loop()
             else:
                 await self._capture_loop()
         except asyncio.CancelledError:
             pass
         finally:
             self._running = False
-            if audio_task is not None:
-                audio_task.cancel()
-                try:
-                    await audio_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            if cleanup_task is not None:
-                cleanup_task.cancel()
-                try:
-                    await cleanup_task
-                except (asyncio.CancelledError, Exception):
-                    pass
             if processor_task is not None:
                 processor_task.cancel()
                 try:
@@ -474,86 +436,6 @@ class FishermanDaemon:
             elapsed = asyncio.get_event_loop().time() - t0
             await asyncio.sleep(max(0, interval - elapsed))
 
-    async def _screenpipe_capture_loop(self) -> None:
-        loop = asyncio.get_running_loop()
-        interval = max(self._config.screenpipe_poll_interval, 0.25)
-        cfg = self._config
-
-        while self._running:
-            t0 = asyncio.get_event_loop().time()
-
-            try:
-                payloads = await loop.run_in_executor(self._pool, self._screenpipe.poll)
-                self._capture_ok = True
-                self._consecutive_capture_failures = 0
-            except ScreenpipeCaptureError as e:
-                self._capture_ok = False
-                self._consecutive_capture_failures += 1
-                log.warning("screenpipe_capture_failed", error=str(e))
-                backoff = min(
-                    interval * (2 ** (self._consecutive_capture_failures - 1)),
-                    30.0,
-                )
-                await asyncio.sleep(backoff)
-                continue
-            except Exception:
-                self._capture_ok = False
-                self._consecutive_capture_failures += 1
-                log.warning("screenpipe_capture_failed", exc_info=True)
-                backoff = min(
-                    interval * (2 ** (self._consecutive_capture_failures - 1)),
-                    30.0,
-                )
-                await asyncio.sleep(backoff)
-                continue
-
-            # Screenshot fallback: when screenpipe can't extract JPEGs from
-            # the active MP4 chunk, take one screenshot and use it for all
-            # imageless frames in this batch.
-            screenshot = None
-            if any(not p.frame.jpeg_data for p in payloads):
-                try:
-                    screenshot = await loop.run_in_executor(
-                        self._pool, capture_screen, cfg.max_dimension, cfg.jpeg_quality
-                    )
-                except Exception:
-                    log.debug("screenshot_fallback_failed", exc_info=True)
-
-            for payload in payloads:
-                frame = payload.frame
-                if self._privacy.should_skip(frame.bundle_id, frame.app_name):
-                    continue
-
-                # Fill in missing JPEG from screenshot fallback
-                if not frame.jpeg_data and screenshot:
-                    frame.jpeg_data = screenshot.jpeg_data
-                    frame.width = screenshot.width
-                    frame.height = screenshot.height
-
-                if frame.jpeg_data:
-                    diff = self._differ.diff_frame(frame.jpeg_data)
-                    if not diff.is_new:
-                        continue
-                    distance = diff.distance
-                else:
-                    distance = 64  # max distance — treat as fully new
-
-                ocr_text, urls = await self._enhance_pdf_context(
-                    frame, payload.ocr_text, payload.urls
-                )
-
-                await self._publish_frame(
-                    frame,
-                    distance,
-                    ocr_text,
-                    urls,
-                    video_path=payload.video_path,
-                    video_offset=payload.video_offset,
-                )
-
-            elapsed = asyncio.get_event_loop().time() - t0
-            await asyncio.sleep(max(0, interval - elapsed))
-
     async def _process_loop(self) -> None:
         """Process frames pushed by Swift CaptureEngine via POST /frame."""
         loop = asyncio.get_running_loop()
@@ -614,7 +496,7 @@ class FishermanDaemon:
             "on_battery": on_battery(),
             "capture_interval": self._get_interval(),
             "capture_backend": self._capture_backend,
-            "audio_enabled": self._config.audio_enabled,
+            "audio_enabled": False,
             "in_call": self._in_call,
             "call_app": self._call_app,
             "audio_sent": self._audio_sent,
@@ -630,10 +512,7 @@ class FishermanDaemon:
             "mirror_failed": (self._mirror_sync.state.failed_files if self._mirror_sync else 0),
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
-            if self._capture_backend == "screenpipe":
-                status["error"] = "screenpipe_capture_unavailable"
-            else:
-                status["error"] = "screen_recording_not_granted"
+            status["error"] = "screen_recording_not_granted"
         return status
 
     async def _handle_rpc(self, body: dict) -> dict:
@@ -935,174 +814,6 @@ class FishermanDaemon:
                 log.warning("processor_schedule_loop_failed", exc_info=True)
 
             await asyncio.sleep(60.0)
-
-    async def _cleanup_loop(self) -> None:
-        """Periodically trim local screenpipe DB to the retention
-        window, but only rows the streamer has confirmed forwarded
-        upstream (the safety bound).
-
-        First run delayed so the streamer has time to upload at least
-        one frame and establish a meaningful safety bound.
-        """
-        from fisherman import cleanup as _cl
-
-        cfg = self._config
-        loop = asyncio.get_running_loop()
-        await asyncio.sleep(min(cfg.screenpipe_cleanup_interval, 60.0))
-
-        while self._running:
-            try:
-                last_safe = self._streamer.last_uploaded_ts
-                if last_safe is not None:
-                    # Persist for the next daemon restart (a fresh
-                    # daemon doesn't have an in-memory bound until it
-                    # sends its first frame).
-                    await loop.run_in_executor(
-                        self._pool, _cl.set_last_uploaded_ts, last_safe,
-                    )
-                else:
-                    last_safe = await loop.run_in_executor(
-                        self._pool, _cl.get_last_uploaded_ts,
-                    )
-
-                # Decide row-by-row vs nuclear-rotation. screenpipe's
-                # frames_fts AFTER DELETE trigger makes per-row deletes
-                # 10ms+ each, so beyond ~50K rows the row-by-row path
-                # takes minutes/hours — better to rotate the whole DB.
-                threshold = cfg.screenpipe_cleanup_vacuum_threshold
-                peek = await loop.run_in_executor(
-                    self._pool,
-                    lambda: _cl.cleanup_db(
-                        retention_hours=cfg.screenpipe_local_retention_hours,
-                        last_safe_ts=last_safe,
-                        dry_run=True,
-                    ),
-                )
-                if threshold > 0 and peek.frames_deleted >= threshold:
-                    log.info("screenpipe_cleanup_using_reset",
-                             frames=peek.frames_deleted,
-                             threshold=threshold)
-                    result = await loop.run_in_executor(
-                        self._pool,
-                        lambda: _cl.reset_db(last_safe_ts=last_safe),
-                    )
-                else:
-                    result = await loop.run_in_executor(
-                        self._pool,
-                        lambda: _cl.cleanup_db(
-                            retention_hours=cfg.screenpipe_local_retention_hours,
-                            last_safe_ts=last_safe,
-                            vacuum=False,
-                        ),
-                    )
-
-                if result.skipped_reason:
-                    log.info("screenpipe_cleanup_skipped",
-                             reason=result.skipped_reason)
-                else:
-                    log.info(
-                        "screenpipe_cleanup",
-                        deleted=result.frames_deleted,
-                        bytes_freed=result.bytes_freed,
-                        vacuum=result.vacuum_ran,
-                    )
-            except Exception:
-                log.warning("screenpipe_cleanup_failed", exc_info=True)
-            await asyncio.sleep(cfg.screenpipe_cleanup_interval)
-
-    async def _audio_loop(self) -> None:
-        """Detect calls and forward screenpipe audio transcripts only while in one.
-
-        Two cadences interleave on a single timer:
-          - meeting_detect_interval: cheap window-title scan
-          - audio_poll_interval: only fires when in_call is true; pulls
-            new transcripts from screenpipe and ships them via streamer
-        """
-        loop = asyncio.get_running_loop()
-        cfg = self._config
-        last_detect = 0.0
-        last_audio_poll = 0.0
-        # On the rising edge of in_call, drop a fresh dedupe so we don't
-        # flush stale (pre-call) transcripts that were buffered while idle.
-        prev_in_call = False
-
-        while self._running:
-            now = loop.time()
-            try:
-                if now - last_detect >= cfg.meeting_detect_interval:
-                    last_detect = now
-                    sig = await loop.run_in_executor(
-                        self._pool, self._meeting_detector.detect
-                    )
-                    self._in_call = sig.in_call
-                    self._call_app = sig.app
-
-                    if sig.in_call and not prev_in_call:
-                        # Reset audio cursor so we only ship utterances
-                        # observed from this point forward.
-                        self._screenpipe._seen_audio.clear()
-                        self._screenpipe._seen_audio_lookup.clear()
-                        self._screenpipe._last_audio_timestamp = time.time()
-                    prev_in_call = sig.in_call
-
-                if (
-                    self._in_call
-                    and not self._privacy.is_paused
-                    and now - last_audio_poll >= cfg.audio_poll_interval
-                ):
-                    last_audio_poll = now
-                    try:
-                        audio_payloads = await loop.run_in_executor(
-                            self._pool, self._screenpipe.poll_audio
-                        )
-                    except ScreenpipeCaptureError as e:
-                        log.debug("audio_poll_failed", error=str(e))
-                        audio_payloads = []
-                    except Exception:
-                        log.debug("audio_poll_error", exc_info=True)
-                        audio_payloads = []
-
-                    for ap in audio_payloads:
-                        # Persist locally first — local store is ground truth
-                        await loop.run_in_executor(
-                            self._pool,
-                            self._audio_store.save,
-                            ap.timestamp,
-                            ap.transcription,
-                            self._call_app,
-                            ap.device_name,
-                            ap.is_input_device,
-                        )
-                        if self._streamer is not None:
-                            await self._streamer.send_audio(
-                                ts=ap.timestamp,
-                                transcript=ap.transcription,
-                                meeting_app=self._call_app,
-                                device_name=ap.device_name,
-                                is_input_device=ap.is_input_device,
-                            )
-                        elif self._upload_queue is not None:
-                            payload, frame_ts = build_audio_payload(
-                                ts=ap.timestamp,
-                                transcript=ap.transcription,
-                                meeting_app=self._call_app,
-                                device_name=ap.device_name,
-                                is_input_device=ap.is_input_device,
-                            )
-                            self._upload_queue.append(
-                                "audio",
-                                payload,
-                                frame_ts,
-                                target_url=self._upload_target_url(),
-                            )
-                        self._audio_sent += 1
-
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.warning("audio_loop_iteration_failed", exc_info=True)
-
-            await asyncio.sleep(1.0)
 
     async def _publish_frame(
         self,

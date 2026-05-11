@@ -1,10 +1,9 @@
 import asyncio
 import base64
 import json
-import os
 import re
 import time
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import structlog
 
@@ -193,7 +192,6 @@ class ControlServer:
         frame_store=None,
         audio_store=None,
         frame_queue: asyncio.Queue | None = None,
-        screenpipe_data_dir: str | None = None,
     ):
         self._port = port
         self._get_status = get_status_fn
@@ -202,7 +200,6 @@ class ControlServer:
         self._frame_store = frame_store
         self._audio_store = audio_store
         self._frame_queue = frame_queue
-        self._screenpipe_data_dir = screenpipe_data_dir
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -228,7 +225,6 @@ class ControlServer:
 
             # Drain headers, track content-length and range
             content_length = 0
-            range_header = None
             while True:
                 line = await reader.readline()
                 if line in (b"\r\n", b"\n", b""):
@@ -236,8 +232,6 @@ class ControlServer:
                 lower = line.lower()
                 if lower.startswith(b"content-length:"):
                     content_length = int(line.split(b":")[1].strip())
-                elif lower.startswith(b"range:"):
-                    range_header = line.split(b":", 1)[1].strip().decode()
 
             # Read body for POST requests
             body = b""
@@ -258,8 +252,6 @@ class ControlServer:
                 await self._handle_frame_post(body, writer)
             elif method == "GET" and path == "/viewer":
                 self._send_html(writer, VIEWER_HTML)
-            elif method == "GET" and path.startswith("/video/"):
-                await self._handle_video(path, range_header, writer)
             elif method == "GET" and path.startswith("/frames"):
                 await self._handle_frames(path, writer)
             elif method == "GET" and (path == "/query" or path.startswith("/query?")):
@@ -347,63 +339,6 @@ class ControlServer:
             limit=_parse_int(params.get("limit"), default=200, lo=1, hi=2000),
         )
         self._send_json(writer, json.dumps(result))
-
-    async def _handle_video(self, path: str, range_header: str | None, writer: asyncio.StreamWriter) -> None:
-        """Serve MP4 video chunks from screenpipe data dir with Range support."""
-        parts = path.split("/video/", 1)
-        if len(parts) < 2 or not parts[1] or not self._screenpipe_data_dir:
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-            return
-
-        # Strip fragment (#t=...) and decode
-        filename = unquote(parts[1].split("#")[0])
-        filename = os.path.basename(filename)  # prevent path traversal
-
-        if not filename.endswith(".mp4"):
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-            return
-
-        video_path = os.path.join(self._screenpipe_data_dir, filename)
-        if not os.path.isfile(video_path):
-            writer.write(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
-            return
-
-        file_size = os.path.getsize(video_path)
-
-        if range_header and range_header.startswith("bytes="):
-            range_spec = range_header[6:]
-            range_parts = range_spec.split("-", 1)
-            start = int(range_parts[0]) if range_parts[0] else 0
-            end = int(range_parts[1]) if len(range_parts) > 1 and range_parts[1] else file_size - 1
-            end = min(end, file_size - 1)
-            length = end - start + 1
-
-            with open(video_path, "rb") as f:
-                f.seek(start)
-                data = f.read(length)
-
-            header = (
-                "HTTP/1.1 206 Partial Content\r\n"
-                "Content-Type: video/mp4\r\n"
-                f"Content-Range: bytes {start}-{end}/{file_size}\r\n"
-                f"Content-Length: {length}\r\n"
-                "Accept-Ranges: bytes\r\n"
-                "Cache-Control: public, max-age=3600\r\n"
-                "\r\n"
-            )
-            writer.write(header.encode() + data)
-        else:
-            with open(video_path, "rb") as f:
-                data = f.read()
-            header = (
-                "HTTP/1.1 200 OK\r\n"
-                "Content-Type: video/mp4\r\n"
-                f"Content-Length: {file_size}\r\n"
-                "Accept-Ranges: bytes\r\n"
-                "Cache-Control: public, max-age=3600\r\n"
-                "\r\n"
-            )
-            writer.write(header.encode() + data)
 
     async def _handle_frame_post(self, body: bytes, writer: asyncio.StreamWriter) -> None:
         if not self._frame_queue:

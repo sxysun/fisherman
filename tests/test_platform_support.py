@@ -35,14 +35,14 @@ class PlatformSupportTests(unittest.TestCase):
             module = importlib.import_module("fisherman.capture")
 
         self.assertTrue(hasattr(module, "ScreenFrame"))
-        with self.assertRaisesRegex(RuntimeError, "screenpipe"):
+        with self.assertRaisesRegex(RuntimeError, "requires macOS"):
             module.capture_screen(1920, 60)
 
     def test_ocr_module_imports_on_windows(self) -> None:
         with mock.patch.object(sys, "platform", "win32"):
             module = importlib.import_module("fisherman.ocr")
 
-        with self.assertRaisesRegex(RuntimeError, "screenpipe"):
+        with self.assertRaisesRegex(RuntimeError, "requires Apple Vision"):
             module.ocr_fast(b"fake-jpeg")
 
     def test_pyobjc_dependencies_are_macos_only(self) -> None:

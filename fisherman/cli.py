@@ -69,12 +69,8 @@ def start(server_url: str | None, backend_mode: str | None, backend_url: str | N
         click.echo("  Ingest:   disabled (local-only capture)")
     click.echo(f"  Relay:    {config.status_relay_url}")
     click.echo(f"  Control:  http://127.0.0.1:{config.control_port}")
-    click.echo(f"  Capture:  {config.capture_backend}")
-    if (config.capture_backend or "").strip().lower() == "screenpipe":
-        click.echo(f"  Source:   {config.screenpipe_url}")
-        click.echo(f"  Poll:     {config.screenpipe_poll_interval}s")
-    else:
-        click.echo(f"  Interval: {config.capture_interval}s")
+    click.echo("  Capture:  native")
+    click.echo(f"  Interval: {config.capture_interval}s")
     click.echo(f"  Frames:   {config.frames_dir}")
 
     from fisherman.daemon import FishermanDaemon
@@ -870,112 +866,6 @@ def _cloud_account_ready(url: str, *, timeout: float = 10.0) -> tuple[bool, str 
 
 
 @main.command()
-@click.option("--retention-hours", default=None, type=int,
-              help="Override the configured retention window. Frames older "
-                   "than this AND already forwarded upstream will be deleted.")
-@click.option("--dry-run", is_flag=True,
-              help="Report what would be deleted without changing anything.")
-@click.option("--vacuum/--no-vacuum", default=True,
-              help="Run VACUUM after delete (slow on large DBs; default on).")
-@click.option("--pause-screenpipe/--no-pause-screenpipe", default=True,
-              help="Pause screenpipe + menubar during delete so the write lock "
-                   "is releasable. Default on.")
-@click.option("--reset", is_flag=True,
-              help="Nuclear option: rotate the entire DB out of the way "
-                   "instead of row-by-row delete. Instant. Use when the DB is "
-                   "huge (300K+ rows) — row-by-row would take >30 min because "
-                   "screenpipe's frames_fts trigger fires on every row.")
-@click.option("--force", is_flag=True,
-              help="Bypass the upstream-confirmation safety check. "
-                   "DANGEROUS — may delete frames that haven't been backed up.")
-def cleanup(retention_hours, dry_run, vacuum, pause_screenpipe, reset, force):
-    """Trim the local screenpipe SQLite DB to the retention window.
-
-    By default safe: only rows whose timestamp is older than the
-    retention window AND ≤ the most recent timestamp the daemon has
-    confirmed forwarded upstream are deleted. If the daemon has never
-    successfully sent a frame, NOTHING is deleted (use --force only if
-    you're sure you don't need that data).
-    """
-    import time as _time
-    from fisherman import cleanup as _cl
-    cfg = FishermanConfig()
-    hours = retention_hours if retention_hours is not None else cfg.screenpipe_local_retention_hours
-
-    # Defensive: a previous cleanup that crashed mid-pause may have left
-    # the menubar SIGSTOP'd. Always SIGCONT it before starting.
-    if _cl.unstick_menubar():
-        click.echo(click.style(
-            "  unstuck a SIGSTOP'd menubar from a previous failed cleanup",
-            fg="yellow"))
-
-    # Convert SIGTERM to KeyboardInterrupt so cleanup_db's try/finally runs.
-    import signal as _sig
-    _sig.signal(_sig.SIGTERM, lambda *_: (_cl.unstick_menubar(), sys.exit(130))[1])
-
-    last_safe = _cl.get_last_uploaded_ts()
-    if last_safe is None and not force:
-        click.echo(click.style(
-            "  no upload high-water mark found "
-            "(daemon hasn't confirmed any frame uploaded yet).",
-            fg="yellow"))
-        click.echo("  Either: (a) start the daemon and let it forward at least "
-                   "one frame, or (b) re-run with --force to delete anyway.")
-        sys.exit(2)
-    effective_safe = last_safe if last_safe is not None else _time.time()
-
-    stats_before = _cl.get_db_stats()
-    if stats_before is None:
-        click.echo(click.style("  screenpipe DB not found — nothing to do.",
-                               fg="yellow"))
-        return
-
-    click.echo(f"  before: {stats_before.size_bytes/1e6:.0f} MB, "
-               f"{stats_before.frames_count:,} frames")
-    if stats_before.oldest_ts:
-        oldest_age_h = (_time.time() - stats_before.oldest_ts) / 3600
-        click.echo(f"          oldest frame: {oldest_age_h:.1f} hours ago")
-
-    if reset:
-        if dry_run:
-            click.echo(click.style(
-                f"  --reset would rotate the entire DB ({stats_before.frames_count:,} frames, "
-                f"{stats_before.size_bytes/1e6:.0f} MB)",
-                fg="cyan"))
-            return
-        res = _cl.reset_db(
-            last_safe_ts=effective_safe,
-            pause_screenpipe=pause_screenpipe,
-        )
-    else:
-        res = _cl.cleanup_db(
-            retention_hours=hours, last_safe_ts=effective_safe,
-            vacuum=vacuum, dry_run=dry_run,
-            pause_screenpipe=pause_screenpipe,
-        )
-
-    if res.skipped_reason and not res.frames_deleted:
-        click.echo(click.style(
-            f"  skipped: {res.skipped_reason}", fg="yellow"))
-        return
-    if dry_run:
-        click.echo(click.style(
-            f"  would delete {res.frames_deleted:,} frames "
-            f"(retention {hours}h)", fg="cyan"))
-        return
-
-    stats_after = _cl.get_db_stats()
-    click.echo(click.style(
-        f"  ✓ deleted {res.frames_deleted:,} frames; "
-        f"freed {res.bytes_freed/1e6:.0f} MB; "
-        f"{'vacuum ran' if res.vacuum_ran else 'no vacuum'}",
-        fg="green"))
-    if stats_after:
-        click.echo(f"  after:  {stats_after.size_bytes/1e6:.0f} MB, "
-                   f"{stats_after.frames_count:,} frames")
-
-
-@main.command()
 @click.option("--json", "as_json", is_flag=True,
               help="Machine-readable output (used by the menubar Diagnostics view).")
 def doctor(as_json):
@@ -1007,7 +897,7 @@ def repair(as_json):
 
     Re-registers the app with LaunchServices (fixes `open` -600 errors
     after a quick pkill+open cycle), flushes zombie processes, and
-    relaunches the menubar (which respawns screenpipe + daemon).
+    relaunches the menubar, which respawns the daemon.
     """
     from fisherman import upgrade as _up
     if not as_json:

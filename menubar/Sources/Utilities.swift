@@ -28,22 +28,6 @@ func findVenvPython(projectDir: String) -> String? {
     return FileManager.default.isExecutableFile(atPath: path) ? path : nil
 }
 
-func findScreenpipe() -> String? {
-    let home = NSHomeDirectory()
-    for candidate in [
-        "\(home)/.local/bin/screenpipe",
-        "\(home)/.cargo/bin/screenpipe",
-        "/usr/local/bin/screenpipe",
-        "/opt/homebrew/bin/screenpipe",
-        "/Applications/screenpipe.app/Contents/MacOS/screenpipe",
-    ] {
-        if FileManager.default.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-    }
-    return whichBinary("screenpipe")
-}
-
 private func whichBinary(_ name: String) -> String? {
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
@@ -146,16 +130,6 @@ func readEnvValue(_ key: String) -> String? {
     return nil
 }
 
-func audioEnabled() -> Bool {
-    // Default true. Set FISH_AUDIO_ENABLED=0 in .env to disable.
-    if let val = readEnvValue("FISH_AUDIO_ENABLED")?.lowercased() {
-        if val == "0" || val == "false" || val == "no" || val == "off" {
-            return false
-        }
-    }
-    return true
-}
-
 func readControlPort() -> String {
     if let val = readEnvValue("FISH_CONTROL_PORT"), !val.isEmpty {
         return val
@@ -194,10 +168,6 @@ func buildEnvironment() -> [String: String] {
 /// returns 400 to everything.
 func isFishermanAlive(port: Int) -> Bool {
     return isServiceAlive(port, path: "/status", requiredKey: "running")
-}
-
-func isScreenpipeAlive(port: Int = 3030) -> Bool {
-    return isServiceAlive(port, path: "/health")
 }
 
 private final class ServiceProbeResult: @unchecked Sendable {

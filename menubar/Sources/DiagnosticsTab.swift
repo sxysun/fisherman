@@ -4,7 +4,7 @@ import AppKit
 
 /// Settings → Diagnostics. Native equivalent of `fisherman doctor` for
 /// users who don't open a terminal: runs the same checks (menubar
-/// process, daemon control port, screenpipe binary + process + HTTP,
+/// process, daemon control port, capture health,
 /// /Applications bundle), shows them as green/red rows, and offers a
 /// one-click "Repair" button that runs `fisherman repair` (re-registers
 /// the app with LaunchServices, kills zombies, relaunches everything).
@@ -154,9 +154,8 @@ struct DiagnosticsTab: View {
               let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         // Stable presentation order regardless of dict iteration order.
-        let order = ["backend", "identity", "menubar", "daemon", "status_relay", "screenpipe_binary",
-                     "screenpipe_process", "screenpipe_http",
-                     "app_bundle", "screenpipe_db"]
+        let order = ["backend", "identity", "menubar", "daemon", "capture", "status_relay",
+                     "app_bundle"]
         var out: [(String, Bool, String)] = []
         for key in order {
             if let r = dict[key] as? [String: Any] {
@@ -186,12 +185,9 @@ struct DiagnosticsTab: View {
         case "identity":          return "Identity"
         case "menubar":            return "Menu bar app"
         case "daemon":             return "Daemon (control port)"
+        case "capture":            return "Capture"
         case "status_relay":       return "Status relay"
-        case "screenpipe_binary":  return "Screenpipe binary"
-        case "screenpipe_process": return "Screenpipe process"
-        case "screenpipe_http":    return "Screenpipe HTTP (127.0.0.1:3030)"
         case "app_bundle":         return "/Applications/Fisherman.app"
-        case "screenpipe_db":      return "Screenpipe local DB"
         default:                   return key.replacingOccurrences(of: "_", with: " ").capitalized
         }
     }

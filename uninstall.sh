@@ -107,12 +107,10 @@ osascript -e 'quit app "Fisherman"' >/dev/null 2>&1 || true
 stop_launch_agent
 sleep 1
 
-# Stop Fisherman-owned processes. The screenpipe match is scoped to the
-# Fisherman data directory so we do not kill a user's unrelated screenpipe.
+# Stop Fisherman-owned processes.
 pkill -f FishermanMenu >/dev/null 2>&1 || true
 pkill -f "python.*fisherman.*start" >/dev/null 2>&1 || true
 pkill -f "fisherman start" >/dev/null 2>&1 || true
-pkill -f "screenpipe.*\\.fisherman/screenpipe-data" >/dev/null 2>&1 || true
 
 if [ -d "$APP_PATH" ]; then
     remove_path "$APP_PATH" "$APP_PATH"
@@ -120,16 +118,11 @@ else
     echo "No app bundle found at $APP_PATH."
 fi
 
-prompt_delete_dir "$INSTALL_DIR" "config, identity keys, logs, local captures, screenpipe data, processor schedules"
+prompt_delete_dir "$INSTALL_DIR" "config, identity keys, logs, local captures, processor schedules"
 prompt_delete_dir "$DEPUTY_DIR" "registered Agent Access/deputy configs for this machine"
 
 rm -f /tmp/fisherman.out.log /tmp/fisherman.err.log 2>/dev/null || true
 
 echo
 echo "Fisherman has been uninstalled."
-echo
-echo "Fisherman does not remove the system screenpipe binary automatically."
-echo "If you no longer use screenpipe, remove it separately and clean up:"
-echo "  - System Settings > Privacy & Security > Screen Recording"
-echo "  - System Settings > General > Login Items"
 echo

@@ -1,16 +1,13 @@
 import Foundation
 
 final class ProcessManager: @unchecked Sendable {
-    private var screenpipeProcess: Process?
     private var fishermanProcess: Process?
     private let controlPort: String
     private let restartDelay: TimeInterval = 3.0
     private var stopped = false
-    private var cleanupTimer: Timer?
     private var watchdogTimer: Timer?
     private var consecutiveHealthFailures: Int = 0
     private var fishermanStartedAt: Date?
-    private let screenpipeDataDir = NSHomeDirectory() + "/.fisherman/screenpipe-data"
 
     // Watchdog: if /status on the daemon's control port times out this many
     // consecutive times, we assume the asyncio loop is wedged and SIGKILL
@@ -31,76 +28,9 @@ final class ProcessManager: @unchecked Sendable {
 
     func startAll() {
         stopped = false
-        if configuredCaptureBackend() == "screenpipe" {
-            startScreenpipe()
-        } else {
-            NSLog("[Fisherman] capture backend is \(configuredCaptureBackend()); skipping screenpipe launch")
-        }
-        if configuredCaptureBackend() == "screenpipe" {
-            startCleanupTimer()
-        }
         startWatchdog()
-        let launchDelay: TimeInterval = configuredCaptureBackend() == "screenpipe" ? 2.0 : 0.2
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + launchDelay) { [weak self] in
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.startFisherman()
-        }
-    }
-
-    // MARK: - Screenpipe
-
-    private func startScreenpipe() {
-        // Skip if screenpipe is already running (e.g. from terminal)
-        if isScreenpipeAlive() {
-            NSLog("[Fisherman] screenpipe already running on :3030, adopting")
-            return
-        }
-
-        guard let binary = findScreenpipe() else {
-            NSLog("[Fisherman] screenpipe binary not found")
-            return
-        }
-
-        // Keep screenpipe data under our own directory, not ~/.screenpipe
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: screenpipeDataDir) {
-            try? fm.createDirectory(atPath: screenpipeDataDir, withIntermediateDirectories: true)
-        }
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binary)
-        var args: [String] = [
-            "--fps", "1",
-            "--disable-telemetry",
-            "--use-pii-removal",
-            "--data-dir", screenpipeDataDir,
-            "--auto-destruct-pid", "\(ProcessInfo.processInfo.processIdentifier)",
-        ]
-        // Audio is opt-out via FISH_AUDIO_ENABLED=0. Default-on so the
-        // daemon's meeting detector can ship transcripts during calls.
-        if !audioEnabled() {
-            args.append("--disable-audio")
-        }
-        proc.arguments = args
-        proc.environment = buildEnvironment()
-
-        let log = logFileHandle(name: "screenpipe")
-        proc.standardOutput = log
-        proc.standardError = log
-
-        proc.terminationHandler = { [weak self] process in
-            guard let self, !self.stopped else { return }
-            NSLog("[Fisherman] screenpipe exited with code \(process.terminationStatus), restarting in \(self.restartDelay)s")
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + self.restartDelay) { [weak self] in
-                self?.startScreenpipe()
-            }
-        }
-
-        do {
-            try proc.run()
-            screenpipeProcess = proc
-            NSLog("[Fisherman] launched screenpipe pid=\(proc.processIdentifier)")
-        } catch {
-            NSLog("[Fisherman] failed to launch screenpipe: \(error)")
         }
     }
 
@@ -142,11 +72,7 @@ final class ProcessManager: @unchecked Sendable {
         var env = buildEnvironment()
         let backend = configuredCaptureBackend()
         env["FISH_CAPTURE_BACKEND"] = backend
-        if backend == "screenpipe" {
-            env["FISH_SCREENPIPE_POLL_INTERVAL"] = readEnvValue("FISH_SCREENPIPE_POLL_INTERVAL") ?? "3"
-        } else {
-            env["FISHERMAN_FORCE_SCREENCAPTURE"] = readEnvValue("FISHERMAN_FORCE_SCREENCAPTURE") ?? "1"
-        }
+        env["FISHERMAN_FORCE_SCREENCAPTURE"] = readEnvValue("FISHERMAN_FORCE_SCREENCAPTURE") ?? "1"
         proc.environment = env
 
         let log = logFileHandle(name: "fisherman")
@@ -176,7 +102,7 @@ final class ProcessManager: @unchecked Sendable {
         let raw = readEnvValue("FISH_CAPTURE_BACKEND")?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        if let raw, raw == "native" || raw == "swift" || raw == "screenpipe" {
+        if let raw, raw == "native" || raw == "swift" {
             return raw
         }
         return "native"
@@ -199,14 +125,7 @@ final class ProcessManager: @unchecked Sendable {
         NSLog("[Fisherman] repairing capture stack for backend=\(backend)")
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self, !self.stopped else { return }
-            if backend == "screenpipe" {
-                self.startScreenpipe()
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    self?.restartFisherman()
-                }
-            } else {
-                self.restartFisherman()
-            }
+            self.restartFisherman()
         }
     }
 
@@ -322,13 +241,9 @@ final class ProcessManager: @unchecked Sendable {
 
     func stopAll() {
         stopped = true
-        cleanupTimer?.invalidate()
-        cleanupTimer = nil
         watchdogTimer?.invalidate()
         watchdogTimer = nil
-        terminate(screenpipeProcess)
         terminate(fishermanProcess)
-        screenpipeProcess = nil
         fishermanProcess = nil
         fishermanStartedAt = nil
     }
@@ -346,44 +261,4 @@ final class ProcessManager: @unchecked Sendable {
         }
     }
 
-    // MARK: - Screenpipe data cleanup
-
-    /// Screenpipe saves MP4 chunks + SQLite DB even though we only need the
-    /// live OCR API. This timer deletes video files older than 5 minutes and
-    /// caps the SQLite DB by deleting old data periodically.
-    private func startCleanupTimer() {
-        // Run every 60 seconds on main run loop
-        DispatchQueue.main.async { [weak self] in
-            self?.cleanupTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-                self?.cleanupScreenpipeData()
-            }
-        }
-    }
-
-    private func cleanupScreenpipeData() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let dataDir = self.screenpipeDataDir + "/data"
-            let fm = FileManager.default
-
-            guard let files = try? fm.contentsOfDirectory(atPath: dataDir) else { return }
-            let cutoff = Date().addingTimeInterval(-900) // 15 minutes ago
-
-            var deleted = 0
-            for file in files where file.hasSuffix(".mp4") {
-                let path = dataDir + "/" + file
-                guard let attrs = try? fm.attributesOfItem(atPath: path),
-                      let modified = attrs[.modificationDate] as? Date,
-                      modified < cutoff
-                else { continue }
-
-                try? fm.removeItem(atPath: path)
-                deleted += 1
-            }
-
-            if deleted > 0 {
-                NSLog("[Fisherman] cleaned up \(deleted) old screenpipe video files")
-            }
-        }
-    }
 }

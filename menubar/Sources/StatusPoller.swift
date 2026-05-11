@@ -34,7 +34,6 @@ final class StatusPoller: @unchecked Sendable {
     }
 
     private func poll() {
-        pollScreenpipe()
         pollFisherman()
         pollAllActivity()
         if pollCycleCount % 5 == 0 {
@@ -46,24 +45,6 @@ final class StatusPoller: @unchecked Sendable {
         if pollCycleCount % 20 == 0 {
             pollAllHistory()
         }
-    }
-
-    private func pollScreenpipe() {
-        guard let url = URL(string: "http://127.0.0.1:3030/health") else { return }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 2.0
-
-        session.dataTask(with: request) { [weak self] data, response, error in
-            let ok: Bool
-            if let http = response as? HTTPURLResponse {
-                ok = (200..<300).contains(http.statusCode)
-            } else {
-                ok = false
-            }
-            DispatchQueue.main.async {
-                self?.state.screenpipeHealthy = ok
-            }
-        }.resume()
     }
 
     private func pollFisherman() {
@@ -80,7 +61,6 @@ final class StatusPoller: @unchecked Sendable {
             }
             DispatchQueue.main.async {
                 self?.state.update(
-                    screenpipeOK: self?.state.screenpipeHealthy ?? false,
                     fishermanStatus: fishermanStatus
                 )
             }

@@ -107,10 +107,8 @@ class Streamer:
         self._connect_guard = connect_guard
         self._connect_guard_interval = max(30.0, float(connect_guard_interval))
         self._ws: websockets.WebSocketClientProtocol | None = None
-        # Queue items are tuples (payload_json, frame_screenpipe_ts | None).
-        # Carrying the screenpipe timestamp through to the send-success
-        # path lets the cleanup task know which local rows are safely
-        # backed up and can be deleted.
+        # Queue items are tuples (payload_json, frame_ts | None). The timestamp
+        # is retained for upload bookkeeping and external migration tooling.
         self._queue: asyncio.Queue[tuple[str, float | None]] = asyncio.Queue(maxsize=_MAX_QUEUE)
         self._connected_event = asyncio.Event()
         self._connected = False
@@ -218,8 +216,7 @@ class Streamer:
                 log.warning("queue_full_dropping_audio")
             except asyncio.QueueEmpty:
                 pass
-        # Audio messages don't gate cleanup (we cleanup screen frames,
-        # not audio rows in screenpipe), so pass None for the ts.
+        # Audio rows are stored independently, so pass None for the frame ts.
         await self._queue.put((msg, frame_ts))
 
     async def _send_loop(self) -> None:

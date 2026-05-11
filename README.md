@@ -264,7 +264,7 @@ All primary config lives in `~/.fisherman/.env`.
 | `FISH_BACKEND_URL` | empty | Cloud/self-hosted backend base URL |
 | `FISH_STATUS_RELAY_URL` | `https://relay.fisherman.teleport.computer` | E2EE status relay URL |
 | `FISH_PRIVATE_KEY` | auto-generated | Persistent Ed25519 seed |
-| `FISH_CAPTURE_BACKEND` | `native` | `native` or `screenpipe` |
+| `FISH_CAPTURE_BACKEND` | `native` | Native macOS capture. Old non-native values are ignored. |
 | `FISH_CONTROL_PORT` | `7892` | Local daemon control API |
 
 Useful commands:
@@ -323,5 +323,4 @@ cat docs/tee-deployment.md
 
 ## Requirements
 
-macOS 13+ and Python 3.12+. Screenpipe is optional legacy capture for
-users who explicitly set `FISH_CAPTURE_BACKEND=screenpipe`.
+macOS 13+ and Python 3.12+.

@@ -207,9 +207,8 @@ client UX and should not be handed to regular users.
 - Run `fisherman doctor` first.
 - If the daemon is down, open `/Applications/Fisherman.app` or run
   `fisherman repair`.
-- If capture is native and permission is blocked, grant Screen Recording to
-  Fisherman in macOS Settings. If the user explicitly selected Screenpipe,
-  confirm `screenpipe --version` works.
+- If capture permission is blocked, grant Screen Recording to Fisherman in
+  macOS Settings.
 - If Cloud/Self-hosted reads fail, check `fisherman backend status` and whether
   Cloud ingest is approved/enabled.
 - If a deputy command fails on `primary`, the user's laptop relay path may be

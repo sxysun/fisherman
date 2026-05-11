@@ -7,15 +7,11 @@ import os
 import socket
 import sys
 import tempfile
-import threading
+import time
 import types
 import unittest
 import urllib.request
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest import mock
 
 from cryptography.fernet import Fernet
 from PIL import Image, ImageDraw
@@ -63,94 +59,6 @@ def fetch_bytes(method: str, url: str) -> bytes:
     request = urllib.request.Request(url, method=method)
     with _NO_PROXY_OPENER.open(request, timeout=5) as response:
         return response.read()
-
-
-class ScreenpipeState:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._frames: list[dict] = []
-
-    def set_frames(self, frames: list[dict]) -> None:
-        with self._lock:
-            self._frames = list(frames)
-
-    def append_frame(self, frame: dict) -> None:
-        with self._lock:
-            self._frames.append(frame)
-
-    def list_frames(self) -> list[dict]:
-        with self._lock:
-            return list(self._frames)
-
-    def get_frame(self, frame_id: int) -> dict | None:
-        with self._lock:
-            for frame in self._frames:
-                if frame["frame_id"] == frame_id:
-                    return frame
-        return None
-
-
-class FakeScreenpipeHandler(BaseHTTPRequestHandler):
-    state: ScreenpipeState
-
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path.startswith("/search"):
-            payload = {
-                "data": [
-                    {
-                        "type": "OCR",
-                        "content": {
-                            "frame_id": frame["frame_id"],
-                            "timestamp": frame["timestamp_iso"],
-                            "app_name": frame["app_name"],
-                            "window_name": frame["window_name"],
-                            "text": frame["search_text"],
-                        },
-                    }
-                    for frame in self.state.list_frames()
-                ]
-            }
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
-        parts = self.path.split("?")[0].strip("/").split("/")
-        if len(parts) == 3 and parts[0] == "frames" and parts[2] == "context":
-            frame = self.state.get_frame(int(parts[1]))
-            if frame is None:
-                self.send_error(404)
-                return
-            body = json.dumps(
-                {"text": frame["context_text"], "urls": frame["urls"]}
-            ).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
-        if len(parts) == 2 and parts[0] == "frames":
-            frame = self.state.get_frame(int(parts[1]))
-            if frame is None:
-                self.send_error(404)
-                return
-            body = frame["jpeg_data"]
-            self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
-        self.send_error(404)
-
-    def log_message(self, format: str, *args) -> None:  # noqa: A003
-        return None
 
 
 class FakeConn:
@@ -253,7 +161,6 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         for name in [
             "fisherman.capture",
             "fisherman.ocr",
-            "fisherman.screenpipe_capture",
             "fisherman.daemon",
         ]:
             sys.modules.pop(name, None)
@@ -262,40 +169,40 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.frames_dir = os.path.join(self.tempdir.name, "frames")
         os.makedirs(self.frames_dir, exist_ok=True)
 
-        self.screenpipe_port = find_free_port()
         self.ingest_port = find_free_port()
         self.control_port = find_free_port()
         self.auth_token = "integration-token"
         self.encryption_key = Fernet.generate_key().decode()
 
-        self.screenpipe_state = ScreenpipeState()
-        now = datetime.now(timezone.utc)
-        self.screenpipe_state.set_frames(
-            [
-                {
-                    "frame_id": 101,
-                    "timestamp_iso": now.isoformat().replace("+00:00", "Z"),
-                    "app_name": "Safari",
-                    "window_name": "Initial Page",
-                    "search_text": "initial search text",
-                    "context_text": "initial context text",
-                    "urls": ["https://example.com/initial"],
-                    "jpeg_data": make_jpeg_bytes((255, 0, 0)),
-                }
-            ]
-        )
+        self.capture_frames: list[dict] = []
+        self.ocr_by_jpeg: dict[bytes, tuple[str, list[str]]] = {}
 
-        handler = type(
-            "BoundScreenpipeHandler",
-            (FakeScreenpipeHandler,),
-            {"state": self.screenpipe_state},
+        def append_capture_frame(
+            *,
+            app_name: str,
+            window_name: str,
+            color: tuple[int, int, int],
+            ocr_text: str,
+            urls: list[str],
+        ) -> None:
+            jpeg_data = make_jpeg_bytes(color)
+            self.ocr_by_jpeg[jpeg_data] = (ocr_text, urls)
+            self.capture_frames.append(
+                {
+                    "app_name": app_name,
+                    "window_name": window_name,
+                    "jpeg_data": jpeg_data,
+                }
+            )
+
+        self.append_capture_frame = append_capture_frame
+        self.append_capture_frame(
+            app_name="Safari",
+            window_name="Initial Page",
+            color=(255, 0, 0),
+            ocr_text="initial context text",
+            urls=["https://example.com/initial"],
         )
-        self.http_server = ThreadingHTTPServer(("127.0.0.1", self.screenpipe_port), handler)
-        self.http_thread = threading.Thread(
-            target=self.http_server.serve_forever,
-            daemon=True,
-        )
-        self.http_thread.start()
 
         os.environ["INGEST_AUTH_TOKEN"] = self.auth_token
         os.environ["ENCRYPTION_KEY"] = self.encryption_key
@@ -315,14 +222,35 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             max_size=None,
         )
 
+        capture_mod = importlib.import_module("fisherman.capture")
         FishermanConfig = importlib.import_module("fisherman.config").FishermanConfig
-        FishermanDaemon = importlib.import_module("fisherman.daemon").FishermanDaemon
+        daemon_mod = importlib.import_module("fisherman.daemon")
+        FishermanDaemon = daemon_mod.FishermanDaemon
+
+        def fake_capture_screen(max_dimension: int, jpeg_quality: int):
+            frame = self.capture_frames[-1]
+            return capture_mod.ScreenFrame(
+                jpeg_data=frame["jpeg_data"],
+                width=32,
+                height=24,
+                app_name=frame["app_name"],
+                bundle_id="com.example.test",
+                window_title=frame["window_name"],
+                timestamp=time.time(),
+            )
+
+        def fake_ocr_fast(jpeg_data: bytes):
+            return self.ocr_by_jpeg[jpeg_data]
+
+        daemon_mod.capture_screen = fake_capture_screen
+        daemon_mod.ocr_fast = fake_ocr_fast
+
         config = FishermanConfig(
             server_url=f"ws://127.0.0.1:{self.ingest_port}",
             auth_token=self.auth_token,
-            capture_backend="screenpipe",
-            screenpipe_url=f"http://127.0.0.1:{self.screenpipe_port}",
-            screenpipe_poll_interval=0.1,
+            capture_backend="native",
+            capture_interval=0.1,
+            battery_capture_interval=0.1,
             control_port=self.control_port,
             frames_dir=self.frames_dir,
             local_frames_max=10,
@@ -338,9 +266,6 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             pass
         self.ws_server.close()
         await self.ws_server.wait_closed()
-        self.http_server.shutdown()
-        self.http_server.server_close()
-        self.http_thread.join(timeout=2)
         self.tempdir.cleanup()
         for key in ["INGEST_AUTH_TOKEN", "ENCRYPTION_KEY", "FISH_PRIVATE_KEY"]:
             os.environ.pop(key, None)
@@ -360,7 +285,7 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             f"http://127.0.0.1:{self.control_port}/status",
         )
 
-    async def test_screenpipe_backend_to_ingest_and_viewer(self) -> None:
+    async def test_native_capture_to_ingest_and_viewer(self) -> None:
         await self.wait_until(lambda: len(self.fake_db.frame_rows) >= 1)
         self.assertTrue(self.fake_db.schema_initialized)
         self.assertEqual(len(self.fake_r2.uploads), 1)
@@ -372,7 +297,7 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(status["running"])
         self.assertTrue(status["connected"])
-        self.assertEqual(status["capture_backend"], "screenpipe")
+        self.assertEqual(status["capture_backend"], "native")
         self.assertGreaterEqual(status["frames_sent"], 1)
 
         frames = await asyncio.to_thread(
@@ -417,18 +342,12 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
         paused_status = await self.fetch_status()
         self.assertTrue(paused_status["paused"])
 
-        paused_time = datetime.now(timezone.utc)
-        self.screenpipe_state.append_frame(
-            {
-                "frame_id": 102,
-                "timestamp_iso": paused_time.isoformat().replace("+00:00", "Z"),
-                "app_name": "Code",
-                "window_name": "Paused Frame",
-                "search_text": "paused search text",
-                "context_text": "paused context text",
-                "urls": ["https://example.com/paused"],
-                "jpeg_data": make_jpeg_bytes((0, 255, 0)),
-            }
+        self.append_capture_frame(
+            app_name="Code",
+            window_name="Paused Frame",
+            color=(0, 255, 0),
+            ocr_text="paused context text",
+            urls=["https://example.com/paused"],
         )
         await asyncio.sleep(0.5)
         self.assertEqual(len(self.fake_db.frame_rows), 1)
@@ -438,18 +357,12 @@ class EndToEndTests(unittest.IsolatedAsyncioTestCase):
             "POST",
             f"http://127.0.0.1:{self.control_port}/resume",
         )
-        resumed_time = datetime.now(timezone.utc)
-        self.screenpipe_state.append_frame(
-            {
-                "frame_id": 103,
-                "timestamp_iso": resumed_time.isoformat().replace("+00:00", "Z"),
-                "app_name": "Terminal",
-                "window_name": "Resumed Frame",
-                "search_text": "resumed search text",
-                "context_text": "resumed context text",
-                "urls": ["https://example.com/resumed"],
-                "jpeg_data": make_jpeg_bytes((0, 0, 255)),
-            }
+        self.append_capture_frame(
+            app_name="Terminal",
+            window_name="Resumed Frame",
+            color=(0, 0, 255),
+            ocr_text="resumed context text",
+            urls=["https://example.com/resumed"],
         )
 
         await self.wait_until(lambda: len(self.fake_db.frame_rows) >= 2)

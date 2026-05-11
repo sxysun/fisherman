@@ -77,7 +77,6 @@ final class AppState {
     var status: AppStatus = .starting
 
     // Capture
-    var screenpipeHealthy = false
     var captureBackend: String = "native"
 
     // Fisherman daemon
@@ -139,14 +138,7 @@ final class AppState {
         return !ingestExpected
     }
 
-    var screenpipeRequired: Bool {
-        captureBackend == "screenpipe"
-    }
-
     var captureHealthy: Bool {
-        if screenpipeRequired {
-            return screenpipeHealthy
-        }
         if errorDetail == "screen_recording_not_granted" {
             return false
         }
@@ -155,8 +147,6 @@ final class AppState {
 
     var captureServiceName: String {
         switch captureBackend {
-        case "screenpipe":
-            return "screenpipe"
         case "swift":
             return "swift capture"
         case "native":
@@ -167,9 +157,6 @@ final class AppState {
     }
 
     var captureServiceLabel: String {
-        if screenpipeRequired {
-            return screenpipeHealthy ? "healthy" : "down"
-        }
         if errorDetail == "screen_recording_not_granted" {
             return "permission needed"
         }
@@ -272,19 +259,13 @@ final class AppState {
 
     var captureStatusHelpText: String? {
         guard status == .degraded else { return nil }
-        if screenpipeRequired && !screenpipeHealthy {
-            return "Screenpipe is selected for capture but is not reachable."
-        }
-        if !screenpipeRequired && errorDetail == "screen_recording_not_granted" {
+        if errorDetail == "screen_recording_not_granted" {
             return "macOS Screen Recording permission is blocked for native capture."
         }
         return nil
     }
 
     var captureRepairButtonLabel: String {
-        if screenpipeRequired {
-            return "Repair Capture"
-        }
         return "Restart Capture"
     }
 
@@ -330,9 +311,7 @@ final class AppState {
         return "Ingest disconnected"
     }
 
-    func update(screenpipeOK: Bool, fishermanStatus: [String: Any]?) {
-        screenpipeHealthy = screenpipeOK
-
+    func update(fishermanStatus: [String: Any]?) {
         if let s = fishermanStatus {
             fishermanRunning = true
             captureBackend = (

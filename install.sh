@@ -38,21 +38,7 @@ if [ -z "$UV" ]; then
 fi
 echo "Using uv: $UV"
 
-# 4. Screenpipe is optional legacy capture. New installs use native macOS
-# capture by default because Screenpipe can burn CPU and its brew formula is
-# deprecated. Power users can opt in explicitly with FISH_CAPTURE_BACKEND=screenpipe.
-if [ "${FISH_CAPTURE_BACKEND:-native}" = "screenpipe" ]; then
-    if ! command -v screenpipe &>/dev/null; then
-        echo "ERROR: FISH_CAPTURE_BACKEND=screenpipe but screenpipe is not installed."
-        echo "Install it from upstream or unset FISH_CAPTURE_BACKEND for native capture:"
-        echo "  https://docs.screenpi.pe/getting-started"
-        exit 1
-    fi
-    SCREENPIPE_VERSION=$(screenpipe --version 2>&1 | head -1 | tr -d '\n' || echo "?")
-    echo "Using screenpipe: $(command -v screenpipe)  (${SCREENPIPE_VERSION})"
-fi
-
-# 5. Clone repo if missing. For upgrades, hand off to `fisherman upgrade`
+# 4. Clone repo if missing. For upgrades, hand off to `fisherman upgrade`
 #    (which backs up the previous install, preserves user data, and
 #    rolls back automatically if the daemon doesn't come back).
 FISH_DIR="$HOME/.fisherman"
@@ -90,7 +76,7 @@ else
     cd "$FISH_DIR"
 fi
 
-# 6. Set up Python environment
+# 5. Set up Python environment
 echo "Setting up Python environment..."
 UV_SYNC_ARGS=(sync)
 if [ "$(uname -m)" = "arm64" ]; then
@@ -105,7 +91,7 @@ if [ "$(uname -m)" = "arm64" ]; then
 fi
 "$UV" "${UV_SYNC_ARGS[@]}"
 
-# 7. Auto-generate .env if missing. New installs start Local Only: capture
+# 6. Auto-generate .env if missing. New installs start Local Only: capture
 # stays on this Mac, friend status uses the hosted E2EE relay, and users can
 # opt into Fisherman Cloud or Self-hosted later from Settings.
 if [ ! -f "$FISH_DIR/.env" ]; then
@@ -124,14 +110,11 @@ FISH_BACKEND_URL=
 FISH_SERVER_URL=ws://localhost:9999/ingest
 FISH_STATUS_RELAY_URL=https://relay.fisherman.teleport.computer
 
-# === Capture (native macOS backend) ===
+# === Capture ===
 FISH_CAPTURE_BACKEND=native
 FISH_CAPTURE_INTERVAL=5.0
 FISH_BATTERY_CAPTURE_INTERVAL=15.0
 FISH_MAX_DIMENSION=960
-FISH_SCREENPIPE_URL=http://127.0.0.1:3030
-FISH_SCREENPIPE_POLL_INTERVAL=5.0
-FISH_SCREENPIPE_SEARCH_LIMIT=10
 FISH_CONTROL_PORT=7892
 EOF
     chmod 600 "$FISH_DIR/.env"
@@ -142,7 +125,7 @@ else
     echo "Using existing .env"
 fi
 
-# 8. Build menu bar app
+# 7. Build menu bar app
 echo
 echo "Building menu bar app..."
 cd "$FISH_DIR/menubar"
@@ -168,7 +151,7 @@ xattr -cr "$APP" 2>/dev/null || true
 codesign --force --sign "$SIGN_ID" "$APP"
 echo "Signed: ${IDENTITY:-ad-hoc}"
 
-# 9. Deploy to /Applications
+# 8. Deploy to /Applications
 echo "Installing to /Applications..."
 pkill -f FishermanMenu 2>/dev/null || true
 sleep 1
@@ -176,7 +159,7 @@ rm -rf /Applications/Fisherman.app
 cp -R "$APP" /Applications/Fisherman.app
 xattr -cr /Applications/Fisherman.app 2>/dev/null || true
 
-# 10. Create logs directory
+# 9. Create logs directory
 mkdir -p "$FISH_DIR/logs"
 
 echo
