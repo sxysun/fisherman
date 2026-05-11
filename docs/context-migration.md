@@ -66,6 +66,10 @@ fisherman context import fisherman-history.json --home active
 ```
 
 Import adds rows to the destination. It does not delete the source.
+Large screenshot-bearing archives are imported in bounded chunks by the CLI so
+they do not exceed backend request-size limits. If a process is interrupted,
+chunks that already succeeded remain in the destination; rerun the import only
+after deciding whether duplicates are acceptable for that archive.
 
 ## Delete
 

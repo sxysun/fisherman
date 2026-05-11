@@ -1,6 +1,6 @@
 [Unit]
 Description=Fisherman ingest server (WebSocket + activity HTTP)
-Documentation=https://github.com/sxysun/suapp
+Documentation=https://github.com/sxysun/fisherman
 After=network-online.target postgresql.service
 Wants=network-online.target
 StartLimitIntervalSec=60

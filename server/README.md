@@ -60,14 +60,13 @@ Then on the Mac:
 fisherman backend configure self-hosted --url wss://your-host/ingest
 ```
 
-If you have Hermes / OpenCode / another shell-capable agent on the box, give it this repo and tell it to use:
-- `skills/fisherman-cli/`
-- `skills/mind-rolling-summary/`
+If you have Hermes / OpenCode / another shell-capable agent on the box, give it
+this repo and tell it to use `skills/fisherman-owner-operator/SKILL.md`.
 
 Then give it a prompt like:
 
 ```text
-Set up the Fisherman server from this repo. Handle server deployment end-to-end, including environment setup, dependency installation, Postgres, encryption key, allowlisting my Mac signing public key, and starting the ingest service. Use the repo-local skills in `skills/fisherman-cli/` and `skills/mind-rolling-summary/`. When done, tell me the backend URL and how to configure `fisherman backend configure self-hosted`. Do not ask me to copy the server private key to my Mac.
+Set up the Fisherman self-hosted backend from this repo. Use `skills/fisherman-owner-operator/SKILL.md`. Handle environment setup, dependency installation, Postgres, encryption key generation, allowlisting my Mac signing public key, and starting the ingest service. When done, tell me the backend URL, storage backend, process status, log path, and the exact `fisherman backend configure self-hosted --url ...` command. Do not ask me to copy the Mac private key or server private key between machines.
 ```
 
 Agent-friendly shell entrypoint:
@@ -237,11 +236,15 @@ runtime keeps that key in memory; it is not persisted under a static
 Cloud wrapping key. Self-hosted deployments keep the simpler
 server-wrapped key path because the operator is the user.
 
-## CLI — Query & Decrypt
+## Server Debug CLI
 
-`fisherman-cli` is the read path for all captured data. It decrypts OCR text, window titles, URLs, scene descriptions, and screenshots.
+The packaged top-level `fisherman` command is the normal read path for users
+and deputies. `server/cli.py` is only for backend-host debugging when you are
+already logged into the server and need direct database/blob inspection.
 
-**Setup:** `cd server && uv sync` (uses the same `.env` as the ingest server — needs `DATABASE_URL`; self-hosted/server-wrapped reads also need `ENCRYPTION_KEY`).
+**Setup:** `cd server && uv sync` (uses the same `.env` as the ingest server —
+needs `DATABASE_URL`; self-hosted/server-wrapped reads also need
+`ENCRYPTION_KEY`).
 
 ```bash
 # Query recent frames (human-readable)

@@ -1,4 +1,4 @@
-"""fisherman-cli — query and decrypt captured frames."""
+"""Server-local debug CLI for direct backend database/blob inspection."""
 
 import base64
 import datetime
@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 import asyncio
 import asyncpg
@@ -214,7 +215,7 @@ async def _download_image(image_key: str, output: str | None) -> str:
 
 @click.group()
 def cli():
-    """fisherman-cli — query and decrypt captured frames."""
+    """Server-local debug CLI for direct backend database/blob inspection."""
     pass
 
 

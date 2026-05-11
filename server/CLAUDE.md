@@ -2,9 +2,12 @@
 
 Screen capture ingest server + CLI for querying encrypted user activity data.
 
-## fisherman-cli (query user context)
+## Server debug CLI
 
-The CLI decrypts and returns captured screen frames (OCR text, window titles, URLs, screenshots). Run from `server/`:
+The packaged top-level `fisherman` command is the normal user and deputy read
+path. The server-local CLI is only for backend-host debugging when you are
+already logged into the server and need direct database/blob inspection. Run
+from `server/`:
 
 ```bash
 uv run fisherman query -j --limit 20              # recent frames as JSON

@@ -127,6 +127,11 @@ bash bootstrap-agent.sh --start \
   --client-pubkey <mac-signing-public-key>
 ```
 
+If a trusted shell-capable agent is setting this up for you, give it the root
+[`SKILL.md`](SKILL.md) or
+[`skills/fisherman-owner-operator/SKILL.md`](skills/fisherman-owner-operator/SKILL.md).
+Those are the owner/operator instructions for backend setup and migration.
+
 The relay can be hosted separately, but most self-hosted users should
 keep using the official E2EE relay so friend status still interoperates
 with Cloud and Local Only users. The `mirror/` package is an internal
@@ -215,6 +220,9 @@ Use [`skills/fisherman-deputy-agent/SKILL.md`](skills/fisherman-deputy-agent/SKI
 as the companion skill for a scoped remote agent. The root [`SKILL.md`](SKILL.md)
 is for trusted owner/operator work, not for a limited deputy token.
 
+For a trusted agent that is setting up or operating a self-hosted backend, use
+[`skills/fisherman-owner-operator/SKILL.md`](skills/fisherman-owner-operator/SKILL.md).
+
 ## Processors
 
 Processors are the extension point for custom context distillation:
@@ -246,13 +254,11 @@ stored in `~/.fisherman/processor-schedules.json` and the daemon runs due
 jobs automatically; `fisherman processor schedule run-due` exists for
 manual or external cron execution.
 
-The intended "mind" distillation shape is:
-
-- `fisherman-mind-digest`: every 60 minutes, updates the recency layer.
-- `fisherman-distillation-maintenance`: every 6 hours, updates durable
-  tacit/cognition notes.
-- `fisherman-distillation-archive-deepening`: daily, revisits older
-  evidence windows and tightens the audit trail.
+Long-running scoped agents can maintain a durable notes layer using the
+rolling-summary procedure folded into
+[`skills/fisherman-deputy-agent/SKILL.md`](skills/fisherman-deputy-agent/SKILL.md).
+Keep that as a user-approved notes directory, not a separate Fisherman product
+mode.
 
 ## Configuration
 

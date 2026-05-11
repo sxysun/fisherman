@@ -367,11 +367,7 @@ final class ConfigManager {
             appendUniquePort("", to: &ports)
         }
         appendUniquePort(activityPort, to: &ports)
-        // Historical self-hosted installs used either 9998 (repo default) or
-        // 9996 (current EC2/systemd setup). Try both so settings can expose a
-        // single backend URL instead of a second "activity port" knob.
         appendUniquePort("9998", to: &ports)
-        appendUniquePort("9996", to: &ports)
         return ports
     }
 
