@@ -77,6 +77,29 @@ class ConfigIdentityTests(unittest.TestCase):
         rendered = cli._fmt_ts("2026-05-11T17:48:35+00:00")
         self.assertRegex(rendered, r"^2026-05-11 \d\d:\d\d:\d\d$")
 
+    def test_backend_api_url_maps_default_self_hosted_ingest_port_to_http_api(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                url = cli._backend_api_url(
+                    "ws://127.0.0.1:9999/ingest",
+                    "/api/status-llm",
+                    {"limit": 3, "empty": ""},
+                )
+        self.assertEqual(url, "http://127.0.0.1:9998/api/status-llm?limit=3")
+
+    def test_backend_api_url_keeps_reverse_proxy_origin_for_cloud_ingest(self) -> None:
+        url = cli._backend_api_url(
+            "wss://fisherman.teleport.computer/ingest",
+            "/api/status-llm",
+        )
+        self.assertEqual(url, "https://fisherman.teleport.computer/api/status-llm")
+
     def test_backend_mode_local_overrides_server_url(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             home = Path(home_dir)

@@ -115,11 +115,28 @@ def _build_query(**params) -> str:
 
 def _backend_api_url(base_url: str, path: str, params: dict | None = None) -> str:
     parsed = urllib.parse.urlparse((base_url or "").strip())
+    was_ws = parsed.scheme in {"ws", "wss"}
     if parsed.scheme == "ws":
         parsed = parsed._replace(scheme="http")
     elif parsed.scheme == "wss":
         parsed = parsed._replace(scheme="https")
     if parsed.path.endswith("/ingest"):
+        # Repo-native self-hosted deployments expose raw WebSocket ingest on
+        # 9999 and the HTTP API on FISH_ACTIVITY_PORT (9998 by default). Reverse
+        # proxies such as Fisherman Cloud expose both paths on the same public
+        # HTTPS origin, so only remap explicit ingest ports.
+        if was_ws and parsed.port not in (None, 80, 443):
+            api_port = FishermanConfig().activity_port
+            host = parsed.hostname or ""
+            if ":" in host and not host.startswith("["):
+                host = f"[{host}]"
+            userinfo = ""
+            if parsed.username:
+                userinfo = urllib.parse.quote(parsed.username, safe="")
+                if parsed.password:
+                    userinfo += ":" + urllib.parse.quote(parsed.password, safe="")
+                userinfo += "@"
+            parsed = parsed._replace(netloc=f"{userinfo}{host}:{api_port}")
         parsed = parsed._replace(path="")
     base = urllib.parse.urlunparse(parsed._replace(query="", fragment="")).rstrip("/")
     qs = urllib.parse.urlencode({k: v for k, v in (params or {}).items() if v not in (None, "")})
