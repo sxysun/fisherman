@@ -21,7 +21,7 @@ self-hosted server maintenance, and memory-wiki jobs.
 - Stay inside the granted scopes. If a command is denied, ask the user for a new
   Agent Access token with the right scope.
 - Prefer concise summaries over dumping raw OCR or transcripts.
-- Remote screenshot export is not currently implemented for deputy tokens.
+- Raw screenshots are allowed only when the token grants `read:screenshots`.
 
 ## Register
 
@@ -82,6 +82,18 @@ Transcripts:
 fisherman transcripts --since 2h --limit 20 --text
 ```
 
+Latest raw screenshot, when the token grants `read:screenshots`:
+
+```bash
+fisherman screenshot --output /tmp/fisherman-latest.jpg
+```
+
+Screenshot for a specific Cloud/Self-hosted frame id:
+
+```bash
+fisherman screenshot --frame-id 123 --output /tmp/fisherman-frame-123.jpg --source secondary
+```
+
 Friends, when the token grants `read:friends`:
 
 ```bash
@@ -125,17 +137,18 @@ Use laptop relay when the user specifically wants laptop-local context:
 fisherman query --source primary --since 30m --limit 20 --text
 ```
 
-Cloud/Self-hosted direct routing currently supports `status`, `query`, and
-`transcripts`. Commands that need laptop-local state, such as `friend status`,
-`publish-status`, `pause`, and `resume`, use the laptop relay path. If `primary`
-fails, the user's laptop daemon is probably offline or not connected to the
-relay. If `secondary` fails, the Cloud/Self-hosted backend may not be configured,
-approved, reachable, or may not support that command.
+Cloud/Self-hosted direct routing currently supports `status`, `query`,
+`screenshot`, and `transcripts`. Commands that need laptop-local state, such as
+`friend status`, `publish-status`, `pause`, and `resume`, use the laptop relay
+path. If `primary` fails, the user's laptop daemon is probably offline or not
+connected to the relay. If `secondary` fails, the Cloud/Self-hosted backend may
+not be configured, approved, reachable, or may not support that command.
 
 ## Scope Map
 
 - `read:status` allows `fisherman status`.
 - `read:captures` allows `fisherman query`.
+- `read:screenshots` allows `fisherman screenshot`.
 - `read:transcripts` allows `fisherman transcripts`.
 - `read:friends` allows `fisherman friend list` and `fisherman friend status`.
 - `publish:status` allows `fisherman publish-status`.

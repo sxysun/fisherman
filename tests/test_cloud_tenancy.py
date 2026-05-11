@@ -230,6 +230,8 @@ class RecordingConn:
                     "rate_per_hour": row["rate_per_hour"],
                 }
             return None
+        if "FROM frames" in normalized and "image_key IS NOT NULL" in normalized:
+            return self._pool.query_rows[0] if self._pool.query_rows else None
         return self._pool.activity_rows.get(user_pubkey)
 
     async def fetchval(self, sql: str, *args):
@@ -1003,6 +1005,58 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         ))
 
         self.assertEqual(resp.status, 401)
+
+    async def test_backend_deputy_screenshot_requires_scope_and_downloads_image(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        storage = FakeStorage()
+        storage.download_bytes = b"raw-jpeg"
+        crypto = sys.modules["crypto"]
+        pub_a = _pub_hex(SEED_A)
+        pub_b = _pub_hex(SEED_B)
+        db.deputies[(pub_a, pub_b)] = {
+            "user_pubkey": pub_a,
+            "deputy_pubkey": pub_b,
+            "name": "agent",
+            "scopes": ["read:screenshots"],
+            "rate_per_hour": 60,
+            "expires_at": None,
+            "revoked_at": None,
+        }
+        ts = datetime.datetime(2026, 5, 10, 12, 0, tzinfo=datetime.timezone.utc)
+        db.query_rows = [{
+            "id": 123,
+            "user_pubkey": pub_a,
+            "device_pubkey": pub_a,
+            "ts": ts,
+            "app": "Code",
+            "bundle_id": "com.example.Code",
+            "window": crypto.encrypt_text("Screen"),
+            "ocr_text": crypto.encrypt_text("private screenshot"),
+            "urls": crypto.encrypt_json([]),
+            "image_key": "users/a/frame.jpg.enc",
+            "width": 100,
+            "height": 100,
+            "tier_hint": None,
+            "routing": None,
+            "data_key_source": "server_wrapped",
+            "created_at": ts,
+        }]
+
+        resp = await ingest._http_screenshot(FakeRequest(
+            _fishkey(SEED_B),
+            db,
+            headers={"X-Fisherman-User-Pubkey": pub_a},
+            storage=storage,
+        ))
+
+        body = json.loads(resp.text)
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body["frame_id"], 123)
+        self.assertEqual(body["ts_ms"], int(ts.timestamp() * 1000))
+        self.assertEqual(base64.b64decode(body["image_b64"]), b"raw-jpeg")
+        self.assertEqual(body["frame"]["ocr_text"], "private screenshot")
+        self.assertEqual(storage.downloads[0]["key"], "users/a/frame.jpg.enc")
 
     async def test_backend_deputy_rate_limit_returns_429(self):
         ingest = _load_ingest_module()

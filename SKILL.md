@@ -168,6 +168,9 @@ fisherman query --since 30m --limit 20 --text
 # Meeting/audio transcripts
 fisherman transcripts --since 2h --limit 50 --text
 
+# Latest raw screenshot when visual evidence is needed
+fisherman screenshot --output /tmp/fisherman-latest.jpg
+
 # Route explicitly while debugging
 fisherman query --source primary --since 30m --limit 20 --text
 fisherman query --source secondary --since 30m --limit 20 --text
@@ -180,7 +183,7 @@ Output is decrypted at the CLI boundary, so OCR text, window titles, and image b
 1. Start broad: `fisherman query --since 2h --limit 50`
 2. Use `--text` for quick human review or JSON output for agent reasoning
 3. Narrow by app or keyword if the broad pull is noisy
-4. Use `fisherman context export --include-images` only when the user explicitly needs screenshot archives
+4. Use `fisherman screenshot` for a single visual frame; use `fisherman context export --include-images` only when the user explicitly needs screenshot archives
 
 ### Operational nuance — read this before trusting any single frame
 

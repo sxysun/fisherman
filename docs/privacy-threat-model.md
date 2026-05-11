@@ -77,5 +77,6 @@ metadata-analyze messages, but should not reveal status plaintext.
 
 Deputy keys are scoped, rate-limited, and revocable. Backend reads are
 logged as metadata-only audit events. A deputy with `read:captures` can
-read the allowed context from the active backend or from the laptop relay
-path while Local Only is online.
+read metadata/OCR from the active backend or from the laptop relay path
+while Local Only is online. Raw images require the separate
+`read:screenshots` scope.

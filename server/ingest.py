@@ -2155,6 +2155,107 @@ async def _http_query(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _http_screenshot(request: "web.Request") -> "web.Response":
+    """Backend screenshot read path for owners and scoped deputies."""
+    db: asyncpg.Pool = request.app["db"]
+    storage = request.app["storage"]
+    try:
+        ctx = await _require_scoped_context(request, db, "read:screenshots")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    clauses = [_tenant_predicate(), "image_key IS NOT NULL"]
+    params: list[object] = [ctx.user_hex]
+    idx = 2
+    frame_id = (
+        request.query.get("frame_id")
+        or request.query.get("id")
+        or ""
+    ).strip()
+    ts_ms_raw = (request.query.get("ts_ms") or "").strip()
+    if frame_id:
+        try:
+            frame_id_int = int(frame_id)
+        except ValueError:
+            return web.json_response({"error": "invalid frame_id"}, status=400)
+        clauses.append(f"id = ${idx}")
+        params.append(frame_id_int)
+        idx += 1
+    elif ts_ms_raw:
+        try:
+            ts = datetime.datetime.fromtimestamp(
+                int(ts_ms_raw) / 1000.0,
+                datetime.timezone.utc,
+            )
+        except ValueError:
+            return web.json_response({"error": "invalid ts_ms"}, status=400)
+        clauses.append(f"ts >= ${idx}")
+        params.append(ts - datetime.timedelta(milliseconds=2))
+        idx += 1
+        clauses.append(f"ts <= ${idx}")
+        params.append(ts + datetime.timedelta(milliseconds=2))
+        idx += 1
+
+    loop = asyncio.get_running_loop()
+    try:
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="read_screenshot",
+            scope="read:screenshots",
+            metadata={"by_frame_id": bool(frame_id), "by_ts_ms": bool(ts_ms_raw)},
+        )
+        async with db.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT id, user_pubkey, device_pubkey, ts, app, bundle_id,
+                       "window", ocr_text, urls, image_key, width, height,
+                       tier_hint, routing, data_key_source, created_at
+                FROM frames
+                WHERE {" AND ".join(clauses)}
+                ORDER BY ts DESC
+                LIMIT 1
+                """,
+                *params,
+            )
+        if not row:
+            return web.json_response({"error": "no_screenshot_available"}, status=404)
+
+        data_key = await _tenant_data_key(db, ctx.user_hex, _row_get(row, "data_key_source"))
+        item = _decrypted_frame_row(row, data_key)
+        image_key = _row_get(row, "image_key")
+        jpeg = await loop.run_in_executor(
+            _pool,
+            partial(storage.download, image_key, data_key),
+        )
+        ts_seconds = _row_ts_seconds(_row_get(row, "ts"))
+        item["bundle"] = item.get("bundle_id")
+        item["w"] = item.get("width")
+        item["h"] = item.get("height")
+        item["has_image"] = True
+        return web.json_response({
+            "ts_ms": int(ts_seconds * 1000),
+            "frame_id": _row_get(row, "id"),
+            "mime": "image/jpeg",
+            "bytes": len(jpeg),
+            "image_b64": base64.b64encode(jpeg).decode("ascii"),
+            "frame": item,
+        })
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except FileNotFoundError:
+        return web.json_response({"error": "screenshot_blob_missing"}, status=404)
+    except Exception:
+        log.error("http_screenshot_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
 async def _http_transcripts(request: "web.Request") -> "web.Response":
     db: asyncpg.Pool = request.app["db"]
     try:
@@ -2976,6 +3077,7 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/api/current_activity", _http_current_activity)
         app.router.add_get("/api/activity_history", _http_activity_history)
         app.router.add_get("/api/query", _http_query)
+        app.router.add_get("/api/screenshot", _http_screenshot)
         app.router.add_get("/api/transcripts", _http_transcripts)
         app.router.add_get("/api/context/export", _http_context_export)
         app.router.add_post("/api/context/import", _http_context_import)

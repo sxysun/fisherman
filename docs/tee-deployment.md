@@ -159,9 +159,10 @@ files. The intended self-serve flow:
    undecryptable until an approved client reconnects and re-grants the
    tenant key. This is the privacy boundary that blocks an unapproved
    malicious deploy from reading old context.
-7. Agent Access uses the backend `/api/query`, `/api/transcripts`, and
-   `/api/current_activity` routes when Cloud is active. Local Only still
-   falls back to laptop relay RPC while the Mac is online.
+7. Agent Access uses the backend `/api/query`, `/api/screenshot`,
+   `/api/transcripts`, and `/api/current_activity` routes when Cloud is
+   active. Local Only still falls back to laptop relay RPC while the Mac is
+   online.
 
 The key derivation path is stable for a given `app_id`, so v1 envelopes
 survive compose rotations without a rewrap dance.

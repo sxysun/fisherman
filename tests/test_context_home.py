@@ -1,3 +1,4 @@
+import base64
 import json
 import tempfile
 import unittest
@@ -96,6 +97,51 @@ class ContextHomeTests(unittest.TestCase):
             self.assertEqual(rows[0]["ocr_text"], "context export test")
             transcripts = AudioStore(str(root / "new-audio"), 30).query(limit=10)
             self.assertEqual(transcripts[0]["transcript"], "meeting transcript")
+
+    def test_daemon_screenshot_rpc_returns_latest_image(self):
+        from fisherman.daemon import FishermanDaemon
+
+        with tempfile.TemporaryDirectory() as td:
+            frames_dir = Path(td) / "frames"
+            frame_store = FrameStore(str(frames_dir), 100)
+            frame_store.save(
+                ScreenFrame(
+                    jpeg_data=b"older-jpeg",
+                    width=640,
+                    height=480,
+                    app_name="Code",
+                    bundle_id="com.microsoft.VSCode",
+                    window_title="older",
+                    timestamp=1_710_000_000.0,
+                ),
+                "older",
+                [],
+            )
+            frame_store.save(
+                ScreenFrame(
+                    jpeg_data=b"newer-jpeg",
+                    width=640,
+                    height=480,
+                    app_name="Chrome",
+                    bundle_id="com.google.Chrome",
+                    window_title="newer",
+                    timestamp=1_710_000_001.0,
+                ),
+                "newer",
+                [],
+            )
+
+            fake = type("FakeDaemon", (), {"_frame_store": frame_store})()
+            result = FishermanDaemon._dispatch_screenshot(fake, {})
+
+            self.assertTrue(result["ok"])
+            payload = result["data"]
+            self.assertEqual(payload["ts_ms"], 1_710_000_001_000)
+            self.assertEqual(
+                base64.b64decode(payload["image_b64"]),
+                b"newer-jpeg",
+            )
+            self.assertEqual(payload["frame"]["window"], "newer")
 
     def test_backend_image_export_pages_and_merges_large_archives(self):
         cfg = FishermanConfig(

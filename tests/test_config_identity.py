@@ -357,7 +357,7 @@ class ConfigIdentityTests(unittest.TestCase):
         self.assertEqual(deputy._command_to_scope("friend-status"), "read:friends")
         self.assertEqual(deputy._command_to_scope("publish-status"), "publish:status")
         self.assertEqual(deputy._command_to_scope("pause"), "control:pause")
-        self.assertIsNone(deputy._command_to_scope("screenshot"))
+        self.assertEqual(deputy._command_to_scope("screenshot"), "read:screenshots")
 
     def test_remote_secondary_uses_direct_backend_when_backend_url_present(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:

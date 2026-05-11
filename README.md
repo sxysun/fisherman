@@ -189,7 +189,7 @@ local-dev users can override it with `FISH_STATUS_RELAY_URL`.
 Remote agents use scoped, expiring access keys:
 
 ```bash
-fisherman deputy new --name hermes --scopes read:captures,read:transcripts --expires 30d
+fisherman deputy new --name hermes --scopes read:captures,read:screenshots,read:transcripts --expires 30d
 fisherman deputy list --text
 fisherman deputy revoke <name-or-pubkey>
 ```
@@ -207,7 +207,7 @@ fisherman deputy register 'fishdep:...'
 
 After registration, the agent can use ordinary read commands such as
 `fisherman status --text`, `fisherman query --since 30m --text`, and
-`fisherman transcripts --since 2h --text`; the CLI routes through Cloud,
+`fisherman screenshot --output /tmp/frame.jpg`; the CLI routes through Cloud,
 Self-hosted, or the laptop relay based on the token and selected source.
 
 Use [`skills/fisherman-deputy-agent/SKILL.md`](skills/fisherman-deputy-agent/SKILL.md)

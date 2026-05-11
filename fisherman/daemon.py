@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import os
 import socket
@@ -723,6 +724,13 @@ class FishermanDaemon:
             )
             return result
 
+        if cmd == "screenshot":
+            result = await loop.run_in_executor(
+                self._pool,
+                lambda: self._dispatch_screenshot(args),
+            )
+            return result
+
         if cmd == "pause":
             self._privacy.pause()
             return {"ok": True}
@@ -732,6 +740,55 @@ class FishermanDaemon:
             return {"ok": True}
 
         return {"error": f"unknown_command:{cmd}"}
+
+    def _dispatch_screenshot(self, args: dict) -> dict:
+        ts_ms_arg = args.get("ts_ms")
+        frame_meta: dict | None = None
+
+        if ts_ms_arg is None:
+            limit = max(1, min(int(args.get("limit") or 200), 1000))
+            for row in self._frame_store.query(limit=limit):
+                if row.get("has_image") and row.get("ts_ms") is not None:
+                    frame_meta = row
+                    ts_ms_arg = row["ts_ms"]
+                    break
+            if ts_ms_arg is None:
+                return {"error": "no_screenshot_available"}
+
+        try:
+            ts_ms = int(ts_ms_arg)
+        except (TypeError, ValueError):
+            return {"error": "invalid_ts_ms"}
+
+        img_path = self._frame_store.get_image_path(ts_ms)
+        if not img_path:
+            return {"error": f"image_not_found:{ts_ms}"}
+
+        if frame_meta is None:
+            for row in self._frame_store.query(limit=1000):
+                try:
+                    if int(row.get("ts_ms") or 0) == ts_ms:
+                        frame_meta = row
+                        break
+                except (TypeError, ValueError):
+                    continue
+
+        try:
+            with open(img_path, "rb") as f:
+                data = f.read()
+        except OSError as e:
+            return {"error": f"image_read_failed:{e}"}
+
+        return {
+            "ok": True,
+            "data": {
+                "ts_ms": ts_ms,
+                "mime": "image/jpeg",
+                "bytes": len(data),
+                "image_b64": base64.b64encode(data).decode("ascii"),
+                "frame": frame_meta,
+            },
+        }
 
     def _dispatch_friend_status(self, args: dict) -> dict:
         from fisherman.friends import find_friend, list_friends

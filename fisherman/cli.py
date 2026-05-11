@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import datetime
 import json
 import os
@@ -289,6 +290,105 @@ def transcripts(since, until, meeting_app, search, limit, as_text, port, source_
         app_n = r.get("meeting_app") or "?"
         side = "→" if r.get("is_input_device") else "←"
         click.echo(f"[{ts}] {app_n} {side} {r.get('transcript', '')}")
+
+
+@main.command(name="screenshot")
+@click.argument("ts_ms", required=False, type=int)
+@click.option("--frame-id", default=None, help="Cloud/Self-hosted frame id to fetch.")
+@click.option("--output", "-o", default=None, help="Write JPEG to this path.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON with base64 image.")
+@click.option("--port", default=7892, help="Control server port")
+@click.option(
+    "--source",
+    "source_pref",
+    type=click.Choice(["auto", "primary", "secondary"]),
+    default=None,
+    help="Force routing through laptop (primary) or backend direct path (secondary)",
+)
+def screenshot(
+    ts_ms: int | None,
+    frame_id: str | None,
+    output: str | None,
+    as_json: bool,
+    port: int,
+    source_pref: str | None,
+):
+    """Fetch a raw screenshot JPEG. Defaults to the newest frame with an image."""
+    args = {"ts_ms": ts_ms, "frame_id": frame_id}
+    if _is_remote_mode():
+        payload = _remote_call("screenshot", args, source_pref=source_pref)
+    else:
+        payload = _local_screenshot_payload(ts_ms, port)
+    _emit_screenshot_payload(payload or {}, output, as_json)
+
+
+def _local_screenshot_payload(ts_ms: int | None, port: int) -> dict:
+    frame_meta = None
+    target_ts = ts_ms
+    if target_ts is None:
+        rows = _control_request("GET", "/frames?count=200", port, timeout=10.0)
+        for row in rows:
+            if row.get("has_image") and row.get("ts_ms") is not None:
+                frame_meta = row
+                target_ts = int(row["ts_ms"])
+                break
+        if target_ts is None:
+            click.echo("no screenshot available", err=True)
+            sys.exit(1)
+
+    url = f"http://127.0.0.1:{port}/frames/{target_ts}/image"
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            data = resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            click.echo(f"screenshot not found: {target_ts}", err=True)
+        else:
+            click.echo(f"could not fetch screenshot: HTTP {e.code}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"could not fetch screenshot: {e}", err=True)
+        sys.exit(1)
+
+    return {
+        "ts_ms": target_ts,
+        "mime": "image/jpeg",
+        "bytes": len(data),
+        "image_b64": base64.b64encode(data).decode("ascii"),
+        "frame": frame_meta,
+    }
+
+
+def _emit_screenshot_payload(payload: dict, output: str | None, as_json: bool) -> None:
+    if payload.get("error"):
+        click.echo(f"daemon error: {payload['error']}", err=True)
+        sys.exit(1)
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    image_b64 = payload.get("image_b64")
+    if not isinstance(image_b64, str) or not image_b64:
+        click.echo("screenshot response did not include image data", err=True)
+        sys.exit(1)
+    try:
+        data = base64.b64decode(image_b64, validate=True)
+    except Exception as e:
+        click.echo(f"screenshot response included invalid image data: {e}", err=True)
+        sys.exit(1)
+
+    from pathlib import Path
+
+    ts_ms = payload.get("ts_ms") or "latest"
+    out = Path(output or f"fisherman-screenshot-{ts_ms}.jpg").expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    try:
+        os.chmod(out, 0o600)
+    except OSError:
+        pass
+    click.echo(f"Wrote screenshot to {out}")
 
 
 def _live_tls_fingerprint(url: str, timeout: float, *, quiet: bool = False) -> str | None:
@@ -2804,7 +2904,7 @@ def _is_remote_mode() -> bool:
     return _deputy_config_path() is not None
 
 
-_DIRECT_BACKEND_COMMANDS = {"status", "query", "transcripts"}
+_DIRECT_BACKEND_COMMANDS = {"status", "query", "transcripts", "screenshot"}
 
 
 def _remote_call(command: str, args: dict, source_pref: str | None = None) -> dict:
@@ -2936,6 +3036,12 @@ def _direct_backend_call(
     elif command == "status":
         path = "/api/current_activity"
         params = {}
+    elif command == "screenshot":
+        path = "/api/screenshot"
+        params = {
+            "ts_ms": args.get("ts_ms"),
+            "frame_id": args.get("frame_id"),
+        }
     else:
         return None
 
@@ -3055,6 +3161,7 @@ when needed:
 ```bash
 fisherman status --text
 fisherman query --since 30m --limit 20 --text
+fisherman screenshot --output /tmp/fisherman-latest.jpg  # requires read:screenshots
 fisherman transcripts --since 2h --limit 20 --text
 fisherman friend list --text
 fisherman friend status --text
@@ -3066,11 +3173,12 @@ Routing controls:
 fisherman query --source auto --since 30m --limit 20 --text
 fisherman query --source secondary --since 30m --limit 20 --text  # Cloud/Self-hosted
 fisherman query --source primary --since 30m --limit 20 --text    # laptop relay
+fisherman screenshot --source auto --output /tmp/fisherman-latest.jpg
 ```
 
-Cloud/Self-hosted direct routing currently supports status, query, and
-transcripts. Friend status, publish-status, pause, and resume use the laptop
-relay path, so the user's laptop daemon must be online for those commands.
+Cloud/Self-hosted direct routing currently supports status, query, screenshots,
+and transcripts. Friend status, publish-status, pause, and resume use the
+laptop relay path, so the user's laptop daemon must be online for those commands.
 
 Allowed scopes: {scope_text}
 Relay URL: {relay_url}

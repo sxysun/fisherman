@@ -19,6 +19,7 @@ struct DeputiesTab: View {
 
     let allScopes = [
         "read:captures",
+        "read:screenshots",
         "read:transcripts",
         "read:status",
         "read:friends",
@@ -573,9 +574,10 @@ struct ContextDataTab: View {
 
             Text("Import")
                 .font(.system(size: 12, weight: .semibold))
-            Text("Import writes a Fisherman history JSON file into the active home. It does not delete the source home.")
+            Text("Import copies a Fisherman history JSON file into the active home. Screenshots are restored only if the file was exported with Include screenshots; the source home is not deleted.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Button("Import History File") { importArchive() }
                 .buttonStyle(.bordered)
                 .disabled(busy)

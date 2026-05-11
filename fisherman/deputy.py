@@ -131,6 +131,7 @@ def _command_to_scope(command: str) -> str | None:
         "status":      "read:status",
         "query":       "read:captures",
         "transcripts": "read:transcripts",
+        "screenshot":  "read:screenshots",
         "friends":     "read:friends",
         "friend-status": "read:friends",
         "publish-status": "publish:status",

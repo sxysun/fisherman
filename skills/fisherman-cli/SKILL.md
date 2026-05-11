@@ -119,6 +119,12 @@ Include screenshots when the user explicitly wants raw images:
 fisherman context export --home active --output fisherman-history-with-images.json --since 7d --include-images
 ```
 
+Fetch the latest raw screenshot without exporting history:
+
+```bash
+fisherman screenshot --output fisherman-latest.jpg
+```
+
 Import into the active home:
 
 ```bash

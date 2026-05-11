@@ -195,6 +195,7 @@ Cloud and Self-hosted agents can query while the laptop is offline.
 | `GET` | `/api/current_activity` | Owner, tenant, or `read:status` deputy | Returns latest activity (emoji, category, status) |
 | `GET` | `/api/activity_history` | Owner, tenant, or `read:status` deputy | Returns recent activity history |
 | `GET` | `/api/query` | Owner, tenant, or `read:captures` deputy | Returns decrypted frame metadata/OCR/window/URLs for one tenant |
+| `GET` | `/api/screenshot` | Owner, tenant, or `read:screenshots` deputy | Returns the newest or requested raw screenshot JPEG as base64 |
 | `GET` | `/api/transcripts` | Owner, tenant, or `read:transcripts` deputy | Returns decrypted meeting transcripts for one tenant |
 | `GET` | `/api/context/export` | Owner or tenant | Returns a context migration archive |
 | `POST` | `/api/context/import` | Owner or tenant | Imports a context migration archive |
