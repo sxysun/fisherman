@@ -60,7 +60,7 @@ elif [ -z "$ENCRYPTION_KEY" ]; then
     ENCRYPTION_KEY=$(python3 -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())")
 fi
 
-# --- Ed25519 key pair (for FishKey auth + friend codes) ---
+# --- Ed25519 key pair (server identity for single-tenant/local auth) ---
 FISH_PRIVATE_KEY=$($PY -c "
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization

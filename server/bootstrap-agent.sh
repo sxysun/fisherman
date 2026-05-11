@@ -125,18 +125,6 @@ else
   echo "CLIENT_ENROLLMENT=server-owner-key-only"
 fi
 
-# Derive public key from private key (if available)
-FISH_PRIVATE_KEY=$(grep '^FISH_PRIVATE_KEY=' .env 2>/dev/null | head -1 | cut -d= -f2-)
-if [ -n "$FISH_PRIVATE_KEY" ]; then
-    FISH_PUBLIC_KEY=$("${PY_RUN[@]}" -c "
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives import serialization
-k = Ed25519PrivateKey.from_private_bytes(bytes.fromhex('${FISH_PRIVATE_KEY}'))
-print(k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex())
-" 2>/dev/null || echo "")
-    echo "FISH_PUBLIC_KEY=${FISH_PUBLIC_KEY}"
-fi
-
 echo ""
 echo "=== Client setup ==="
 echo "On the Mac, configure:"
