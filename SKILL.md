@@ -1,13 +1,18 @@
 ---
 name: fisherman
-description: One-stop guide for any agent operating Fisherman — configures backend mode, can set up a self-hosted ingest server, queries captured context, and maintains a durable Obsidian-native memory wiki.
+description: Trusted owner/operator guide for Fisherman — configures backend mode, can set up a self-hosted ingest server, queries captured context, and maintains a durable Obsidian-native memory wiki.
 version: 1.0.0
 license: MIT
 ---
 
-# Fisherman — Agent Skill
+# Fisherman — Trusted Owner/Operator Skill
 
-You are an AI agent. The user wants you to operate Fisherman for them. Read this whole file, then do whatever phase the user is asking about.
+You are an AI agent trusted to operate Fisherman for the owner. Read this whole file, then do whatever phase the user is asking about.
+
+This is not the scoped remote-deputy skill. If the user gave you a `fishdep:`
+Agent Access token, use
+[`skills/fisherman-deputy-agent/SKILL.md`](skills/fisherman-deputy-agent/SKILL.md)
+instead.
 
 There are four phases. They are independent — you do not have to do all of them in one session.
 

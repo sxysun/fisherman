@@ -2917,6 +2917,57 @@ def _revoke_deputy_from_backend(pubkey_hex: str) -> str | None:
         return f"backend revoke failed: {e}"
 
 
+def _deputy_agent_setup_instructions(
+    *,
+    token: str,
+    name: str,
+    scopes: list[str],
+    backend_url: str | None,
+    relay_url: str,
+) -> str:
+    backend_note = (
+        f"Cloud/Self-hosted backend configured: {backend_url}"
+        if backend_url
+        else "No Cloud/Self-hosted backend in this token; relay-to-laptop requires the user's laptop daemon online."
+    )
+    scope_text = ", ".join(scopes)
+    return f"""You have been granted scoped Fisherman Agent Access as `{name}`.
+
+Treat the `fishdep:` setup token as a secret. Do not commit it, paste it into logs,
+or send it to any service other than the Fisherman CLI on the agent host.
+
+Register this agent host once:
+
+```bash
+fisherman deputy register '{token}'
+```
+
+After registration, use the normal Fisherman read commands. The CLI will route
+through the configured backend when available, or through the laptop relay path
+when needed:
+
+```bash
+fisherman status --text
+fisherman query --since 30m --limit 20 --text
+fisherman transcripts --since 2h --limit 20 --text
+```
+
+Routing controls:
+
+```bash
+fisherman query --source auto --since 30m --limit 20 --text
+fisherman query --source secondary --since 30m --limit 20 --text  # Cloud/Self-hosted
+fisherman query --source primary --since 30m --limit 20 --text    # laptop relay
+```
+
+Allowed scopes: {scope_text}
+Relay URL: {relay_url}
+{backend_note}
+
+If a command is denied, do not work around it. Ask the user to mint a new Agent
+Access token with the required scope."""
+
+
 @main.group(name="deputy")
 def deputy_group():
     """Authorize remote agents to query your context."""
@@ -2963,6 +3014,7 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
         expires_at=expires_at,
     )
 
+    backend_url = cfg.backend_url if cfg.backend_mode in {"cloud", "self_hosted"} else None
     token = _d.encode_setup_token({
         "u":  pub.hex(),
         "ux": user_x_pub.hex(),
@@ -2972,7 +3024,7 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
         "s":  ",".join(scope_list),
         "rate": int(rate),
         "e":  expires_at,
-        "b":  cfg.backend_url if cfg.backend_mode in {"cloud", "self_hosted"} else None,
+        "b":  backend_url,
     })
     sync_error = _sync_deputy_to_backend(record)
     click.echo(f"deputy authorized: {record['name']} ({record['pubkey'][:12]}…)")
@@ -2983,8 +3035,15 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
     click.echo("")
     click.echo(token)
     click.echo("")
-    click.echo("On the agent host run:")
-    click.echo(f"  fisherman deputy register '{token[:32]}…'")
+    click.echo("Agent setup instructions (copy/paste to the agent):")
+    click.echo("")
+    click.echo(_deputy_agent_setup_instructions(
+        token=token,
+        name=name,
+        scopes=scope_list,
+        backend_url=backend_url,
+        relay_url=_ledger_url(),
+    ))
 
 
 @deputy_group.command(name="register")

@@ -197,6 +197,23 @@ fisherman deputy revoke <name-or-pubkey>
 The product UX calls this **Agent Access**. The CLI command is still
 `deputy` because the protocol object is a scoped deputy key.
 
+When you create an Agent Access key, Fisherman prints a paste-ready setup block
+for the remote agent. That block includes the full `fishdep:` token and the
+registration command:
+
+```bash
+fisherman deputy register 'fishdep:...'
+```
+
+After registration, the agent can use ordinary read commands such as
+`fisherman status --text`, `fisherman query --since 30m --text`, and
+`fisherman transcripts --since 2h --text`; the CLI routes through Cloud,
+Self-hosted, or the laptop relay based on the token and selected source.
+
+Use [`skills/fisherman-deputy-agent/SKILL.md`](skills/fisherman-deputy-agent/SKILL.md)
+as the companion skill for a scoped remote agent. The root [`SKILL.md`](SKILL.md)
+is for trusted owner/operator work, not for a limited deputy token.
+
 ## Processors
 
 Processors are the extension point for custom context distillation:

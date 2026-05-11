@@ -13,6 +13,7 @@ struct DeputiesTab: View {
     @State private var newDeputyRate = "60"
     @State private var newDeputyExpires = "30d"
     @State private var lastToken: String?
+    @State private var lastAgentInstructions: String?
     @State private var error: String?
     @State private var revokingPubkey: String?
 
@@ -55,7 +56,7 @@ struct DeputiesTab: View {
 
             if let token = lastToken {
                 Divider()
-                Text("Setup token (paste on agent host):")
+                Text("Setup token")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -64,9 +65,32 @@ struct DeputiesTab: View {
                         .background(Color.secondary.opacity(0.08))
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
-                Button("Copy token") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(token, forType: .string)
+                HStack {
+                    Button("Copy token") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(token, forType: .string)
+                    }
+                    if let instructions = lastAgentInstructions {
+                        Button("Copy agent instructions") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(instructions, forType: .string)
+                        }
+                    }
+                }
+                if let instructions = lastAgentInstructions {
+                    Text("Agent instructions")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(instructions)
+                            .font(.system(size: 10, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(height: 130)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
             }
 
@@ -152,9 +176,11 @@ struct DeputiesTab: View {
         guard !newDeputyName.isEmpty, !newDeputyScopes.isEmpty else {
             error = "name and at least one scope required"; return
         }
+        let requestedName = newDeputyName
+        let requestedScopes = newDeputyScopes.sorted()
         var args = ["deputy", "new",
-                    "--name", newDeputyName,
-                    "--scopes", newDeputyScopes.sorted().joined(separator: ","),
+                    "--name", requestedName,
+                    "--scopes", requestedScopes.joined(separator: ","),
                     "--rate", newDeputyRate]
         if !newDeputyExpires.isEmpty {
             args += ["--expires", newDeputyExpires]
@@ -169,6 +195,11 @@ struct DeputiesTab: View {
             let t = line.trimmingCharacters(in: .whitespaces)
             if t.hasPrefix("fishdep:") {
                 lastToken = t
+                lastAgentInstructions = Self.agentInstructions(
+                    token: t,
+                    name: requestedName,
+                    scopes: requestedScopes
+                )
                 break
             }
         }
@@ -182,6 +213,32 @@ struct DeputiesTab: View {
         let r = CliBridge.run(["deputy", "revoke", pubkey])
         if r.exitCode == 0 { reload() }
         else { error = r.stderr.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    private static func agentInstructions(token: String, name: String, scopes: [String]) -> String {
+        """
+        You have been granted scoped Fisherman Agent Access as `\(name)`.
+
+        Treat the `fishdep:` setup token as a secret. Do not commit it, paste it into logs, or send it to any service other than the Fisherman CLI on the agent host.
+
+        Register this agent host once:
+
+        ```bash
+        fisherman deputy register '\(token)'
+        ```
+
+        Then query through the registered deputy config:
+
+        ```bash
+        fisherman status --text
+        fisherman query --since 30m --limit 20 --text
+        fisherman transcripts --since 2h --limit 20 --text
+        ```
+
+        Use `--source secondary` for Cloud/Self-hosted, `--source primary` for laptop relay, and `--source auto` by default.
+
+        Allowed scopes: \(scopes.joined(separator: ", "))
+        """
     }
 }
 
