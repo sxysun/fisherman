@@ -192,6 +192,22 @@ final class ProcessManager: @unchecked Sendable {
         }
     }
 
+    func repairCaptureStack() {
+        let backend = configuredCaptureBackend()
+        NSLog("[Fisherman] repairing capture stack for backend=\(backend)")
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self, !self.stopped else { return }
+            if backend == "screenpipe" {
+                self.startScreenpipe()
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                    self?.restartFisherman()
+                }
+            } else {
+                self.restartFisherman()
+            }
+        }
+    }
+
     // MARK: - Watchdog (hang detection via /status)
 
     private func startWatchdog() {

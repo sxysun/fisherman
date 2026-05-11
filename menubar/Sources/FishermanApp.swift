@@ -54,6 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                         NSWorkspace.shared.open(url)
                     }
                 },
+                onRepairCapture: {
+                    pm.repairCaptureStack()
+                },
                 onSettings: { [weak self] in
                     self?.openSettings()
                 },

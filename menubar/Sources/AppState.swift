@@ -78,6 +78,7 @@ final class AppState {
 
     // Screenpipe
     var screenpipeHealthy = false
+    var captureBackend: String = "screenpipe"
 
     // Fisherman daemon
     var fishermanRunning = false
@@ -136,6 +137,51 @@ final class AppState {
             return fishermanConnected
         }
         return !ingestExpected
+    }
+
+    var screenpipeRequired: Bool {
+        captureBackend == "screenpipe"
+    }
+
+    var captureHealthy: Bool {
+        if screenpipeRequired {
+            return screenpipeHealthy
+        }
+        if errorDetail == "screen_recording_not_granted" {
+            return false
+        }
+        return fishermanRunning
+    }
+
+    var captureServiceName: String {
+        switch captureBackend {
+        case "screenpipe":
+            return "screenpipe"
+        case "swift":
+            return "swift capture"
+        case "native":
+            return "native capture"
+        default:
+            return "\(captureBackend) capture"
+        }
+    }
+
+    var captureServiceLabel: String {
+        if screenpipeRequired {
+            return screenpipeHealthy ? "healthy" : "down"
+        }
+        if errorDetail == "screen_recording_not_granted" {
+            return "permission needed"
+        }
+        return fishermanRunning ? "active" : "waiting"
+    }
+
+    var captureServiceIcon: String {
+        captureHealthy ? "checkmark.circle.fill" : "xmark.circle.fill"
+    }
+
+    var captureServiceColor: NSColor {
+        captureHealthy ? .systemGreen : .systemRed
     }
 
     var fishermanServiceLabel: String {
@@ -224,6 +270,24 @@ final class AppState {
         return nil
     }
 
+    var captureStatusHelpText: String? {
+        guard status == .degraded else { return nil }
+        if screenpipeRequired && !screenpipeHealthy {
+            return "Screenpipe is selected for capture but is not reachable."
+        }
+        if !screenpipeRequired && errorDetail == "screen_recording_not_granted" {
+            return "macOS Screen Recording permission is blocked for native capture."
+        }
+        return nil
+    }
+
+    var captureRepairButtonLabel: String {
+        if screenpipeRequired {
+            return "Repair Capture"
+        }
+        return "Restart Capture"
+    }
+
     private var blockedServiceLabel: String {
         switch backendBlockCode {
         case "cloud_approval_required", "cloud_attestation_failed", "cloud_attestation_unreachable":
@@ -271,6 +335,9 @@ final class AppState {
 
         if let s = fishermanStatus {
             fishermanRunning = true
+            captureBackend = (
+                s["capture_backend"] as? String ?? captureBackend
+            ).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             backendMode = s["backend_mode"] as? String ?? backendMode
             streamingEnabled = s["streaming_enabled"] as? Bool ?? true
             fishermanConnected = s["connected"] as? Bool ?? false
@@ -300,10 +367,10 @@ final class AppState {
         // Derive overall status
         if isPaused {
             status = .paused
-        } else if screenpipeOK && fishermanHealthy {
+        } else if captureHealthy && fishermanHealthy {
             status = .running
             errorDetail = nil
-        } else if screenpipeOK || fishermanRunning {
+        } else if captureHealthy || fishermanRunning {
             status = .degraded
         } else if status != .starting {
             status = .error

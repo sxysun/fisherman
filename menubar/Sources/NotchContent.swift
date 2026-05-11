@@ -77,10 +77,12 @@ struct ExpandedContent: View {
     let state: AppState
     let onPauseResume: () -> Void
     let onViewFrames: () -> Void
+    let onRepairCapture: () -> Void
     let onSettings: () -> Void
     let onQuit: () -> Void
 
     @State private var hoveredUserId: String?
+    @State private var repairingCapture = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -97,13 +99,42 @@ struct ExpandedContent: View {
             Divider()
 
             // Process rows
-            processRow(name: "screenpipe", ok: state.screenpipeHealthy)
+            statusRow(
+                name: state.captureServiceName,
+                iconName: state.captureServiceIcon,
+                color: Color(nsColor: state.captureServiceColor),
+                label: state.captureServiceLabel
+            )
             statusRow(
                 name: "fisherman",
                 iconName: state.fishermanServiceIcon,
                 color: Color(nsColor: state.fishermanServiceColor),
                 label: state.fishermanServiceLabel
             )
+
+            if let help = state.captureStatusHelpText {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "arrow.turn.down.right")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                    Text(help)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                    Spacer()
+                    Button(repairingCapture ? "Repairing" : state.captureRepairButtonLabel) {
+                        repairingCapture = true
+                        onRepairCapture()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) {
+                            repairingCapture = false
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(repairingCapture)
+                }
+                .padding(.leading, 18)
+            }
 
             if let help = state.backendStatusHelpText {
                 HStack(alignment: .top, spacing: 6) {
@@ -268,15 +299,6 @@ struct ExpandedContent: View {
         }
         .padding(12)
         .frame(width: 300)
-    }
-
-    private func processRow(name: String, ok: Bool) -> some View {
-        statusRow(
-            name: name,
-            iconName: ok ? "checkmark.circle.fill" : "xmark.circle.fill",
-            color: ok ? .green : .red,
-            label: ok ? "healthy" : "down"
-        )
     }
 
     private func statusRow(name: String, iconName: String, color: Color, label: String) -> some View {
