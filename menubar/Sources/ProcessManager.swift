@@ -142,6 +142,8 @@ final class ProcessManager: @unchecked Sendable {
         env["FISH_CAPTURE_BACKEND"] = backend
         if backend == "screenpipe" {
             env["FISH_SCREENPIPE_POLL_INTERVAL"] = readEnvValue("FISH_SCREENPIPE_POLL_INTERVAL") ?? "3"
+        } else {
+            env["FISHERMAN_FORCE_SCREENCAPTURE"] = readEnvValue("FISHERMAN_FORCE_SCREENCAPTURE") ?? "1"
         }
         proc.environment = env
 

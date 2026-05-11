@@ -615,10 +615,18 @@ def diagnose() -> dict:
                   if menubar_running() else "FishermanMenu NOT running",
     }
     daemon = daemon_status()
+    daemon_error = daemon.get("error") if daemon else None
+    stream_error = daemon.get("stream_error") if daemon else None
+    daemon_detail = "no response on 127.0.0.1:7892"
+    if daemon:
+        daemon_detail = f"control port up; frames_sent={daemon.get('frames_sent')}"
+        if daemon_error:
+            daemon_detail += f"; capture error={daemon_error}"
+        if stream_error:
+            daemon_detail += f"; stream error={stream_error}"
     out["daemon"] = {
-        "ok": daemon is not None,
-        "detail": (f"control port up; frames_sent={daemon.get('frames_sent')}"
-                   if daemon else "no response on 127.0.0.1:7892"),
+        "ok": daemon is not None and not daemon_error and not stream_error,
+        "detail": daemon_detail,
     }
     if "backend" in out:
         try:
@@ -627,6 +635,11 @@ def diagnose() -> dict:
             out["status_relay"] = {"ok": relay_ok, "detail": relay_detail}
         except Exception as e:
             out["status_relay"] = {"ok": False, "detail": f"relay config error: {e}"}
+    capture_backend = (
+        str(daemon.get("capture_backend") or "").strip().lower()
+        if daemon else ""
+    ) or FishermanConfig().capture_backend
+    needs_screenpipe = capture_backend == "screenpipe"
     sp_path = shutil.which("screenpipe")
     sp_detail = sp_path or "not on PATH (install from https://docs.screenpi.pe/)"
     if sp_path:
@@ -642,26 +655,35 @@ def diagnose() -> dict:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
     out["screenpipe_binary"] = {
-        "ok": sp_path is not None,
-        "detail": sp_detail,
+        "ok": (sp_path is not None) if needs_screenpipe else True,
+        "detail": sp_detail if needs_screenpipe else f"not required; capture_backend={capture_backend}",
     }
-    sp_running = subprocess.run(
-        ["pgrep", "-f", "screenpipe"], capture_output=True,
-    ).returncode == 0
+    sp_running = False
+    if needs_screenpipe:
+        sp_running = subprocess.run(
+            ["pgrep", "-f", "screenpipe"], capture_output=True,
+        ).returncode == 0
     out["screenpipe_process"] = {
-        "ok": sp_running,
+        "ok": sp_running if needs_screenpipe else True,
         "detail": "screenpipe process found"
-                  if sp_running else "screenpipe NOT running (menubar should spawn it)",
+                  if sp_running else (
+                      "screenpipe NOT running (menubar should spawn it)"
+                      if needs_screenpipe else f"not required; capture_backend={capture_backend}"
+                  ),
     }
     sp_http = False
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:3030/health", timeout=2) as r:
-            sp_http = r.status == 200
-    except (urllib.error.URLError, OSError):
-        sp_http = False
+    if needs_screenpipe:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:3030/health", timeout=2) as r:
+                sp_http = r.status == 200
+        except (urllib.error.URLError, OSError):
+            sp_http = False
     out["screenpipe_http"] = {
-        "ok": sp_http,
-        "detail": "127.0.0.1:3030 reachable" if sp_http else "127.0.0.1:3030 not reachable",
+        "ok": sp_http if needs_screenpipe else True,
+        "detail": (
+            "127.0.0.1:3030 reachable" if sp_http else
+            ("127.0.0.1:3030 not reachable" if needs_screenpipe else f"not required; capture_backend={capture_backend}")
+        ),
     }
     out["app_bundle"] = {
         "ok": Path("/Applications/Fisherman.app").exists(),
