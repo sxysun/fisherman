@@ -29,25 +29,16 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Sync dependencies (skip pyobjc — Linux runner)
+      - name: Sync dependencies (Linux deputy install path)
         run: |
-          # The full project pulls pyobjc which won't install on Linux.
-          # We install only the deps the relay/mirror/agent loop need.
-          uv venv
-          uv pip install \
-              cryptography \
-              websockets \
-              aiohttp \
-              click \
-              structlog \
-              pydantic-settings \
-              imagehash \
-              Pillow \
-              pycryptodome
+          # pyobjc is macOS-only via PEP 508 markers, so Linux agents can
+          # install and use the deputy/query CLI without capture frameworks.
+          uv sync --extra tee
 
       - name: Import-time sanity (Linux-portable subset)
         run: |
           source .venv/bin/activate
+          fisherman --help >/dev/null
           python -c "
           from fisherman.attestation import keccak256, function_selector, parse_tdx_quote, replay_event_log
           from fisherman.blob_store import MemoryBlobStore, LocalFSBlobStore, S3CompatibleBlobStore, WebDAVBlobStore, GoogleDriveBlobStore, from_config
@@ -63,6 +54,11 @@ jobs:
           from mirror.query import query_frames, query_transcripts
           print('all imports ok')
           "
+
+      - name: Portable unit tests
+        run: |
+          source .venv/bin/activate
+          python -m unittest tests.test_config_identity tests.test_platform_support
 
       - name: keccak256 against known vectors
         run: |

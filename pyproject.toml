@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "macOS context home with local capture, E2EE friend status, Cloud TEE, and self-hosted backends"
 requires-python = ">=3.12"
 dependencies = [
-    "pyobjc-core>=10.0",
-    "pyobjc-framework-Cocoa>=10.0",
-    "pyobjc-framework-Quartz>=10.0",
-    "pyobjc-framework-Vision>=10.0",
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
     "Pillow>=10.0",
     "imagehash>=4.3",
     "cryptography>=43.0",

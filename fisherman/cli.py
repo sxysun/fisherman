@@ -2911,8 +2911,8 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
     """Run an RPC call from a deputy host through the relay. Returns the
     decrypted response dict (which itself has {ok, data} or {error}).
 
-    source_pref ∈ {None, "primary", "secondary", "auto"} — passed to relay
-    to override the default routing policy.
+    source_pref ∈ {None, "primary", "secondary", "auto"}. `secondary` means
+    backend direct and never probes the deprecated relay-secondary path.
     """
     from fisherman import deputy as _d
     from fisherman import keys as _k
@@ -2926,7 +2926,16 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
         cfg = json.load(f)
 
     backend_url = (cfg.get("backend_url") or "").strip()
-    forced_backend = source_pref == "secondary" and bool(backend_url)
+    forced_backend = source_pref == "secondary"
+    if forced_backend and not backend_url:
+        click.echo(
+            "backend route unavailable: this deputy config has no Cloud/Self-hosted "
+            "backend URL. Use --source primary while the laptop daemon is online, "
+            "or ask the user to mint a new Agent Access token after selecting "
+            "Fisherman Cloud or Self-hosted.",
+            err=True,
+        )
+        sys.exit(1)
     if forced_backend and command not in _DIRECT_BACKEND_COMMANDS:
         click.echo(
             f"backend route does not support `{command}` yet; use --source primary "
@@ -2939,13 +2948,6 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
         direct = _direct_backend_call(command, args, cfg, fail_hard=forced_backend)
         if direct is not None:
             return direct
-        if forced_backend:
-            click.echo(
-                f"backend route does not support `{command}` yet; use --source primary "
-                "while the laptop daemon is online.",
-                err=True,
-            )
-            sys.exit(1)
 
     user_pubkey_hex = cfg["user_pubkey"]
     user_x25519_pub = bytes.fromhex(cfg["user_x25519_pub"])
@@ -3171,8 +3173,8 @@ Routing controls:
 
 ```bash
 fisherman query --source auto --since 30m --limit 20 --text
-fisherman query --source secondary --since 30m --limit 20 --text  # Cloud/Self-hosted
 fisherman query --source primary --since 30m --limit 20 --text    # laptop relay
+fisherman query --source secondary --since 30m --limit 20 --text  # Cloud/Self-hosted, requires backend URL
 fisherman screenshot --source auto --output /tmp/fisherman-latest.jpg
 ```
 
@@ -3294,8 +3296,7 @@ def deputy_register(token: str, name: str | None):
     click.echo(f"  config:  {saved}")
     click.echo(f"  user:    {payload['u'][:16]}…")
     click.echo(f"  relay:   {payload['r']}")
-    if payload.get("b"):
-        click.echo(f"  backend: {payload['b']}")
+    click.echo(f"  backend: {payload.get('b') or '(none; primary relay only)'}")
     click.echo(f"  scopes:  {payload.get('s', '')}")
 
 

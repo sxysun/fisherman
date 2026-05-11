@@ -173,7 +173,7 @@ fisherman screenshot --output /tmp/fisherman-latest.jpg
 
 # Route explicitly while debugging
 fisherman query --source primary --since 30m --limit 20 --text
-fisherman query --source secondary --since 30m --limit 20 --text
+fisherman query --source secondary --since 30m --limit 20 --text  # requires a Cloud/Self-hosted backend URL
 ```
 
 Output is decrypted at the CLI boundary, so OCR text, window titles, and image bytes are in plaintext only on the operator's machine.

@@ -91,7 +91,7 @@ fisherman screenshot --output /tmp/fisherman-latest.jpg
 Screenshot for a specific Cloud/Self-hosted frame id:
 
 ```bash
-fisherman screenshot --frame-id 123 --output /tmp/fisherman-frame-123.jpg --source secondary
+fisherman screenshot --frame-id 123 --output /tmp/fisherman-frame-123.jpg --source auto
 ```
 
 Friends, when the token grants `read:friends`:
@@ -125,7 +125,8 @@ contains a backend URL and falls back to laptop relay when needed.
 fisherman query --source auto --since 30m --limit 20 --text
 ```
 
-Use Cloud/Self-hosted directly when the user's laptop may be offline:
+Use Cloud/Self-hosted directly only when you are diagnosing backend reads and
+the registered deputy config includes a backend URL:
 
 ```bash
 fisherman query --source secondary --since 30m --limit 20 --text
@@ -141,8 +142,9 @@ Cloud/Self-hosted direct routing currently supports `status`, `query`,
 `screenshot`, and `transcripts`. Commands that need laptop-local state, such as
 `friend status`, `publish-status`, `pause`, and `resume`, use the laptop relay
 path. If `primary` fails, the user's laptop daemon is probably offline or not
-connected to the relay. If `secondary` fails, the Cloud/Self-hosted backend may
-not be configured, approved, reachable, or may not support that command.
+connected to the relay. If `secondary` says no backend URL is configured, that
+is not a token failure; use `auto` or ask the user to mint a new token after
+selecting Fisherman Cloud or Self-hosted.
 
 ## Scope Map
 

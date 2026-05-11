@@ -415,6 +415,33 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertIn("backend route does not support `publish-status`", stderr.getvalue())
             urlopen.assert_not_called()
 
+    def test_remote_secondary_without_backend_url_fails_before_relay(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            cfg_path = Path(home_dir) / "deputy.json"
+            cfg_path.write_text(
+                json.dumps({
+                    "user_pubkey": "11" * 32,
+                    "user_x25519_pub": "22" * 32,
+                    "deputy_seed": "33" * 32,
+                    "relay_url": "https://relay.example",
+                    "backend_url": "",
+                }),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(cli, "_deputy_config_path", return_value=str(cfg_path)):
+                with mock.patch.object(cli, "_direct_backend_call") as direct:
+                    with mock.patch("urllib.request.urlopen") as urlopen:
+                        stderr = io.StringIO()
+                        with contextlib.redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as raised:
+                                cli._remote_call("status", {}, source_pref="secondary")
+
+            self.assertEqual(raised.exception.code, 1)
+            self.assertIn("backend route unavailable", stderr.getvalue())
+            direct.assert_not_called()
+            urlopen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,7 @@
 import importlib
+from pathlib import Path
 import sys
+import tomllib
 import types
 import unittest
 from unittest import mock
@@ -42,6 +44,16 @@ class PlatformSupportTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "screenpipe"):
             module.ocr_fast(b"fake-jpeg")
+
+    def test_pyobjc_dependencies_are_macos_only(self) -> None:
+        pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        deps = data["project"]["dependencies"]
+        pyobjc_deps = [dep for dep in deps if dep.startswith("pyobjc-")]
+
+        self.assertGreaterEqual(len(pyobjc_deps), 4)
+        for dep in pyobjc_deps:
+            self.assertIn("sys_platform == 'darwin'", dep)
 
 
 if __name__ == "__main__":

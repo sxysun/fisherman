@@ -77,7 +77,8 @@ fisherman query --source secondary --since 30m --limit 20 --text
 ```
 
 Use `primary` for the laptop relay/control path. Use `secondary` for Cloud or
-Self-hosted backend reads. Default to `auto` unless you are diagnosing routing.
+Self-hosted backend reads only when the active deputy config includes a backend
+URL. Default to `auto` unless you are diagnosing routing.
 
 ## Query Transcripts
 
@@ -211,5 +212,5 @@ client UX and should not be handed to regular users.
 - If Cloud/Self-hosted reads fail, check `fisherman backend status` and whether
   Cloud ingest is approved/enabled.
 - If a deputy command fails on `primary`, the user's laptop relay path may be
-  offline. If it fails on `secondary`, the Cloud/Self-hosted backend may be
-  unavailable or the token may lack backend provisioning.
+  offline. If `secondary` says no backend URL is configured, use `auto` or mint
+  a new token after selecting Fisherman Cloud or Self-hosted.
