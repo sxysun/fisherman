@@ -15,7 +15,7 @@ struct FishermanApp: App {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unchecked Sendable {
     private var appState: AppState!
     private var processManager: ProcessManager!
     private var statusPoller: StatusPoller!
@@ -58,7 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
                     pm.repairCaptureStack()
                 },
                 onSettings: { [weak self] in
-                    self?.openSettings()
+                    Task { @MainActor in
+                        self?.openSettings()
+                    }
                 },
                 onQuit: {
                     pm.stopAll()
@@ -114,17 +116,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
     // MARK: - Settings window
 
     @MainActor private func openSettings() {
-        // Reuse the existing window if we have one — even if it's
-        // hidden/closed. NSPanel with isReleasedWhenClosed=false stays
-        // alive after a close, so re-showing it is just orderFront.
-        // (Using `existing.isVisible` to guard creation was the bug
-        // behind "needs many clicks": after Close, isVisible==false,
-        // we'd allocate a NEW window but the OS treated the old one
-        // as still in the focus chain — second click finally won.)
         if let existing = settingsWindow {
-            existing.makeKeyAndOrderFront(nil)
-            existing.orderFrontRegardless()
-            NSApp.activate(ignoringOtherApps: true)
+            presentSettingsWindow(existing)
             return
         }
 
@@ -148,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         // earlier 400×420 was tight even with 7 tabs.
         hostingView.frame = NSRect(x: 0, y: 0, width: 600, height: 500)
 
-        let window = NSPanel(
+        let window = SettingsPanel(
             contentRect: hostingView.frame,
             styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -156,18 +149,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, @unchecked Sendable {
         )
         window.title = "Fisherman Settings"
         window.contentView = hostingView
-        window.isFloatingPanel = true
+        window.delegate = self
+        window.isFloatingPanel = false
+        window.hidesOnDeactivate = false
         window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         window.center()
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 480, height: 360)
-        window.makeKeyAndOrderFront(nil)
-        // orderFrontRegardless is needed for `.accessory` apps —
-        // `activate(ignoringOtherApps:)` alone doesn't reliably bring
-        // a hidden NSPanel to the front from a status-bar-only app.
-        window.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
 
         settingsWindow = window
+        presentSettingsWindow(window)
     }
+
+    @MainActor private func presentSettingsWindow(_ window: NSWindow) {
+        NSLog("[Fisherman] presenting settings window")
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.setIsVisible(true)
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+              window === settingsWindow
+        else { return }
+        settingsWindow = nil
+    }
+}
+
+private final class SettingsPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
