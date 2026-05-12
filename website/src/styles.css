@@ -36,7 +36,10 @@
 
 * { box-sizing: border-box; }
 
-html { scroll-behavior: smooth; }
+html {
+  scroll-behavior: smooth;
+  font-family: var(--font-body);
+}
 
 body {
   margin: 0;
@@ -973,10 +976,20 @@ code.inline {
   font-size: clamp(30px, 3.8vw, 48px);
   line-height: 1.08;
   margin-bottom: 18px;
+  text-wrap: balance;
 }
 
-.install-text p { color: var(--paper-2); max-width: 480px; }
-.install-text .small { font-family: var(--font-mono); font-size: 12px; }
+.install-text p {
+  color: var(--paper-2);
+  max-width: 480px;
+  text-wrap: pretty;
+}
+
+.install-text .small {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-wrap: balance;
+}
 
 /* ─────────────────────────── Footer ─────────────────────────── */
 footer {
