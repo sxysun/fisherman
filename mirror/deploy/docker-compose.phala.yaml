@@ -176,7 +176,7 @@ services:
       - R2_BUCKET=${FISHERMAN_CLOUD_R2_BUCKET:-fisherman}
       - OPENAI_API_KEY=${FISHERMAN_CLOUD_OPENAI_API_KEY:-}
       - OPENAI_BASE_URL=${FISHERMAN_CLOUD_OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
-      - OPENAI_MODEL=${FISHERMAN_CLOUD_OPENAI_MODEL:-openai/gpt-4o-mini}
+      - OPENAI_MODEL=${FISHERMAN_CLOUD_OPENAI_MODEL:-mistralai/mistral-nemo}
     volumes:
       - cloud-ingest-data:/data
     expose:

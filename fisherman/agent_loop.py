@@ -9,7 +9,7 @@ via env:
 
     OPENAI_API_KEY    — required (your OpenRouter / OpenAI / Anthropic-via-OR key)
     OPENAI_BASE_URL   — defaults to https://openrouter.ai/api/v1
-    AGENT_MODEL       — model id (default: openai/gpt-4o-mini)
+    AGENT_MODEL       — model id (default: mistralai/mistral-nemo)
 
 Loop: every --interval seconds, query recent context, build a prompt,
 call the LLM, parse {emoji,category,status,flow}, publish. Uses the
@@ -31,7 +31,7 @@ from fisherman.friends import list_friends
 
 
 _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-_DEFAULT_MODEL = "openai/gpt-4o-mini"
+_DEFAULT_MODEL = "mistralai/mistral-nemo"
 _DEFAULT_INTERVAL = 300  # 5 minutes
 _PROMPT = """\
 Generate a short ambient status (max 30 chars) describing what this person is doing.
@@ -208,7 +208,7 @@ def run_once(api_key: str, base_url: str, model: str, since: str = "5m") -> bool
               help="Seconds between status updates")
 @click.option("--since", default="5m", show_default=True,
               help="Time window of context to feed the LLM each cycle")
-@click.option("--model", default=None, help="Model id (default: $AGENT_MODEL or openai/gpt-4o-mini)")
+@click.option("--model", default=None, help="Model id (default: $AGENT_MODEL or mistralai/mistral-nemo)")
 @click.option("--once", is_flag=True, help="Run a single iteration and exit")
 def main(interval, since, model, once):
     """Run a status-publishing loop using OpenRouter/OpenAI."""

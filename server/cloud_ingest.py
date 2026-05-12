@@ -62,7 +62,7 @@ def _managed_status_llm_model() -> str:
     return (
         os.environ.get("OPENAI_MODEL")
         or os.environ.get("FISH_STATUS_LLM_MODEL")
-        or "openai/gpt-4o-mini"
+        or "mistralai/mistral-nemo"
     ).strip()
 
 

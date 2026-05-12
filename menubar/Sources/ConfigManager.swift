@@ -36,7 +36,7 @@ final class ConfigManager {
     var activityPort: String = "9998"
     var statusLLMMode: String = "managed"
     var statusLLMBaseURL: String = "https://openrouter.ai/api/v1"
-    var statusLLMModel: String = "openai/gpt-4o-mini"
+    var statusLLMModel: String = "mistralai/mistral-nemo"
 
     // Whether the user has completed the first-launch welcome wizard.
     // Tri-state via .env: absent = legacy install (assume onboarded),

@@ -892,7 +892,7 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
             {
                 "mode": "managed",
                 "base_url": "https://openrouter.ai/api/v1",
-                "model": "openai/gpt-4o-mini",
+                "model": "mistralai/mistral-nemo",
                 "api_key": "",
                 "external_llm_enabled": True,
             },
@@ -917,7 +917,7 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
             body={
                 "mode": "byo",
                 "base_url": "https://openrouter.ai/api/v1",
-                "model": "openai/gpt-4o-mini",
+                "model": "mistralai/mistral-nemo",
                 "api_key": "sk-test",
             },
         ))

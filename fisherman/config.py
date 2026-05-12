@@ -11,6 +11,7 @@ DEFAULT_CLOUD_BACKEND_URL = "https://fisherman.teleport.computer"
 DEFAULT_APP_AUTH_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
 DEFAULT_APP_AUTH_CONTRACT = "0x55b25eD5CA3c6ec9C05330F8958edcfCA3C9e922"
 BACKEND_MODES = {"local", "cloud", "self_hosted"}
+DEFAULT_STATUS_LLM_MODEL = "mistralai/mistral-nemo"
 
 
 def user_env_path() -> Path:
@@ -307,4 +308,4 @@ class FishermanConfig(BaseSettings):
     # these env values keep the local Settings UI and Local Only mode explicit.
     status_llm_mode: str = "managed"  # managed | byo | none
     status_llm_base_url: str = "https://openrouter.ai/api/v1"
-    status_llm_model: str = "openai/gpt-4o-mini"
+    status_llm_model: str = DEFAULT_STATUS_LLM_MODEL

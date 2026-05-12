@@ -1794,7 +1794,7 @@ def activity_status_status(as_json: bool):
 @click.option("--mode", required=True, type=click.Choice(["managed", "byo", "none"]),
               help="managed uses backend key, byo uses your supplied key, none disables LLM.")
 @click.option("--base-url", default=None, help="OpenAI-compatible base URL.")
-@click.option("--model", default=None, help="Model name, e.g. openai/gpt-4o-mini.")
+@click.option("--model", default=None, help="Model name, e.g. mistralai/mistral-nemo.")
 @click.option("--api-key", default=None, help="BYO API key. Stored encrypted on Cloud/Self-hosted.")
 @click.option("--clear-api-key", is_flag=True, help="Remove the stored BYO API key.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
@@ -2725,7 +2725,7 @@ def agent_group():
 @agent_group.command(name="run")
 @click.option("--interval", default=300, show_default=True, help="Seconds between cycles")
 @click.option("--since", default="5m", show_default=True, help="Context window")
-@click.option("--model", default=None, help="LLM model id (default: $AGENT_MODEL or openai/gpt-4o-mini)")
+@click.option("--model", default=None, help="LLM model id (default: $AGENT_MODEL or mistralai/mistral-nemo)")
 @click.option("--once", is_flag=True, help="One iteration and exit")
 def agent_run(interval, since, model, once):
     """Run the status loop (reads context, calls LLM, publishes)."""

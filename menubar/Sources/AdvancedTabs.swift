@@ -251,7 +251,7 @@ struct ActivityStatusTab: View {
 
     @State private var mode: String = "managed"
     @State private var baseURL: String = "https://openrouter.ai/api/v1"
-    @State private var model: String = "openai/gpt-4o-mini"
+    @State private var model: String = "mistralai/mistral-nemo"
     @State private var apiKey: String = ""
     @State private var apiKeyConfigured: Bool = false
     @State private var managedKeyConfigured: Bool = false
@@ -359,7 +359,7 @@ struct ActivityStatusTab: View {
             Text("Model")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
-            TextField("openai/gpt-4o-mini", text: $model)
+            TextField("mistralai/mistral-nemo", text: $model)
                 .textFieldStyle(.roundedBorder)
         }
     }

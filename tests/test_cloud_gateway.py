@@ -32,7 +32,7 @@ class CloudGatewayTests(unittest.TestCase):
                     "missing": ["DATABASE_URL", "ENCRYPTION_KEY"],
                     "external_llm_enabled": True,
                     "managed_llm_configured": False,
-                    "status_llm_model": "openai/gpt-4o-mini",
+                    "status_llm_model": "mistralai/mistral-nemo",
                     "default_max_frames_per_hour": 1200,
                 },
             },
@@ -48,7 +48,7 @@ class CloudGatewayTests(unittest.TestCase):
         self.assertEqual(payload["ingest"]["missing"], ["DATABASE_URL", "ENCRYPTION_KEY"])
         self.assertTrue(payload["ingest"]["external_llm_enabled"])
         self.assertFalse(payload["ingest"]["managed_llm_configured"])
-        self.assertEqual(payload["ingest"]["status_llm_model"], "openai/gpt-4o-mini")
+        self.assertEqual(payload["ingest"]["status_llm_model"], "mistralai/mistral-nemo")
         self.assertEqual(payload["ingest"]["default_max_frames_per_hour"], 1200)
         self.assertTrue(payload["relay"]["ready"])
         self.assertFalse(payload["relay"]["stores_plaintext"])
@@ -68,7 +68,7 @@ class CloudGatewayTests(unittest.TestCase):
                     "missing": [],
                     "external_llm_enabled": True,
                     "managed_llm_configured": True,
-                    "status_llm_model": "openai/gpt-4o-mini",
+                    "status_llm_model": "mistralai/mistral-nemo",
                     "default_max_frames_per_hour": 1200,
                     "max_ws_message_bytes": 16777216,
                     "max_image_bytes": 8388608,
@@ -141,7 +141,7 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertEqual(payload["encryption_key_source"], "generated_file")
         self.assertTrue(payload["external_llm_enabled"])
         self.assertFalse(payload["managed_llm_configured"])
-        self.assertEqual(payload["status_llm_model"], "openai/gpt-4o-mini")
+        self.assertEqual(payload["status_llm_model"], "mistralai/mistral-nemo")
         self.assertEqual(payload["default_max_frames_per_hour"], 1200)
         self.assertEqual(payload["enrollment_mode"], "closed")
 
