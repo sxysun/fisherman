@@ -150,7 +150,13 @@ struct UpdatesTab: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("\(backend.component.isEmpty ? "backend" : backend.component) \(shortCommit(backend.commit))")
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(selfHostedBackendUpdateAvailable ? .orange : .secondary)
+                        if selfHostedBackendUpdateAvailable {
+                            Text("Latest code \(shortCommit(latest.commit)); redeploy this backend to update it.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         if !backend.imageDigest.isEmpty {
                             Text(shortImageDigest(backend.imageDigest))
                                 .font(.system(size: 10, design: .monospaced))
@@ -206,8 +212,10 @@ struct UpdatesTab: View {
     private var backendStatusLabel: String {
         if config.backendMode == "local" { return "local" }
         if config.backendMode == "cloud" { return "managed" }
+        if selfHostedBackendUpdateAvailable { return "update available" }
         if backend.checked {
-            return backend.available ? "version known" : "needs redeploy"
+            if !backend.available { return "needs redeploy" }
+            return latest.checked && latest.error.isEmpty ? "up to date" : "version known"
         }
         return "not checked"
     }
@@ -215,9 +223,20 @@ struct UpdatesTab: View {
     private var backendStatusColor: Color {
         if config.backendMode == "local" { return .secondary }
         if config.backendMode == "cloud" { return .green }
+        if selfHostedBackendUpdateAvailable { return .orange }
         if backend.checked && !backend.available { return .orange }
         if backend.checked { return .green }
         return .secondary
+    }
+
+    private var selfHostedBackendUpdateAvailable: Bool {
+        guard config.backendMode == "self_hosted",
+              backend.checked,
+              backend.available,
+              latest.checked,
+              latest.error.isEmpty
+        else { return false }
+        return commitsDiffer(backend.commit, latest.commit)
     }
 
     private var backendExplanation: String {
@@ -256,9 +275,13 @@ struct UpdatesTab: View {
                 installed = parseInstalled(raw)
                 latest = parseLatest(raw)
                 backend = parseBackend(raw)
-                message = latest.updateAvailable
-                    ? "A Fisherman app update is available."
-                    : "Fisherman app check complete."
+                if latest.updateAvailable {
+                    message = "A Fisherman app update is available."
+                } else if selfHostedBackendUpdateAvailable {
+                    message = "Your self-hosted backend is behind latest code. Copy the redeploy prompt to update it without touching data."
+                } else {
+                    message = "Fisherman app and active backend check complete."
+                }
             }
         }
     }
@@ -290,7 +313,7 @@ struct UpdatesTab: View {
 
         Requirements:
         - Preserve all existing data, Postgres databases, Docker volumes, and frame storage.
-        - Pull the latest sxysun/fisherman main branch or latest ghcr.io/sxysun/fisherman-mirror image.
+        - Pull the latest sxysun/fisherman main branch or latest ghcr.io/sxysun/fisherman-mirror image for code commit \(shortCommit(latest.commit)).
         - Redeploy the ingest/API services without changing my Fisherman identity keys.
         - Verify /health and /api/version after restart.
         - Report the running commit, service status, data-preservation checks, and rollback path.
@@ -378,5 +401,21 @@ struct UpdatesTab: View {
             return "sha256:" + String(value.dropFirst("sha256:".count).prefix(12))
         }
         return String(value.prefix(19))
+    }
+
+    private func commitsDiffer(_ left: String, _ right: String) -> Bool {
+        let lhs = normalizedCommit(left)
+        let rhs = normalizedCommit(right)
+        guard !lhs.isEmpty, !rhs.isEmpty else { return false }
+        return !lhs.hasPrefix(rhs) && !rhs.hasPrefix(lhs)
+    }
+
+    private func normalizedCommit(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(separator: "-", maxSplits: 1)
+            .first
+            .map(String.init) ?? ""
     }
 }
