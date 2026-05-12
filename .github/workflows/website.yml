@@ -39,3 +39,22 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: website
+
+      - uses: actions/upload-pages-artifact@v4
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        with:
+          path: website/dist
+
+  deploy:
+    name: Deploy app.fisherman.teleport.computer
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: https://app.fisherman.teleport.computer
+    steps:
+      - uses: actions/deploy-pages@v4
