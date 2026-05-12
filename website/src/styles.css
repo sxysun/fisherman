@@ -472,24 +472,25 @@ h1 em {
   text-transform: uppercase;
 }
 
-.step h3 {
+.step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.step-body h3 {
   font-family: var(--font-display);
   font-size: clamp(26px, 2.4vw, 34px);
   font-weight: 500;
-  margin-bottom: 12px;
   line-height: 1.15;
+  margin-bottom: -6px; /* tighter pairing with body text */
 }
 
-.step p {
+.step-body > p {
   color: var(--paper-2);
   max-width: 640px;
-}
-
-.step p + .terminal,
-.step p + .mock-dialog,
-.step p + .mode-pick,
-.step p + .share-grid {
-  margin-top: 22px;
+  margin: 0;
 }
 
 /* ─────────────────────────── Terminal block ─────────────────────────── */

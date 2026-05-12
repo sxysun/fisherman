@@ -152,13 +152,15 @@
               <span class="step-num">01</span>
               <span class="step-time">~30s</span>
             </div>
-            <h3>Install the app and daemon</h3>
-            <p>
-              One command. Installs <code class="inline">Fisherman.app</code> into
-              <code class="inline">/Applications</code> and a background daemon
-              into <code class="inline">~/.fisherman</code>. No sudo needed.
-            </p>
-            <pre class="terminal" aria-label="Install command"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash</pre>
+            <div class="step-body">
+              <h3>Install the app and daemon</h3>
+              <p>
+                One command. Installs <code class="inline">Fisherman.app</code> into
+                <code class="inline">/Applications</code> and a background daemon
+                into <code class="inline">~/.fisherman</code>. No sudo needed.
+              </p>
+              <pre class="terminal" aria-label="Install command"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash</pre>
+            </div>
           </li>
 
           <li class="step">
@@ -166,22 +168,24 @@
               <span class="step-num">02</span>
               <span class="step-time">one click</span>
             </div>
-            <h3>Grant screen recording, once</h3>
-            <p>
-              macOS will ask the first time the daemon tries to capture.
-              After that, capture runs silently every 5 seconds —
-              compressed, OCR'd, stored on your disk. The frames never
-              touch the network in Local mode.
-            </p>
-            <div class="mock-dialog" role="img" aria-label="macOS screen recording permission dialog">
-              <div class="mock-dialog-head">
-                <span class="lock">🔒</span>
-                <strong>"Fisherman" would like to record this computer's screen</strong>
-              </div>
-              <p>Fisherman captures what's on your screen to build your local context history.</p>
-              <div class="mock-dialog-actions">
-                <button class="mock-btn">Don't Allow</button>
-                <button class="mock-btn primary">Open System Settings</button>
+            <div class="step-body">
+              <h3>Grant screen recording, once</h3>
+              <p>
+                macOS will ask the first time the daemon tries to capture.
+                After that, capture runs silently every 5 seconds —
+                compressed, OCR'd, stored on your disk. The frames never
+                touch the network in Local mode.
+              </p>
+              <div class="mock-dialog" role="img" aria-label="macOS screen recording permission dialog">
+                <div class="mock-dialog-head">
+                  <span class="lock">🔒</span>
+                  <strong>"Fisherman" would like to record this computer's screen</strong>
+                </div>
+                <p>Fisherman captures what's on your screen to build your local context history.</p>
+                <div class="mock-dialog-actions">
+                  <button class="mock-btn">Don't Allow</button>
+                  <button class="mock-btn primary">Open System Settings</button>
+                </div>
               </div>
             </div>
           </li>
@@ -191,35 +195,37 @@
               <span class="step-num">03</span>
               <span class="step-time">optional</span>
             </div>
-            <h3>Pick where your context lives</h3>
-            <p>
-              Default is <strong>Local</strong>. Nothing leaves your Mac.
-              You can move to Fisherman Cloud (attested, multi-tenant)
-              or your own server later — history comes with you.
-            </p>
-            <div class="mode-pick" role="img" aria-label="Mode picker mockup">
-              <label class="mode-option active">
-                <span class="radio on"></span>
-                <div>
-                  <strong>Local Only</strong>
-                  <span>Raw context stays on this Mac.</span>
-                </div>
-                <span class="pill">default</span>
-              </label>
-              <label class="mode-option">
-                <span class="radio"></span>
-                <div>
-                  <strong>Fisherman Cloud</strong>
-                  <span>Managed, TDX-attested, approval required.</span>
-                </div>
-              </label>
-              <label class="mode-option">
-                <span class="radio"></span>
-                <div>
-                  <strong>Self-Hosted</strong>
-                  <span>Same backend, your server.</span>
-                </div>
-              </label>
+            <div class="step-body">
+              <h3>Pick where your context lives</h3>
+              <p>
+                Default is <strong>Local</strong>. Nothing leaves your Mac.
+                You can move to Fisherman Cloud (attested, multi-tenant)
+                or your own server later — history comes with you.
+              </p>
+              <div class="mode-pick" role="img" aria-label="Mode picker mockup">
+                <label class="mode-option active">
+                  <span class="radio on"></span>
+                  <div>
+                    <strong>Local Only</strong>
+                    <span>Raw context stays on this Mac.</span>
+                  </div>
+                  <span class="pill">default</span>
+                </label>
+                <label class="mode-option">
+                  <span class="radio"></span>
+                  <div>
+                    <strong>Fisherman Cloud</strong>
+                    <span>Managed, TDX-attested, approval required.</span>
+                  </div>
+                </label>
+                <label class="mode-option">
+                  <span class="radio"></span>
+                  <div>
+                    <strong>Self-Hosted</strong>
+                    <span>Same backend, your server.</span>
+                  </div>
+                </label>
+              </div>
             </div>
           </li>
 
@@ -228,23 +234,25 @@
               <span class="step-num">04</span>
               <span class="step-time">optional</span>
             </div>
-            <h3>Share status. Authorize agents.</h3>
-            <p>
-              Send a friend code over Signal to see each other in the
-              notch. Generate a scoped, expiring token to let an agent
-              read your captures or transcripts. Revoke either without
-              rotating your Fisherman identity.
-            </p>
-            <div class="share-grid">
-              <div class="share-card">
-                <span class="share-kicker">friend code</span>
-                <code class="share-code">fish:friend:Z3l4-NwK2-pQrM</code>
-                <p>Paste into a friend's Settings → Friends. You'll appear in each other's notch on next sync.</p>
-              </div>
-              <div class="share-card">
-                <span class="share-kicker">agent token</span>
-                <code class="share-code">fish:deputy:cap=read.status,read.transcripts ttl=24h</code>
-                <p>Hand to your agent runtime. It can call <code class="inline">/api/status</code> and <code class="inline">/api/transcripts</code>, nothing else.</p>
+            <div class="step-body">
+              <h3>Share status. Authorize agents.</h3>
+              <p>
+                Send a friend code over Signal to see each other in the
+                notch. Generate a scoped, expiring token to let an agent
+                read your captures or transcripts. Revoke either without
+                rotating your Fisherman identity.
+              </p>
+              <div class="share-grid">
+                <div class="share-card">
+                  <span class="share-kicker">friend code</span>
+                  <code class="share-code">fish:friend:Z3l4-NwK2-pQrM</code>
+                  <p>Paste into a friend's Settings → Friends. You'll appear in each other's notch on next sync.</p>
+                </div>
+                <div class="share-card">
+                  <span class="share-kicker">agent token</span>
+                  <code class="share-code">fish:deputy:cap=read.status,read.transcripts ttl=24h</code>
+                  <p>Hand to your agent runtime. It can call <code class="inline">/api/status</code> and <code class="inline">/api/transcripts</code>, nothing else.</p>
+                </div>
               </div>
             </div>
           </li>
