@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var controlPort: String = "7892"
     private var hoverCancellable: AnyCancellable?
     private var settingsWindow: NSWindow?
+    private var welcomeWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -99,10 +100,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
             await notch.compact()
         }
 
-        // Auto-open settings on first launch if not configured
+        // First-launch flow: brand-new installs (FISH_ONBOARDED=0) get the
+        // welcome wizard. Legacy installs (no FISH_ONBOARDED line) are
+        // treated as already onboarded by ConfigManager and skip this.
         if !configManager.isConfigured {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.openSettings()
+                self?.openWelcomeWizard()
             }
         }
     }
@@ -111,6 +114,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         hoverCancellable?.cancel()
         statusPoller?.stop()
         processManager?.stopAll()
+    }
+
+    // MARK: - Welcome wizard
+
+    @MainActor private func openWelcomeWizard() {
+        if let existing = welcomeWindow {
+            presentWelcomeWindow(existing)
+            return
+        }
+
+        let cm = configManager!
+        let pm = processManager!
+
+        let view = WelcomeWizard(config: cm) { [weak self] in
+            self?.welcomeWindow?.close()
+            self?.welcomeWindow = nil
+            pm.restartFisherman()
+        }
+
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 520, height: 540)
+
+        let window = WelcomePanel(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Welcome to Fisherman"
+        window.contentView = hostingView
+        window.delegate = self
+        window.isFloatingPanel = false
+        window.hidesOnDeactivate = false
+        window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        welcomeWindow = window
+        presentWelcomeWindow(window)
+    }
+
+    @MainActor private func presentWelcomeWindow(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.setIsVisible(true)
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     // MARK: - Settings window
@@ -181,14 +233,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     }
 
     func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow,
-              window === settingsWindow
-        else { return }
-        settingsWindow = nil
+        guard let window = notification.object as? NSWindow else { return }
+        if window === settingsWindow { settingsWindow = nil }
+        if window === welcomeWindow { welcomeWindow = nil }
     }
 }
 
 private final class SettingsPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+private final class WelcomePanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }

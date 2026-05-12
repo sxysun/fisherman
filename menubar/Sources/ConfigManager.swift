@@ -38,6 +38,12 @@ final class ConfigManager {
     var statusLLMBaseURL: String = "https://openrouter.ai/api/v1"
     var statusLLMModel: String = "openai/gpt-4o-mini"
 
+    // Whether the user has completed the first-launch welcome wizard.
+    // Tri-state via .env: absent = legacy install (assume onboarded),
+    // "0" = brand-new install pending wizard, "1" = wizard completed.
+    var onboarded: Bool = true
+    private var onboardedFlagPresent: Bool = false
+
     // Ed25519 key pair (hex-encoded)
     var privateKeyHex: String = ""
     var publicKeyHex: String = ""
@@ -235,6 +241,14 @@ final class ConfigManager {
                     loadedAnyManagedValue = true
                 }
                 if trackLines { knownKeyLines["FISH_DISPLAY_NAME", default: []].append(i) }
+            } else if let value = extractValue(trimmed, key: "FISH_ONBOARDED") {
+                if shouldLoad("FISH_ONBOARDED", fillMissingOnly: fillMissingOnly, loadedKeys: loadedKeys) {
+                    onboarded = (value == "1" || value.lowercased() == "true")
+                    onboardedFlagPresent = true
+                    loadedKeys.insert("FISH_ONBOARDED")
+                    loadedAnyManagedValue = true
+                }
+                if trackLines { knownKeyLines["FISH_ONBOARDED", default: []].append(i) }
             } else {
                 if trackLines {
                     passthroughLines.append((index: i, line: line))
@@ -277,6 +291,7 @@ final class ConfigManager {
             ("FISH_STATUS_LLM_MODEL", statusLLMModel),
             ("FISH_PRIVATE_KEY", privateKeyHex),
             ("FISH_DISPLAY_NAME", displayName),
+            ("FISH_ONBOARDED", onboardedFlagPresent ? (onboarded ? "1" : "0") : ""),
         ]
         let persistServerURL = (
             backendMode == "self_hosted"
@@ -346,7 +361,18 @@ final class ConfigManager {
     }
 
     var isConfigured: Bool {
-        backendMode == "local" || !backendURL.isEmpty || !serverURL.isEmpty
+        // FISH_ONBOARDED is the source of truth. install.sh writes "0" to
+        // new .envs (triggering the welcome wizard); the wizard sets "1" on
+        // completion. Legacy installs predate the flag and won't have it —
+        // those are treated as already onboarded.
+        onboarded && (backendMode == "local" || !backendURL.isEmpty || !serverURL.isEmpty)
+    }
+
+    /// Mark onboarding complete and persist immediately.
+    func completeOnboarding() {
+        onboarded = true
+        onboardedFlagPresent = true
+        save()
     }
 
     var effectiveOwnServerURL: String {

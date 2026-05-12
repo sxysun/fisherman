@@ -116,6 +116,12 @@ FISH_CAPTURE_INTERVAL=5.0
 FISH_BATTERY_CAPTURE_INTERVAL=15.0
 FISH_MAX_DIMENSION=960
 FISH_CONTROL_PORT=7892
+
+# === First-launch state ===
+# "0" until the user finishes the welcome wizard, then "1". Legacy installs
+# (upgrading from a build before this flag existed) won't have this line and
+# are treated as already onboarded — that's intentional.
+FISH_ONBOARDED=0
 EOF
     chmod 600 "$FISH_DIR/.env"
     echo
