@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
+node_modules/
 .env
 server/.env
 *.egg-info/
@@ -13,6 +14,7 @@ server/*.log
 server/.watchdog_state.json
 menubar/.build/
 menubar/icon.iconset/
+website/dist/
 *.app
 .run/
 .DS_Store

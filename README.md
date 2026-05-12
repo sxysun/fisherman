@@ -304,6 +304,9 @@ The Cloud path is the operator-untrusted managed-hosting path.
 ## Development
 
 ```bash
+# public website
+cd website && npm install && npm run dev
+
 # macOS menu bar app
 cd menubar && bash build.sh
 
@@ -326,6 +329,7 @@ cat docs/tee-deployment.md
 - [Context migration](docs/context-migration.md)
 - [Cloud operations](docs/cloud-operations.md)
 - [Google Drive backup](docs/drive-setup.md)
+- [Website](website/README.md)
 
 ## Requirements
 
