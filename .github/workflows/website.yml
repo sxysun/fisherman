@@ -40,21 +40,46 @@ jobs:
         run: npm run build
         working-directory: website
 
-      - uses: actions/upload-pages-artifact@v4
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        with:
-          path: website/dist
-
-  deploy:
-    name: Deploy app.fisherman.teleport.computer
+  deploy-vercel:
+    name: Deploy to Vercel
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: build
     runs-on: ubuntu-24.04
-    permissions:
-      pages: write
-      id-token: write
     environment:
-      name: github-pages
+      name: vercel-production
       url: https://app.fisherman.teleport.computer
+    env:
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
-      - uses: actions/deploy-pages@v4
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@53.3.2
+
+      - name: Check Vercel token
+        if: ${{ env.VERCEL_TOKEN == '' }}
+        run: |
+          echo "::warning::Set the VERCEL_TOKEN repository secret to enable production website deploys."
+
+      - name: Pull Vercel project settings
+        if: ${{ env.VERCEL_TOKEN != '' }}
+        run: vercel pull --yes --environment=production --token "$VERCEL_TOKEN"
+        working-directory: website
+
+      - name: Build
+        if: ${{ env.VERCEL_TOKEN != '' }}
+        run: vercel build --prod --token "$VERCEL_TOKEN"
+        working-directory: website
+
+      - name: Deploy
+        if: ${{ env.VERCEL_TOKEN != '' }}
+        run: vercel deploy --prebuilt --prod --token "$VERCEL_TOKEN"
+        working-directory: website

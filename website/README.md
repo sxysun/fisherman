@@ -10,20 +10,31 @@ npm run build
 ```
 
 GitHub Actions builds this directory through `.github/workflows/website.yml`.
-Pushes to `main` deploy the built site to
-`https://app.fisherman.teleport.computer`. Website-only changes should not
-trigger the main product CI or CVM deploy path.
+Pushes to `main` deploy to Vercel once `VERCEL_TOKEN` is configured as a repo
+secret. Website-only changes should not trigger the main product CI or CVM
+deploy path.
 
 ## DNS
 
-GitHub Pages is configured with `app.fisherman.teleport.computer` as the custom
-domain. The DNS provider must have:
+The Vercel project is `sxysuns-projects/fisherman-website`, currently deployed
+at `https://fisherman-website-eight.vercel.app`.
+
+Vercel has `app.fisherman.teleport.computer` attached to the project and needs
+these DNS records:
+
+```text
+Type: TXT
+Name: _vercel
+Value: vc-domain-verify=app.fisherman.teleport.computer,82de78d026cbd864c010
+```
 
 ```text
 Type: CNAME
-Name: app
-Target: sxysun.github.io
+Name: app.fisherman
+Target: cname.vercel-dns.com
 Proxy: DNS only
 ```
 
-After the record resolves, enable/enforce HTTPS in GitHub Pages.
+If editing a delegated `fisherman.teleport.computer` zone instead of the root
+`teleport.computer` zone, use `Name: app` for the CNAME. Keep the TXT record at
+`_vercel.teleport.computer` unless Vercel shows a different verification name.
