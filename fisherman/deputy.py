@@ -150,6 +150,9 @@ def _command_to_scope(command: str) -> str | None:
 #     n: deputy_name,
 #     k: deputy_seed_hex,            # 32-byte ed25519 seed
 #     r: relay_url,
+#     b: ingest_or_backend_url,
+#     q: query_base_url,
+#     ap: activity_port,
 #     s: scopes_csv,
 #     rate: rate_per_hour,
 #     e: expires_at_unix or null,

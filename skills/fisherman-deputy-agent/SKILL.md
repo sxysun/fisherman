@@ -121,15 +121,15 @@ fisherman resume
 
 ## Routing
 
-Default to `--source auto`. It uses Cloud or Self-hosted backend when the token
-contains a backend URL and falls back to laptop relay when needed.
+Default to `--source auto`. It uses the Cloud or Self-hosted query endpoint
+when the token contains one and falls back to laptop relay when needed.
 
 ```bash
 fisherman query --source auto --since 30m --limit 20 --text
 ```
 
 Use Cloud/Self-hosted directly only when you are diagnosing backend reads and
-the registered deputy config includes a backend URL:
+the registered deputy config includes a query endpoint:
 
 ```bash
 fisherman query --source secondary --since 30m --limit 20 --text
@@ -145,9 +145,11 @@ Cloud/Self-hosted direct routing currently supports `status`, `query`,
 `screenshot`, and `transcripts`. Commands that need laptop-local state, such as
 `friend status`, `publish-status`, `pause`, and `resume`, use the laptop relay
 path. If `primary` fails, the user's laptop daemon is probably offline or not
-connected to the relay. If `secondary` says no backend URL is configured, that
-is not a token failure; use `auto` or ask the user to mint a new token after
-selecting Fisherman Cloud or Self-hosted.
+connected to the relay. If `secondary` says no backend route is configured,
+that is not a token failure; use `auto` or ask the user to mint a new token
+after selecting Fisherman Cloud or Self-hosted. New tokens store
+`query_base_url`; older tokens may only store `backend_url` and Fisherman will
+derive the query endpoint when it matches the standard self-hosted layout.
 
 ## Scope Map
 

@@ -14,7 +14,7 @@ import urllib.request
 import click
 import structlog
 
-from fisherman.config import FishermanConfig
+from fisherman.config import FishermanConfig, query_base_url_from_backend_url
 
 
 def _configure_logging():
@@ -141,6 +141,13 @@ def _backend_api_url(base_url: str, path: str, params: dict | None = None) -> st
     base = urllib.parse.urlunparse(parsed._replace(query="", fragment="")).rstrip("/")
     qs = urllib.parse.urlencode({k: v for k, v in (params or {}).items() if v not in (None, "")})
     return base + path + (f"?{qs}" if qs else "")
+
+
+def _query_base_url_from_candidate(base_url: str, activity_port: int | None = None) -> str:
+    return query_base_url_from_backend_url(
+        base_url,
+        activity_port or FishermanConfig().activity_port,
+    )
 
 
 def _fishkey_header(seed_hex: str) -> tuple[str, str]:
@@ -959,6 +966,7 @@ def _version_payload() -> dict:
             "env_path": str(_cfg.user_env_path()),
             "backend_mode": cfg.backend_mode,
             "backend_url": cfg.backend_url,
+            "query_base_url": cfg.query_base_url,
             "backend_summary": cfg.backend_summary,
             "ingest_url": cfg.server_url if cfg.streaming_enabled else None,
             "streaming_enabled": cfg.streaming_enabled,
@@ -1032,6 +1040,7 @@ def _backend_version_payload(
     out = {
         "mode": cfg.backend_mode,
         "backend_url": cfg.backend_url,
+        "query_base_url": cfg.query_base_url,
         "available": False,
         "version": None,
         "error": None,
@@ -1040,7 +1049,7 @@ def _backend_version_payload(
     if cfg.backend_mode == "local":
         out["detail"] = "Local Only has no remote backend to update."
         return out
-    base = cfg.backend_url or cfg.server_url
+    base = cfg.query_base_url or cfg.backend_url or cfg.server_url
     if not base:
         out["error"] = "backend_url_not_configured"
         return out
@@ -1178,6 +1187,7 @@ def _persist_backend_config(
     *,
     mode: str,
     backend_url: str | None = None,
+    query_base_url: str | None = None,
     relay_url: str | None = None,
     server_url: str | None = None,
     cloud_trust_policy: str | None = None,
@@ -1190,6 +1200,17 @@ def _persist_backend_config(
     _cfg.persist_user_env_var("FISH_BACKEND_MODE", mode)
     if backend_url is not None:
         _cfg.persist_user_env_var("FISH_BACKEND_URL", backend_url)
+    if (
+        query_base_url is None
+        and mode in {"cloud", "self_hosted"}
+        and backend_url
+    ):
+        query_base_url = query_base_url_from_backend_url(backend_url, FishermanConfig().activity_port)
+    if query_base_url is not None:
+        if query_base_url:
+            _cfg.persist_user_env_var("FISH_QUERY_BASE_URL", query_base_url)
+        else:
+            _cfg.remove_user_env_var("FISH_QUERY_BASE_URL")
     if server_url:
         _cfg.persist_user_env_var("FISH_SERVER_URL", server_url)
     else:
@@ -1221,6 +1242,8 @@ def _persist_backend_config(
         _cfg.remove_user_env_var("FISH_CLOUD_INGEST_STATUS")
         _cfg.remove_user_env_var("FISH_CLOUD_INGEST_BLOCK_REASON")
         _cfg.remove_user_env_var("FISH_CLOUD_INGEST_BLOCK_DETAIL")
+        if mode == "local":
+            _cfg.remove_user_env_var("FISH_QUERY_BASE_URL")
     return FishermanConfig()
 
 
@@ -1237,6 +1260,7 @@ def backend_status(as_json: bool):
     out = {
         "mode": cfg.backend_mode,
         "backend_url": cfg.backend_url,
+        "query_base_url": cfg.query_base_url,
         "cloud_trust_policy": cfg.cloud_trust_policy,
         "cloud_ingest": {
             "status": cfg.cloud_ingest_status,
@@ -1325,17 +1349,29 @@ def backend_configure_local(relay_url: str | None):
 @backend_configure_group.command(name="self-hosted")
 @click.option("--url", "backend_url", required=True,
               help="Backend base or ingest URL, e.g. wss://host:9999/ingest")
+@click.option("--query-url", "query_base_url", default=None,
+              help="HTTP API base URL for backend-direct reads, e.g. https://host or http://host:9998")
 @click.option("--relay-url", default=None, help="Optional E2EE status relay URL.")
-def backend_configure_self_hosted(backend_url: str, relay_url: str | None):
+def backend_configure_self_hosted(
+    backend_url: str,
+    query_base_url: str | None,
+    relay_url: str | None,
+):
     """Use a backend you operate."""
+    query_url = (
+        query_base_url
+        or query_base_url_from_backend_url(backend_url, FishermanConfig().activity_port)
+    )
     cfg = _persist_backend_config(
         mode="self_hosted",
         backend_url=backend_url,
+        query_base_url=query_url,
         relay_url=relay_url,
     )
     click.echo("configured backend: Self-Hosted")
     click.echo(f"  backend: {cfg.backend_url}")
     click.echo(f"  ingest:  {cfg.server_url}")
+    click.echo(f"  query:   {cfg.query_base_url or 'not configured'}")
     click.echo(f"  relay:   {cfg.status_relay_url}")
     click.echo("Restart the daemon for changes to take effect.")
 
@@ -1434,6 +1470,7 @@ def backend_configure_cloud(
     cfg = _persist_backend_config(
         mode="cloud",
         backend_url=url,
+        query_base_url=query_base_url_from_backend_url(url),
         relay_url=relay_url,
         server_url=ingest_url_from_backend_url(url) if ingest_ready and account_ready else None,
         cloud_trust_policy="dangerously_skip" if dangerously_allow_unaudited_ingest else "strict",
@@ -1444,6 +1481,7 @@ def backend_configure_cloud(
     click.echo("configured backend: Fisherman Cloud")
     click.echo(f"  backend: {cfg.backend_url}")
     click.echo(f"  ingest:  {cfg.server_url if cfg.streaming_enabled else 'disabled until Cloud ingest is enabled for this account'}")
+    click.echo(f"  query:   {cfg.query_base_url or 'not configured'}")
     click.echo(f"  account: {'enabled' if account_ready else account_detail or 'not checked'}")
     if block_detail:
         click.echo(f"  action:  {block_detail}")
@@ -1467,8 +1505,10 @@ def backend_configure_cloud(
 
 
 def _active_backend_base_url(cfg: FishermanConfig) -> str:
+    if cfg.backend_mode in {"cloud", "self_hosted"} and cfg.query_base_url:
+        return cfg.query_base_url
     if cfg.backend_mode in {"cloud", "self_hosted"} and cfg.backend_url:
-        return cfg.backend_url
+        return query_base_url_from_backend_url(cfg.backend_url, cfg.activity_port)
     return ""
 
 
@@ -1541,7 +1581,7 @@ def _cfg_with_identity() -> FishermanConfig:
 def _context_home_target(home: str, cfg: FishermanConfig) -> str:
     if home in {"local", "backend"}:
         return home
-    if cfg.backend_mode in {"cloud", "self_hosted"} and cfg.backend_url:
+    if _active_backend_base_url(cfg):
         return "backend"
     return "local"
 
@@ -1555,14 +1595,15 @@ def _backend_context_request(
     body: dict | None = None,
     timeout: float = 60.0,
 ) -> dict:
-    if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
+    backend_base = _active_backend_base_url(cfg)
+    if cfg.backend_mode not in {"cloud", "self_hosted"} or not backend_base:
         raise click.ClickException("no active Cloud/Self-hosted backend")
     data = None
     headers = _backend_owner_headers(cfg, content_type="application/json" if body is not None else None)
     if body is not None:
         data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
-        _backend_api_url(cfg.backend_url, path, params),
+        _backend_api_url(backend_base, path, params),
         method=method,
         data=data,
         headers=headers,
@@ -3152,6 +3193,62 @@ def _is_remote_mode() -> bool:
 _DIRECT_BACKEND_COMMANDS = {"status", "query", "transcripts", "screenshot"}
 
 
+def _deputy_query_base_url(cfg: dict) -> str:
+    """Return the backend-direct query endpoint from a deputy config.
+
+    New configs store `query_base_url` explicitly. Older configs only have
+    `backend_url`; keep those working by deriving the HTTP API origin from
+    the old value when possible.
+    """
+    explicit = (cfg.get("query_base_url") or "").strip()
+    if explicit:
+        return explicit
+    legacy = (cfg.get("backend_url") or "").strip()
+    if not legacy:
+        return ""
+    activity_port = cfg.get("activity_port")
+    try:
+        port = int(activity_port) if activity_port else None
+    except (TypeError, ValueError):
+        port = None
+    return _query_base_url_from_candidate(legacy, port)
+
+
+def _save_deputy_config(path: str, cfg: dict) -> None:
+    from pathlib import Path as _Path
+
+    p = _Path(path)
+    tmp = p.with_name(f".{p.name}.tmp-{os.getpid()}")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+    os.chmod(p, 0o600)
+
+
+def _maybe_update_deputy_query_base_from_status(
+    cfg_path: str,
+    cfg: dict,
+    command: str,
+    data: dict | list | None,
+) -> None:
+    if command != "status" or cfg.get("query_base_url") or not isinstance(data, dict):
+        return
+    candidate = (
+        data.get("query_base_url")
+        or data.get("backend_url")
+        or data.get("server_url")
+        or ""
+    )
+    query_base = _query_base_url_from_candidate(str(candidate), cfg.get("activity_port"))
+    if not query_base:
+        return
+    cfg["query_base_url"] = query_base
+    try:
+        _save_deputy_config(cfg_path, cfg)
+    except OSError:
+        pass
+
+
 def _remote_call(command: str, args: dict, source_pref: str | None = None) -> dict:
     """Run an RPC call from a deputy host through the relay. Returns the
     decrypted response dict (which itself has {ok, data} or {error}).
@@ -3170,7 +3267,7 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
     with open(cfg_path) as f:
         cfg = json.load(f)
 
-    backend_url = (cfg.get("backend_url") or "").strip()
+    backend_url = _deputy_query_base_url(cfg)
     forced_backend = source_pref == "secondary"
     if forced_backend and not backend_url:
         click.echo(
@@ -3242,7 +3339,9 @@ def _remote_call(command: str, args: dict, source_pref: str | None = None) -> di
     if "error" in inner:
         click.echo(f"daemon error: {inner['error']}", err=True)
         sys.exit(1)
-    return inner.get("data") if "data" in inner else inner
+    result = inner.get("data") if "data" in inner else inner
+    _maybe_update_deputy_query_base_from_status(cfg_path, cfg, command, result)
+    return result
 
 
 def _direct_backend_call(
@@ -3258,7 +3357,7 @@ def _direct_backend_call(
     is unavailable, allowing the relay-to-laptop path to handle local-only and
     old-token cases.
     """
-    backend_url = (cfg.get("backend_url") or "").strip()
+    backend_url = _deputy_query_base_url(cfg)
     if not backend_url:
         return None
     if command == "query":
@@ -3335,7 +3434,8 @@ def _direct_backend_call(
 def _sync_deputy_to_backend(record: dict) -> str | None:
     """Provision a deputy ACL on Cloud/self-hosted backend when configured."""
     cfg = FishermanConfig()
-    if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
+    backend_base = _active_backend_base_url(cfg)
+    if cfg.backend_mode not in {"cloud", "self_hosted"} or not backend_base:
         return None
     try:
         body = json.dumps({
@@ -3345,7 +3445,7 @@ def _sync_deputy_to_backend(record: dict) -> str | None:
             "expires_at": record.get("expires_at"),
         }).encode()
         req = urllib.request.Request(
-            _backend_api_url(cfg.backend_url, f"/api/deputies/{record['pubkey']}"),
+            _backend_api_url(backend_base, f"/api/deputies/{record['pubkey']}"),
             data=body,
             method="PUT",
             headers=_backend_owner_headers(cfg, content_type="application/json"),
@@ -3360,11 +3460,12 @@ def _sync_deputy_to_backend(record: dict) -> str | None:
 
 def _revoke_deputy_from_backend(pubkey_hex: str) -> str | None:
     cfg = FishermanConfig()
-    if cfg.backend_mode not in {"cloud", "self_hosted"} or not cfg.backend_url:
+    backend_base = _active_backend_base_url(cfg)
+    if cfg.backend_mode not in {"cloud", "self_hosted"} or not backend_base:
         return None
     try:
         req = urllib.request.Request(
-            _backend_api_url(cfg.backend_url, f"/api/deputies/{pubkey_hex}"),
+            _backend_api_url(backend_base, f"/api/deputies/{pubkey_hex}"),
             method="DELETE",
             headers=_backend_owner_headers(cfg),
         )
@@ -3385,7 +3486,7 @@ def _deputy_agent_setup_instructions(
     relay_url: str,
 ) -> str:
     backend_note = (
-        f"Cloud/Self-hosted backend configured: {backend_url}"
+        f"Cloud/Self-hosted query endpoint configured: {backend_url}"
         if backend_url
         else "No Cloud/Self-hosted backend in this token; relay-to-laptop requires the user's laptop daemon online."
     )
@@ -3482,6 +3583,7 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
     )
 
     backend_url = cfg.backend_url if cfg.backend_mode in {"cloud", "self_hosted"} else None
+    query_base_url = _active_backend_base_url(cfg) if cfg.backend_mode in {"cloud", "self_hosted"} else None
     token = _d.encode_setup_token({
         "u":  pub.hex(),
         "ux": user_x_pub.hex(),
@@ -3492,6 +3594,8 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
         "rate": int(rate),
         "e":  expires_at,
         "b":  backend_url,
+        "q":  query_base_url,
+        "ap": cfg.activity_port,
     })
     sync_error = _sync_deputy_to_backend(record)
     click.echo(f"deputy authorized: {record['name']} ({record['pubkey'][:12]}…)")
@@ -3508,7 +3612,7 @@ def deputy_new(name: str, scopes: str, rate: int, expires: str | None):
         token=token,
         name=name,
         scopes=scope_list,
-        backend_url=backend_url,
+        backend_url=query_base_url,
         relay_url=_ledger_url(),
     ))
 
@@ -3532,16 +3636,24 @@ def deputy_register(token: str, name: str | None):
         "deputy_seed":     payload["k"],
         "relay_url":       payload["r"],
         "backend_url":     payload.get("b") or "",
+        "query_base_url":  payload.get("q") or "",
+        "activity_port":   payload.get("ap") or 9998,
         "scopes":          payload.get("s", "").split(","),
         "rate_per_hour":   payload.get("rate"),
         "expires_at":      payload.get("e"),
     }
+    if not cfg["query_base_url"] and cfg["backend_url"]:
+        cfg["query_base_url"] = _query_base_url_from_candidate(
+            cfg["backend_url"],
+            cfg["activity_port"],
+        )
     saved = _d.save_agent_config(cfg, name=name or payload["n"])
     click.echo(f"registered: {payload['n']}")
     click.echo(f"  config:  {saved}")
     click.echo(f"  user:    {payload['u'][:16]}…")
     click.echo(f"  relay:   {payload['r']}")
-    click.echo(f"  backend: {payload.get('b') or '(none; primary relay only)'}")
+    click.echo(f"  ingest:  {payload.get('b') or '(none)'}")
+    click.echo(f"  query:   {cfg['query_base_url'] or '(none; primary relay only)'}")
     click.echo(f"  scopes:  {payload.get('s', '')}")
 
 

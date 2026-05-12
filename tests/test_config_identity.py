@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from click.testing import CliRunner
+
 from fisherman import cli
 from fisherman import config as config_mod
 from fisherman import deputy
@@ -93,6 +95,20 @@ class ConfigIdentityTests(unittest.TestCase):
                 )
         self.assertEqual(url, "http://127.0.0.1:9998/api/status-llm?limit=3")
 
+    def test_query_base_url_derives_from_self_hosted_ingest_url(self) -> None:
+        self.assertEqual(
+            config_mod.query_base_url_from_backend_url("ws://127.0.0.1:9999/ingest"),
+            "http://127.0.0.1:9998",
+        )
+        self.assertEqual(
+            config_mod.query_base_url_from_backend_url("wss://fish.example/ingest"),
+            "https://fish.example",
+        )
+        self.assertEqual(
+            config_mod.query_base_url_from_backend_url("https://fish.example"),
+            "https://fish.example",
+        )
+
     def test_backend_api_url_keeps_reverse_proxy_origin_for_cloud_ingest(self) -> None:
         url = cli._backend_api_url(
             "wss://fisherman.teleport.computer/ingest",
@@ -137,7 +153,28 @@ class ConfigIdentityTests(unittest.TestCase):
 
             self.assertEqual(cfg.backend_mode, "self_hosted")
             self.assertEqual(cfg.server_url, "wss://fish.example/ingest")
+            self.assertEqual(cfg.query_base_url, "https://fish.example")
             self.assertTrue(cfg.streaming_enabled)
+
+    def test_explicit_query_base_url_overrides_derivation(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            self._home_env(home).write_text(
+                "FISH_BACKEND_MODE=self_hosted\n"
+                "FISH_BACKEND_URL=ws://fish.example:9999/ingest\n"
+                "FISH_QUERY_BASE_URL=https://api.fish.example\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.server_url, "ws://fish.example:9999/ingest")
+            self.assertEqual(cfg.query_base_url, "https://api.fish.example")
 
     def test_backend_config_removes_server_url_env_alias(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
@@ -161,8 +198,10 @@ class ConfigIdentityTests(unittest.TestCase):
             written = user_env.read_text(encoding="utf-8")
             self.assertIn("FISH_BACKEND_MODE=self_hosted\n", written)
             self.assertIn("FISH_BACKEND_URL=ws://new.example:9999/ingest\n", written)
+            self.assertIn("FISH_QUERY_BASE_URL=http://new.example:9998\n", written)
             self.assertNotIn("FISH_SERVER_URL=", written)
             self.assertEqual(cfg.server_url, "ws://new.example:9999/ingest")
+            self.assertEqual(cfg.query_base_url, "http://new.example:9998")
 
     def test_non_cloud_backend_config_resets_dangerous_cloud_policy(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
@@ -469,6 +508,68 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertIn("backend route unavailable", stderr.getvalue())
             direct.assert_not_called()
             urlopen.assert_not_called()
+
+    def test_deputy_direct_backend_uses_query_base_url_before_legacy_backend_url(self) -> None:
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        cfg = {
+            "user_pubkey": "11" * 32,
+            "deputy_seed": "33" * 32,
+            "backend_url": "ws://ingest.example:9999/ingest",
+            "query_base_url": "https://query.example",
+        }
+
+        with mock.patch.object(cli, "_fishkey_header", return_value=("FishKey test", "33" * 32)):
+            with mock.patch("urllib.request.urlopen", return_value=FakeResponse()) as urlopen:
+                self.assertEqual(cli._direct_backend_call("query", {"limit": 3}, cfg), {"ok": True})
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://query.example/api/query?limit=3")
+
+    def test_deputy_direct_backend_derives_query_base_for_old_tokens(self) -> None:
+        cfg = {
+            "backend_url": "ws://ingest.example:9999/ingest",
+            "activity_port": 9997,
+        }
+        self.assertEqual(cli._deputy_query_base_url(cfg), "http://ingest.example:9997")
+
+    def test_deputy_register_saves_query_base_url_from_setup_token(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            os.environ["HOME"] = home_dir
+            token = deputy.encode_setup_token({
+                "u": "11" * 32,
+                "ux": "22" * 32,
+                "n": "agent",
+                "k": "33" * 32,
+                "r": "https://relay.example",
+                "b": "ws://ingest.example:9999/ingest",
+                "q": "https://query.example",
+                "ap": 9998,
+                "s": "read:captures",
+                "rate": 60,
+                "e": None,
+            })
+
+            agent_dir = Path(home_dir) / ".fisherman-deputy"
+            with mock.patch.object(deputy, "_AGENT_DIR", str(agent_dir)):
+                result = CliRunner().invoke(cli.main, ["deputy", "register", token])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            saved = json.loads(
+                (agent_dir / "agent.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(saved["backend_url"], "ws://ingest.example:9999/ingest")
+            self.assertEqual(saved["query_base_url"], "https://query.example")
 
 
 if __name__ == "__main__":

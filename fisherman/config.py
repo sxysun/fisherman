@@ -161,6 +161,44 @@ def ingest_url_from_backend_url(url: str) -> str:
     return url
 
 
+def query_base_url_from_backend_url(url: str, activity_port: int = 9998) -> str:
+    """Return the HTTP API base URL for a Cloud/self-hosted backend.
+
+    Cloud and reverse-proxied self-hosted installs usually configure an
+    HTTPS base URL. Older repo-native self-hosted installs often configure
+    only the WebSocket ingest URL on port 9999; for that shape the HTTP API
+    convention is the same host on FISH_ACTIVITY_PORT, 9998 by default.
+    """
+    url = (url or "").strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.scheme in {"http", "https"}:
+        path = "" if parsed.path in {"", "/", "/ingest"} else parsed.path
+        return urlunparse(parsed._replace(path=path, params="", query="", fragment="")).rstrip("/")
+    if parsed.scheme not in {"ws", "wss"}:
+        return ""
+
+    scheme = "https" if parsed.scheme == "wss" else "http"
+    port = parsed.port
+    if parsed.path.endswith("/ingest") and port not in (None, 80, 443):
+        port = int(activity_port or 9998)
+    host = parsed.hostname or ""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    userinfo = ""
+    if parsed.username:
+        from urllib.parse import quote
+        userinfo = quote(parsed.username, safe="")
+        if parsed.password:
+            userinfo += ":" + quote(parsed.password, safe="")
+        userinfo += "@"
+    netloc = f"{userinfo}{host}"
+    if port not in (None, 80, 443):
+        netloc = f"{netloc}:{port}"
+    return urlunparse((scheme, netloc, "", "", "", "")).rstrip("/")
+
+
 class FishermanConfig(BaseSettings):
     model_config = {
         "env_prefix": "FISH_",
@@ -194,6 +232,11 @@ class FishermanConfig(BaseSettings):
         if mode == "cloud":
             if not self.backend_url:
                 self.backend_url = DEFAULT_CLOUD_BACKEND_URL
+            if not self.query_base_url:
+                self.query_base_url = query_base_url_from_backend_url(
+                    self.backend_url,
+                    self.activity_port,
+                )
             if self.backend_url.startswith(("ws://", "wss://")):
                 self.server_url = ingest_url_from_backend_url(self.backend_url)
             else:
@@ -209,10 +252,16 @@ class FishermanConfig(BaseSettings):
         elif mode == "self_hosted":
             if not self.backend_url:
                 self.backend_url = self.server_url
+            if not self.query_base_url:
+                self.query_base_url = query_base_url_from_backend_url(
+                    self.backend_url,
+                    self.activity_port,
+                )
             if self.backend_url and "server_url" not in values:
                 self.server_url = ingest_url_from_backend_url(self.backend_url)
         elif mode == "local":
             self.backend_url = self.backend_url or ""
+            self.query_base_url = ""
 
     @property
     def streaming_enabled(self) -> bool:
@@ -236,6 +285,7 @@ class FishermanConfig(BaseSettings):
     # Server
     backend_mode: str = "auto"
     backend_url: str = ""
+    query_base_url: str = ""
     cloud_trust_policy: str = "strict"  # strict | dangerously_skip
     cloud_ingest_status: str = ""  # enabled | blocked | ""
     cloud_ingest_block_reason: str = ""
