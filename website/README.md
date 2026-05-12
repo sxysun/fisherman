@@ -14,6 +14,11 @@ Pushes to `main` deploy to Vercel once `VERCEL_TOKEN` is configured as a repo
 secret. Website-only changes should not trigger the main product CI or CVM
 deploy path.
 
+Create a Vercel token at https://vercel.com/account/tokens and add it as the
+GitHub repository secret `VERCEL_TOKEN`. The repo variables
+`VERCEL_ORG_ID=team_428cohviSd5wIhBrS8WDSEp0` and
+`VERCEL_PROJECT_ID=prj_6YZ4Ym4Zh52j8TizNcUIJZwmkFvc` are already configured.
+
 ## DNS
 
 The Vercel project is `sxysuns-projects/fisherman-website`, currently deployed
