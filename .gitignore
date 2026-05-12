@@ -18,3 +18,4 @@ website/dist/
 *.app
 .run/
 .DS_Store
+.gstack/

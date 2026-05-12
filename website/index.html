@@ -5,154 +5,469 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Fisherman is a private context home for your screen, friends, agents, and self-hosted workflows."
+      content="Fisherman is a private context home for your Mac. It captures locally, distills your screen into ambient status, and shares only what you choose with friends or agents."
     />
-    <meta property="og:title" content="Fisherman" />
+    <meta property="og:title" content="Fisherman — a private context home for your Mac" />
     <meta
       property="og:description"
-      content="A private context home with local, Cloud, and self-hosted modes."
+      content="Capture locally. Share explicitly. A Mac menu bar app that turns what's on your screen into ambient status for friends and scoped agents."
     />
     <meta property="og:type" content="website" />
-    <meta name="theme-color" content="#10120f" />
+    <meta name="theme-color" content="#0f1110" />
     <link rel="icon" href="/fisherman-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,750&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
-    <title>Fisherman</title>
+    <title>Fisherman — a private context home for your Mac</title>
   </head>
   <body>
-    <canvas id="signal-canvas" aria-hidden="true"></canvas>
     <header class="site-header" aria-label="Primary navigation">
       <a class="brand" href="#top" aria-label="Fisherman home">
-        <img src="/fisherman-icon.png" alt="" width="32" height="32" />
+        <img src="/fisherman-icon.png" alt="" width="28" height="28" />
         <span>Fisherman</span>
       </a>
       <nav>
+        <a href="#how">How it works</a>
         <a href="#modes">Modes</a>
-        <a href="#privacy">Privacy</a>
+        <a href="#friends">Friends</a>
         <a href="#agents">Agents</a>
         <a href="https://github.com/sxysun/fisherman">GitHub</a>
       </nav>
     </header>
 
     <main id="top">
+      <!-- ───────────────────────── Hero ───────────────────────── -->
       <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow">Private context home</p>
-          <h1 id="hero-title">Fisherman</h1>
-          <p class="hero-lede">
-            Capture your screen locally, distill it into ambient status, and
-            let friends or scoped agents see only what you choose to expose.
+        <div class="hero-text">
+          <p class="kicker">A private context home · macOS</p>
+          <h1 id="hero-title">Your Mac knows what you're doing.<br /><em>You choose who else does.</em></h1>
+          <p class="lede">
+            Fisherman runs in your menu bar. It captures your screen
+            locally, turns it into a one-line status, and shares only
+            <em>that</em> — with friends, or with scoped agents.
+            Raw frames never leave your laptop unless you say so.
           </p>
           <div class="hero-actions">
-            <a class="button primary" href="https://github.com/sxysun/fisherman">View repo</a>
-            <a class="button secondary" href="#install">Install</a>
+            <a class="button primary" href="#install">
+              <span>Install for macOS</span>
+              <span class="button-aside">curl · ~30s</span>
+            </a>
+            <a class="button ghost" href="#how">See how it works ↓</a>
           </div>
+          <p class="hero-foot">
+            <span class="dot tiny green"></span>
+            Open source · Apple Silicon &amp; Intel · No account required
+          </p>
         </div>
 
-        <aside class="terminal-panel" aria-label="Fisherman status preview">
-          <div class="panel-row strong">
-            <span class="dot green"></span>
-            <span>Running</span>
-          </div>
-          <div class="panel-rule"></div>
-          <div class="panel-row">
-            <span class="badge">native capture</span>
-            <span class="muted">active</span>
-          </div>
-          <div class="panel-row">
-            <span class="badge">fisherman</span>
-            <span class="muted">uploading</span>
-          </div>
-          <div class="panel-rule"></div>
-          <div class="status-line">
-            <span class="emoji">💻</span>
-            <div>
-              <strong>me coding · 1m</strong>
-              <span>adding shareable agent access</span>
+        <!-- A realistic mockup: a stylized macOS menu bar with a notch
+             dropdown showing the actual Fisherman expanded panel. -->
+        <figure class="hero-mock" aria-label="Fisherman in the macOS menu bar">
+          <div class="mock-window" role="presentation">
+            <div class="mock-menubar">
+              <div class="mock-menubar-left">
+                <span class="apple">●</span>
+                <span>Safari</span>
+                <span class="mock-menu">File</span>
+                <span class="mock-menu">Edit</span>
+                <span class="mock-menu">View</span>
+              </div>
+              <div class="mock-notch" aria-hidden="true">
+                <span class="dot green"></span>
+                <span class="mock-emoji">💻</span>
+                <span class="mock-emoji">🎨</span>
+                <span class="mock-emoji">📖</span>
+              </div>
+              <div class="mock-menubar-right">
+                <span>100%</span>
+                <span>Fri 4:21</span>
+              </div>
+            </div>
+
+            <div class="mock-stage">
+              <div class="mock-panel" role="img" aria-label="Expanded Fisherman panel">
+                <header class="panel-head">
+                  <span class="dot green"></span>
+                  <span class="panel-title">3 friends active · everything local</span>
+                </header>
+                <div class="panel-rule"></div>
+                <ul class="panel-list">
+                  <li>
+                    <span class="emoji">💻</span>
+                    <div>
+                      <strong>me · coding</strong>
+                      <span>wiring agent access into menubar</span>
+                    </div>
+                    <span class="when">now</span>
+                  </li>
+                  <li>
+                    <span class="emoji">🎨</span>
+                    <div>
+                      <strong>nora · designing</strong>
+                      <span>onboarding mockups · in flow 🔥</span>
+                    </div>
+                    <span class="when">2m</span>
+                  </li>
+                  <li>
+                    <span class="emoji">📖</span>
+                    <div>
+                      <strong>kai · reading</strong>
+                      <span>tdx attestation spec, page 14</span>
+                    </div>
+                    <span class="when">7m</span>
+                  </li>
+                </ul>
+                <div class="panel-rule"></div>
+                <footer class="panel-foot">
+                  <span class="tag">local capture</span>
+                  <span class="tag">e2ee relay</span>
+                  <span class="tag tag-muted">cloud off</span>
+                </footer>
+              </div>
             </div>
           </div>
-          <div class="meter" aria-hidden="true">
-            <span></span><span></span><span></span><span></span><span></span><span></span>
+          <figcaption>The menu bar notch, expanded. Your status, your friends, your trust boundary.</figcaption>
+        </figure>
+      </section>
+
+      <!-- ─────────────────── How it works (onboarding) ─────────────────── -->
+      <section class="how" id="how" aria-labelledby="how-title">
+        <header class="section-head">
+          <p class="kicker">How it works</p>
+          <h2 id="how-title">Four steps to a private context home.</h2>
+          <p class="section-lede">
+            Local-first by default. No account to make, no cloud to opt
+            into, no friends required. Each step below is optional —
+            stop at step 2 and you have a personal screen journal that
+            never leaves your Mac.
+          </p>
+        </header>
+
+        <ol class="steps">
+          <li class="step">
+            <div class="step-meta">
+              <span class="step-num">01</span>
+              <span class="step-time">~30s</span>
+            </div>
+            <h3>Install the app and daemon</h3>
+            <p>
+              One command. Installs <code class="inline">Fisherman.app</code> into
+              <code class="inline">/Applications</code> and a background daemon
+              into <code class="inline">~/.fisherman</code>. No sudo needed.
+            </p>
+            <pre class="terminal" aria-label="Install command"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash</pre>
+          </li>
+
+          <li class="step">
+            <div class="step-meta">
+              <span class="step-num">02</span>
+              <span class="step-time">one click</span>
+            </div>
+            <h3>Grant screen recording, once</h3>
+            <p>
+              macOS will ask the first time the daemon tries to capture.
+              After that, capture runs silently every 5 seconds —
+              compressed, OCR'd, stored on your disk. The frames never
+              touch the network in Local mode.
+            </p>
+            <div class="mock-dialog" role="img" aria-label="macOS screen recording permission dialog">
+              <div class="mock-dialog-head">
+                <span class="lock">🔒</span>
+                <strong>"Fisherman" would like to record this computer's screen</strong>
+              </div>
+              <p>Fisherman captures what's on your screen to build your local context history.</p>
+              <div class="mock-dialog-actions">
+                <button class="mock-btn">Don't Allow</button>
+                <button class="mock-btn primary">Open System Settings</button>
+              </div>
+            </div>
+          </li>
+
+          <li class="step">
+            <div class="step-meta">
+              <span class="step-num">03</span>
+              <span class="step-time">optional</span>
+            </div>
+            <h3>Pick where your context lives</h3>
+            <p>
+              Default is <strong>Local</strong>. Nothing leaves your Mac.
+              You can move to Fisherman Cloud (attested, multi-tenant)
+              or your own server later — history comes with you.
+            </p>
+            <div class="mode-pick" role="img" aria-label="Mode picker mockup">
+              <label class="mode-option active">
+                <span class="radio on"></span>
+                <div>
+                  <strong>Local Only</strong>
+                  <span>Raw context stays on this Mac.</span>
+                </div>
+                <span class="pill">default</span>
+              </label>
+              <label class="mode-option">
+                <span class="radio"></span>
+                <div>
+                  <strong>Fisherman Cloud</strong>
+                  <span>Managed, TDX-attested, approval required.</span>
+                </div>
+              </label>
+              <label class="mode-option">
+                <span class="radio"></span>
+                <div>
+                  <strong>Self-Hosted</strong>
+                  <span>Same backend, your server.</span>
+                </div>
+              </label>
+            </div>
+          </li>
+
+          <li class="step">
+            <div class="step-meta">
+              <span class="step-num">04</span>
+              <span class="step-time">optional</span>
+            </div>
+            <h3>Share status. Authorize agents.</h3>
+            <p>
+              Send a friend code over Signal to see each other in the
+              notch. Generate a scoped, expiring token to let an agent
+              read your captures or transcripts. Revoke either without
+              rotating your Fisherman identity.
+            </p>
+            <div class="share-grid">
+              <div class="share-card">
+                <span class="share-kicker">friend code</span>
+                <code class="share-code">fish:friend:Z3l4-NwK2-pQrM</code>
+                <p>Paste into a friend's Settings → Friends. You'll appear in each other's notch on next sync.</p>
+              </div>
+              <div class="share-card">
+                <span class="share-kicker">agent token</span>
+                <code class="share-code">fish:deputy:cap=read.status,read.transcripts ttl=24h</code>
+                <p>Hand to your agent runtime. It can call <code class="inline">/api/status</code> and <code class="inline">/api/transcripts</code>, nothing else.</p>
+              </div>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <!-- ───────────────────────── Modes ───────────────────────── -->
+      <section class="modes" id="modes" aria-labelledby="modes-title">
+        <header class="section-head">
+          <p class="kicker">One product · three context homes</p>
+          <h2 id="modes-title">Move where your context lives — without losing it.</h2>
+        </header>
+
+        <div class="mode-grid">
+          <article class="mode-card" data-accent="green">
+            <header>
+              <span class="mode-bar"></span>
+              <span class="mode-tag">default</span>
+            </header>
+            <h3>Local Only</h3>
+            <p>
+              Raw captures, transcripts, embeddings — all on your Mac.
+              Friend status still flows through an encrypted relay
+              that only ever sees ciphertext.
+            </p>
+            <ul class="mode-points">
+              <li>Zero outbound capture traffic</li>
+              <li>Friend status works (E2EE relay)</li>
+              <li>Agents must run on your machine</li>
+            </ul>
+          </article>
+
+          <article class="mode-card" data-accent="blue">
+            <header>
+              <span class="mode-bar"></span>
+              <span class="mode-tag">attested</span>
+            </header>
+            <h3>Fisherman Cloud</h3>
+            <p>
+              A managed backend running in a TDX-attested enclave.
+              Multi-tenant ingest, fast queries, remote agents.
+              Every new release must be reviewed and re-approved by
+              your client before it gets your data.
+            </p>
+            <ul class="mode-points">
+              <li>TDX attestation, reproducible builds</li>
+              <li>Per-release client approval gate</li>
+              <li>Same friend &amp; agent APIs</li>
+            </ul>
+          </article>
+
+          <article class="mode-card" data-accent="amber">
+            <header>
+              <span class="mode-bar"></span>
+              <span class="mode-tag">sovereign</span>
+            </header>
+            <h3>Self-Hosted</h3>
+            <p>
+              The same server image, on your hardware. Bring your own
+              S3-compatible storage and Postgres. Keep the official
+              relay so you stay interoperable with friends on Cloud
+              or Local.
+            </p>
+            <ul class="mode-points">
+              <li>Single-tenant, your infra</li>
+              <li>Interops with other modes</li>
+              <li>Bring-your-own object storage</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <!-- ───────────────────────── Friends ───────────────────────── -->
+      <section class="friends" id="friends" aria-labelledby="friends-title">
+        <div class="friends-text">
+          <p class="kicker">Friends</p>
+          <h2 id="friends-title">Ambient presence, encrypted per recipient.</h2>
+          <p>
+            A friend code is a one-line handshake. After paste, you
+            each see each other's distilled status in the notch — one
+            emoji, one phrase, no raw bytes. The relay only ever
+            stores ciphertext addressed to your recipients.
+          </p>
+          <ul class="bullets">
+            <li><strong>One-line invite.</strong> Paste, name, done.</li>
+            <li><strong>Per-friend policy.</strong> "work" sees a different summary than "close".</li>
+            <li><strong>Always reversible.</strong> Unfriend revokes both directions.</li>
+          </ul>
+        </div>
+
+        <aside class="friends-mock" aria-label="Friend invite flow mockup">
+          <div class="friend-step">
+            <span class="step-pill">1</span>
+            <div>
+              <strong>You generate</strong>
+              <code class="share-code">fish:friend:Z3l4-NwK2-pQrM</code>
+            </div>
+          </div>
+          <div class="friend-arrow" aria-hidden="true">↓</div>
+          <div class="friend-step">
+            <span class="step-pill">2</span>
+            <div>
+              <strong>Nora pastes &amp; names you</strong>
+              <span class="muted">audience: close · policy: full status</span>
+            </div>
+          </div>
+          <div class="friend-arrow" aria-hidden="true">↓</div>
+          <div class="friend-step glow">
+            <span class="step-pill">3</span>
+            <div>
+              <strong>Notch updates</strong>
+              <span>🎨 nora · designing · in flow 🔥</span>
+            </div>
           </div>
         </aside>
       </section>
 
-      <section class="install-band" id="install" aria-labelledby="install-title">
-        <div>
-          <p class="eyebrow">Start local. Move when ready.</p>
-          <h2 id="install-title">Install the Mac app and daemon.</h2>
+      <!-- ───────────────────────── Agents ───────────────────────── -->
+      <section class="agents" id="agents" aria-labelledby="agents-title">
+        <header class="section-head">
+          <p class="kicker">Agent access</p>
+          <h2 id="agents-title">Give tools scoped context. Not your whole machine.</h2>
+          <p class="section-lede">
+            A deputy token is a capability: a list of read scopes, a
+            ttl, an optional rate cap. Hand it to Claude Code,
+            Cursor, an autonomous agent, or your own shell loop. The
+            agent only sees what the token allows. Pull the token,
+            access stops.
+          </p>
+        </header>
+
+        <div class="agent-layout">
+          <ol class="agent-steps">
+            <li>
+              <span class="step-pill">create</span>
+              <p>From Settings → Agent Access. Pick scopes (status, captures, transcripts, screenshots). Set a TTL.</p>
+            </li>
+            <li>
+              <span class="step-pill">register</span>
+              <p>Paste the resulting block into the agent's environment. Works with any HTTP-speaking runtime.</p>
+            </li>
+            <li>
+              <span class="step-pill">query</span>
+              <p>The agent reads only what the token grants. Every call is logged and visible from the menu bar.</p>
+            </li>
+            <li>
+              <span class="step-pill">revoke</span>
+              <p>One click. Or wait for TTL. Identity, friends, and other agents are untouched.</p>
+            </li>
+          </ol>
+
+          <pre class="terminal terminal-tall" aria-label="Example agent token registration"><span class="prompt">$</span> fisherman deputy create \
+    --scopes read.status,read.transcripts \
+    --ttl 24h \
+    --label "claude-code review loop"
+
+<span class="comment"># share with the agent runtime →</span>
+FISH_DEPUTY_TOKEN=fish:deputy:eyJhbGciOiJFZERTQSJ9...
+FISH_BASE=https://fisherman.teleport.computer
+
+<span class="prompt">$</span> curl -H "Authorization: Bearer $FISH_DEPUTY_TOKEN" \
+       $FISH_BASE/api/status
+
+<span class="response">{
+  "status": "coding",
+  "phrase": "wiring agent access into menubar",
+  "in_flow": true,
+  "updated_at": "2026-05-11T16:21:09Z"
+}</span></pre>
         </div>
-        <code>curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash</code>
       </section>
 
-      <section class="section" id="modes" aria-labelledby="modes-title">
-        <div class="section-heading">
-          <p class="eyebrow">One product, three context homes</p>
-          <h2 id="modes-title">Choose where private context lives.</h2>
-        </div>
-        <div class="mode-grid">
-          <article class="mode-card local">
-            <span class="mode-number">01</span>
-            <h3>Local Only</h3>
-            <p>Raw context stays on your laptop. Friend status still works through the encrypted relay.</p>
-          </article>
-          <article class="mode-card cloud">
-            <span class="mode-number">02</span>
-            <h3>Fisherman Cloud</h3>
-            <p>Managed backend with TDX attestation, multi-tenant ingest, and explicit client approval.</p>
-          </article>
-          <article class="mode-card hosted">
-            <span class="mode-number">03</span>
-            <h3>Self-Hosted</h3>
-            <p>Run the same backend on your own server and keep the official encrypted relay for interop.</p>
-          </article>
-        </div>
-      </section>
-
-      <section class="split-section" id="privacy" aria-labelledby="privacy-title">
-        <div>
-          <p class="eyebrow">Privacy model</p>
+      <!-- ───────────────────────── Privacy ───────────────────────── -->
+      <section class="privacy" id="privacy" aria-labelledby="privacy-title">
+        <header class="section-head">
+          <p class="kicker">Privacy model</p>
           <h2 id="privacy-title">Trust is explicit, not implied.</h2>
-          <p>
-            Local mode avoids raw upload. Cloud mode requires attestation before
-            private context leaves the device. Friend status is encrypted per
-            recipient, so the relay stores signed ciphertext rather than plaintext.
+        </header>
+        <div class="privacy-grid">
+          <div class="privacy-card">
+            <span class="num">01</span>
+            <h3>Persistent identity, on your disk</h3>
+            <p>An ed25519 key in <code class="inline">~/.fisherman/.env</code> signs everything. Reinstall, keep your friends. Delete the key, become a stranger.</p>
+          </div>
+          <div class="privacy-card">
+            <span class="num">02</span>
+            <h3>Client-held Cloud data keys</h3>
+            <p>Cloud receives data under keys you control. A new Cloud release must be reviewed and re-approved by your client before it can compute on history.</p>
+          </div>
+          <div class="privacy-card">
+            <span class="num">03</span>
+            <h3>Portable context, end to end</h3>
+            <p>Export, import, and delete history when moving between Local, Cloud, and Self-Hosted. The on-disk format is the source of truth, not the server.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ───────────────────────── Install CTA ───────────────────────── -->
+      <section class="install-cta" id="install" aria-labelledby="install-title">
+        <div class="install-text">
+          <p class="kicker">Install</p>
+          <h2 id="install-title">One command. Starts in Local mode.</h2>
+          <p>Drops <code class="inline">Fisherman.app</code> into <code class="inline">/Applications</code> and the daemon into <code class="inline">~/.fisherman</code>. You can read the script first — it's plain bash.</p>
+          <p class="muted small">
+            macOS · Apple Silicon &amp; Intel · uv-managed Python ·
+            Swift menu bar app
           </p>
         </div>
-        <div class="privacy-list" aria-label="Privacy guarantees">
-          <div><span>01</span><strong>Persistent user identity</strong><p>Your key stays stable across installs and signs protocol traffic.</p></div>
-          <div><span>02</span><strong>Client-held Cloud data keys</strong><p>New Cloud deploys need renewed approval before they can compute on history.</p></div>
-          <div><span>03</span><strong>Portable context homes</strong><p>Export, import, and delete history when moving between Local, Cloud, and Self-Hosted.</p></div>
-        </div>
-      </section>
-
-      <section class="section agents" id="agents" aria-labelledby="agents-title">
-        <div class="section-heading">
-          <p class="eyebrow">Agent Access</p>
-          <h2 id="agents-title">Give tools scoped context, not your whole machine.</h2>
-        </div>
-        <div class="agent-flow">
-          <div><span>create</span><p>Generate an expiring deputy token with exact scopes.</p></div>
-          <div><span>register</span><p>Paste the setup block into a remote agent host.</p></div>
-          <div><span>query</span><p>The agent reads captures, transcripts, screenshots, or status only if granted.</p></div>
-          <div><span>revoke</span><p>Remove access without rotating your Fisherman identity.</p></div>
-        </div>
-      </section>
-
-      <section class="closing">
-        <h2>Built for local-first people who still need always-on workflows.</h2>
-        <a class="button primary" href="https://github.com/sxysun/fisherman">Read the source</a>
+        <pre class="terminal terminal-cta" aria-label="Install command"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash</pre>
       </section>
     </main>
 
     <footer>
-      <span>Fisherman</span>
-      <a href="https://github.com/sxysun/fisherman/blob/main/docs/privacy-threat-model.md">Privacy threat model</a>
-      <a href="https://github.com/sxysun/fisherman/blob/main/docs/context-migration.md">Context migration</a>
+      <div class="footer-brand">
+        <img src="/fisherman-icon.png" alt="" width="22" height="22" />
+        <span>Fisherman</span>
+      </div>
+      <nav class="footer-nav" aria-label="Footer">
+        <a href="https://github.com/sxysun/fisherman">Source</a>
+        <a href="https://github.com/sxysun/fisherman/blob/main/docs/privacy-threat-model.md">Threat model</a>
+        <a href="https://github.com/sxysun/fisherman/blob/main/docs/context-migration.md">Context migration</a>
+        <a href="https://github.com/sxysun/fisherman/blob/main/SECURITY.md">Security</a>
+      </nav>
     </footer>
 
     <script type="module" src="/src/main.ts"></script>
