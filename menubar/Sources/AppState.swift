@@ -176,7 +176,7 @@ final class AppState {
             return "down"
         }
         if streamingEnabled {
-            return fishermanConnected ? "uploading" : disconnectedServiceLabel
+            return fishermanConnected ? "connected" : disconnectedServiceLabel
         }
         if backendMode == "cloud" {
             return blockedServiceLabel

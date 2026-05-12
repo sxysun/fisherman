@@ -106,6 +106,7 @@ def build_capability_payload(
     default_max_frames_per_hour = None
     max_ws_message_bytes = None
     max_image_bytes = None
+    version = None
     if isinstance(ingest_body, dict):
         raw_missing = ingest_body.get("missing") or []
         if isinstance(raw_missing, list):
@@ -119,6 +120,7 @@ def build_capability_payload(
         default_max_frames_per_hour = ingest_body.get("default_max_frames_per_hour")
         max_ws_message_bytes = ingest_body.get("max_ws_message_bytes")
         max_image_bytes = ingest_body.get("max_image_bytes")
+        version = ingest_body.get("version")
 
     overall = "ok" if mirror_ok and relay_ok and ingest_ready else "degraded"
     return {
@@ -145,6 +147,7 @@ def build_capability_payload(
             "max_ws_message_bytes": max_ws_message_bytes,
             "max_image_bytes": max_image_bytes,
             "detail": _body_summary(ingest_body),
+            "version": version,
         },
         "mirror": {
             "paired": mirror_paired,

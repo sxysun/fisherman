@@ -151,6 +151,24 @@ def _default_max_frames_per_hour() -> int:
         return 1200
 
 
+def _runtime_version_payload(component: str = "fisherman-cloud-ingest") -> dict[str, Any]:
+    return {
+        "component": component,
+        "version": os.environ.get("FISHERMAN_VERSION", "0.1.0"),
+        "git_commit": (
+            os.environ.get("FISHERMAN_GIT_COMMIT")
+            or os.environ.get("GITHUB_SHA")
+            or None
+        ),
+        "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST") or None,
+        "build_time": os.environ.get("FISHERMAN_BUILD_TIME") or None,
+        "multi_tenant": True,
+        "tenant_key_mode": "client_provided" if _client_key_mode() else "server_wrapped",
+        "storage": _storage_backend(),
+        "status_llm_model": _managed_status_llm_model(),
+    }
+
+
 def missing_required_env(key_source: str | None = None) -> list[str]:
     if key_source is None:
         key_source = _ensure_encryption_key()
@@ -185,6 +203,7 @@ def readiness_payload() -> dict[str, Any]:
         "status_llm_model": _managed_status_llm_model(),
         "default_max_frames_per_hour": _default_max_frames_per_hour(),
         "missing": missing,
+        "version": _runtime_version_payload(),
     }
 
 
@@ -192,9 +211,14 @@ async def _health(_: web.Request) -> web.Response:
     return web.json_response(readiness_payload())
 
 
+async def _version(_: web.Request) -> web.Response:
+    return web.json_response(_runtime_version_payload())
+
+
 async def _serve_unconfigured() -> None:
     app = web.Application()
     app.router.add_get("/health", _health)
+    app.router.add_get("/api/version", _version)
 
     runner = web.AppRunner(app)
     await runner.setup()

@@ -937,8 +937,87 @@ def repair(as_json):
     click.echo(click.style("  fisherman is healthy", fg="green"))
 
 
+def _version_payload() -> dict:
+    from fisherman import upgrade as _up
+    from fisherman import config as _cfg
+
+    inst = _up.detect_installed()
+    cfg = FishermanConfig()
+    daemon = _up.daemon_status(timeout=1.0)
+    return {
+        "installed": {
+            "install_dir": str(inst.install_dir),
+            "commit": inst.git_commit,
+            "branch": inst.git_branch,
+            "subject": inst.git_subject,
+            "installed_at": inst.installed_at,
+            "source_kind": inst.source_kind,
+            "has_venv": inst.has_venv,
+            "has_app": inst.has_app,
+        },
+        "config": {
+            "env_path": str(_cfg.user_env_path()),
+            "backend_mode": cfg.backend_mode,
+            "backend_url": cfg.backend_url,
+            "backend_summary": cfg.backend_summary,
+            "ingest_url": cfg.server_url if cfg.streaming_enabled else None,
+            "streaming_enabled": cfg.streaming_enabled,
+            "status_relay_url": cfg.status_relay_url,
+            "identity": bool(cfg.private_key),
+        },
+        "daemon": daemon,
+    }
+
+
+def _same_commit(left: str | None, right: str | None) -> bool:
+    if not left or not right:
+        return False
+    return left.split("-", 1)[0] == right.split("-", 1)[0]
+
+
+def _backend_version_payload(
+    cfg: FishermanConfig | None = None,
+    *,
+    timeout: float = 5.0,
+) -> dict:
+    cfg = cfg or FishermanConfig()
+    out = {
+        "mode": cfg.backend_mode,
+        "backend_url": cfg.backend_url,
+        "available": False,
+        "version": None,
+        "error": None,
+        "detail": None,
+    }
+    if cfg.backend_mode == "local":
+        out["detail"] = "Local Only has no remote backend to update."
+        return out
+    base = cfg.backend_url or cfg.server_url
+    if not base:
+        out["error"] = "backend_url_not_configured"
+        return out
+    url = _backend_api_url(base, "/api/version")
+    out["api_url"] = url
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = resp.read()
+            version_body = json.loads(body.decode("utf-8"))
+        out["available"] = True
+        out["version"] = version_body
+        return out
+    except urllib.error.HTTPError as e:
+        out["error"] = f"http_{e.code}"
+        out["detail"] = e.read().decode("utf-8", errors="replace")[:500]
+        return out
+    except Exception as e:
+        out["error"] = type(e).__name__
+        out["detail"] = str(e)
+        return out
+
+
 @main.command()
-def version():
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def version(as_json: bool):
     """Show what's installed and what's currently running.
 
     Reads the version stamp written by `fisherman upgrade` (so the
@@ -947,11 +1026,16 @@ def version():
     the stamp.
     """
     from fisherman import upgrade as _up
-    from fisherman import config as _cfg
+
+    payload = _version_payload()
     inst = _up.detect_installed()
     cfg = FishermanConfig()
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+
     click.echo(f"install dir:  {inst.install_dir}")
-    click.echo(f"config:       {_cfg.user_env_path()}")
+    click.echo(f"config:       {payload['config']['env_path']}")
     click.echo(f"backend:      {cfg.backend_summary}")
     click.echo(f"ingest:       {cfg.server_url if cfg.streaming_enabled else 'disabled'}")
     click.echo(f"relay:        {cfg.status_relay_url}")
@@ -971,12 +1055,70 @@ def version():
         click.echo("version:      unknown (no version stamp + no .git in install dir)")
     click.echo(f"venv:         {'yes' if inst.has_venv else 'NO — run install.sh'}")
     click.echo(f"menubar app:  {'yes' if inst.has_app else 'NO — open Fisherman.app once to install'}")
-    s = _up.daemon_status()
+    s = payload["daemon"]
     if s is None:
         click.echo("daemon:       NOT RUNNING")
     else:
         click.echo(f"daemon:       running, paused={s.get('paused')}, "
                    f"frames_sent={s.get('frames_sent')}")
+
+
+@main.command(name="update-status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.option("--timeout", default=5.0, show_default=True,
+              help="Seconds for backend version checks.")
+def update_status(as_json: bool, timeout: float):
+    """Check whether the app or active context home has update information."""
+    from fisherman import upgrade as _up
+
+    payload = _version_payload()
+    installed = _up.detect_installed()
+    latest = None
+    update_error = None
+    try:
+        src = _up.fetch_source_from_git(installed.install_dir)
+        latest = {
+            "commit": src.git_commit,
+            "branch": src.git_branch,
+            "subject": src.git_subject,
+            "source_kind": "git",
+        }
+    except Exception as e:
+        update_error = str(e)
+    payload["latest"] = latest
+    payload["update_error"] = update_error
+    payload["update_available"] = bool(
+        latest
+        and installed.git_commit
+        and not _same_commit(installed.git_commit, latest.get("commit"))
+    )
+    payload["backend"] = _backend_version_payload(timeout=timeout)
+
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    inst_commit = installed.git_commit or "unknown"
+    click.echo(f"installed: {inst_commit}")
+    if latest:
+        click.echo(f"latest:    {latest.get('commit') or 'unknown'}")
+        click.echo(
+            "update:    "
+            + ("available" if payload["update_available"] else "up to date")
+        )
+    else:
+        click.echo(f"latest:    unavailable ({update_error})")
+    backend = payload["backend"]
+    if backend.get("available") and isinstance(backend.get("version"), dict):
+        version_body = backend["version"]
+        click.echo(
+            "backend:   "
+            + str(version_body.get("git_commit") or version_body.get("version") or "reported")
+        )
+    elif backend.get("mode") == "local":
+        click.echo("backend:   local only")
+    else:
+        click.echo(f"backend:   version unavailable ({backend.get('detail') or backend.get('error')})")
 
 
 @main.group(name="backend")
@@ -1084,6 +1226,32 @@ def backend_status(as_json: bool):
             f"daemon:     running; streaming={daemon_streaming} "
             f"connected={daemon.get('connected')} frames={daemon.get('frames_sent')}"
         )
+
+
+@backend_group.command(name="version")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.option("--timeout", default=5.0, show_default=True)
+def backend_version(as_json: bool, timeout: float):
+    """Show version metadata for the active remote context home."""
+    payload = _backend_version_payload(timeout=timeout)
+    if as_json:
+        click.echo(json.dumps(payload, indent=2))
+        return
+    if payload["mode"] == "local":
+        click.echo("backend: Local Only")
+        click.echo(payload["detail"])
+        return
+    click.echo(f"backend: {payload['backend_url'] or 'not configured'}")
+    if payload["available"] and isinstance(payload.get("version"), dict):
+        version_body = payload["version"]
+        click.echo(f"component: {version_body.get('component') or 'unknown'}")
+        click.echo(f"version:   {version_body.get('version') or 'unknown'}")
+        click.echo(f"commit:    {version_body.get('git_commit') or 'unknown'}")
+        image = version_body.get("image_digest")
+        if image:
+            click.echo(f"image:     {image}")
+    else:
+        click.echo(f"version unavailable: {payload.get('detail') or payload.get('error')}")
 
 
 @backend_group.group(name="configure")

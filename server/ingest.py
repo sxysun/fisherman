@@ -201,6 +201,48 @@ def _default_max_frames_per_hour() -> int | None:
     return limit if limit and limit > 0 else None
 
 
+def _runtime_version_payload(component: str = "fisherman-backend") -> dict:
+    def detect_git_commit() -> str | None:
+        try:
+            import subprocess
+            repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip() or None
+        except Exception:
+            return None
+        return None
+
+    git_commit = (
+        os.environ.get("FISHERMAN_GIT_COMMIT")
+        or os.environ.get("GITHUB_SHA")
+        or detect_git_commit()
+    )
+    storage_backend = "r2" if (
+        os.environ.get("R2_ACCOUNT_ID")
+        and os.environ.get("R2_ACCESS_KEY_ID")
+        and os.environ.get("R2_SECRET_ACCESS_KEY")
+    ) else "local"
+    return {
+        "component": component,
+        "version": os.environ.get("FISHERMAN_VERSION", "0.1.0"),
+        "git_commit": git_commit,
+        "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST") or None,
+        "build_time": os.environ.get("FISHERMAN_BUILD_TIME") or None,
+        "multi_tenant": is_multi_tenant_enabled(),
+        "tenant_key_mode": _cloud_key_mode() if is_multi_tenant_enabled() else _KEY_SOURCE_SERVER,
+        "storage": storage_backend,
+        "status_llm_model": _managed_status_llm_model(),
+    }
+
+
 def _max_ws_message_bytes() -> int:
     return (
         _env_int("FISH_CLOUD_MAX_WS_MESSAGE_BYTES", _DEFAULT_MAX_WS_MESSAGE_BYTES)
@@ -1485,7 +1527,13 @@ async def _http_health(request: "web.Request") -> "web.Response":
         "max_ws_message_bytes": _max_ws_message_bytes(),
         "max_image_bytes": _max_image_bytes(),
         "missing": [],
+        "version": _runtime_version_payload(),
     })
+
+
+async def _http_version(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: GET /api/version - safe deployment metadata."""
+    return web.json_response(_runtime_version_payload())
 
 
 async def _http_cloud_account(request: "web.Request") -> "web.Response":
@@ -3072,6 +3120,7 @@ async def _run(host: str, port: int) -> None:
         app["db"] = db
         app["storage"] = r2
         app.router.add_get("/health", _http_health)
+        app.router.add_get("/api/version", _http_version)
         app.router.add_get("/api/cloud/account", _http_cloud_account)
         app.router.add_post("/api/cloud/access-request", _http_cloud_access_request)
         app.router.add_get("/api/current_activity", _http_current_activity)

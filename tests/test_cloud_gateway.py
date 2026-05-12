@@ -34,6 +34,7 @@ class CloudGatewayTests(unittest.TestCase):
                     "managed_llm_configured": False,
                     "status_llm_model": "mistralai/mistral-nemo",
                     "default_max_frames_per_hour": 1200,
+                    "version": {"component": "fisherman-cloud-ingest", "git_commit": "abc1234"},
                 },
             },
             relay={"ok": True, "body": "ok"},
@@ -50,6 +51,7 @@ class CloudGatewayTests(unittest.TestCase):
         self.assertFalse(payload["ingest"]["managed_llm_configured"])
         self.assertEqual(payload["ingest"]["status_llm_model"], "mistralai/mistral-nemo")
         self.assertEqual(payload["ingest"]["default_max_frames_per_hour"], 1200)
+        self.assertEqual(payload["ingest"]["version"]["git_commit"], "abc1234")
         self.assertTrue(payload["relay"]["ready"])
         self.assertFalse(payload["relay"]["stores_plaintext"])
         self.assertEqual(payload["ingest"]["url"], "wss://fisherman.teleport.computer/ingest")
@@ -144,6 +146,7 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertEqual(payload["status_llm_model"], "mistralai/mistral-nemo")
         self.assertEqual(payload["default_max_frames_per_hour"], 1200)
         self.assertEqual(payload["enrollment_mode"], "closed")
+        self.assertEqual(payload["version"]["component"], "fisherman-cloud-ingest")
 
     def test_client_key_mode_does_not_generate_cloud_wrapping_key(self):
         os.environ.update(
@@ -161,6 +164,7 @@ class CloudIngestReadinessTests(unittest.TestCase):
         self.assertTrue(payload["ingest_ready"])
         self.assertEqual(payload["encryption_key_source"], "client_provided")
         self.assertEqual(payload["tenant_key_mode"], "client_provided")
+        self.assertEqual(payload["version"]["tenant_key_mode"], "client_provided")
         self.assertFalse(Path(os.environ["FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE"]).exists())
 
     def test_self_hosted_aliases_are_reflected_in_readiness_payload(self):

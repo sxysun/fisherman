@@ -60,6 +60,7 @@ struct SettingsView: View {
         case deputies = "Agent Access"
         case agent = "Activity Status"
         case data = "Data"
+        case updates = "Updates"
         case diagnostics = "Diagnostics"
     }
 
@@ -113,6 +114,8 @@ struct SettingsView: View {
                             operationInProgress: $dataOperationInProgress,
                             operationSummary: $dataOperationSummary
                         )
+                    case .updates:
+                        UpdatesTab(config: config)
                     case .diagnostics:
                         DiagnosticsTab()
                     }
