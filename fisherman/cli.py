@@ -975,6 +975,54 @@ def _same_commit(left: str | None, right: str | None) -> bool:
     return left.split("-", 1)[0] == right.split("-", 1)[0]
 
 
+_UPDATE_RELEVANT_PATHS = (
+    "fisherman",
+    "menubar",
+    "mirror",
+    "relay",
+    "server",
+    "skills",
+    "install.sh",
+    "uninstall.sh",
+    "pyproject.toml",
+    "uv.lock",
+    ":(exclude)mirror/deploy/DEPLOYMENTS.md",
+)
+
+
+def _latest_code_source_from_git(install_dir, branch: str | None) -> dict | None:
+    """Return the newest origin commit that changes installed/runtime code.
+
+    CI appends deployment-history commits to mirror/deploy/DEPLOYMENTS.md.
+    Those are useful repository records, but they are not app updates and
+    should not make the menubar nag users to update.
+    """
+    target = f"origin/{branch or 'main'}"
+
+    def git_one(format_arg: str) -> str | None:
+        result = subprocess.run(
+            ["git", "log", "-1", f"--pretty={format_arg}", target, "--", *_UPDATE_RELEVANT_PATHS],
+            cwd=str(install_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    full = git_one("%H")
+    if not full:
+        return None
+    return {
+        "commit": git_one("%h") or full[:7],
+        "full_commit": full,
+        "branch": branch or "main",
+        "subject": git_one("%s") or "",
+        "source_kind": "git",
+    }
+
+
 def _backend_version_payload(
     cfg: FishermanConfig | None = None,
     *,
@@ -1077,7 +1125,7 @@ def update_status(as_json: bool, timeout: float):
     update_error = None
     try:
         src = _up.fetch_source_from_git(installed.install_dir)
-        latest = {
+        latest = _latest_code_source_from_git(installed.install_dir, src.git_branch) or {
             "commit": src.git_commit,
             "branch": src.git_branch,
             "subject": src.git_subject,
