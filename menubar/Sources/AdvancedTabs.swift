@@ -287,8 +287,8 @@ struct ActivityStatusTab: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Picker("", selection: $mode) {
-                    Text("Fisherman-managed").tag("managed")
-                    Text("My OpenRouter key").tag("byo")
+                    Text(managedModeLabel).tag("managed")
+                    Text("My key").tag("byo")
                     Text("No LLM").tag("none")
                 }
                 .labelsHidden()
@@ -301,7 +301,7 @@ struct ActivityStatusTab: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack {
-                    Text("Managed key")
+                    Text(managedKeyTitle)
                         .font(.system(size: 11, weight: .medium))
                     Spacer()
                     Text(managedKeyConfigured ? "configured" : "missing")
@@ -314,7 +314,7 @@ struct ActivityStatusTab: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                SecureField(apiKeyConfigured ? "Existing key configured" : "OpenRouter API key", text: $apiKey)
+                SecureField(apiKeyConfigured ? "Existing key configured" : "Your provider key", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                 modelField
             } else {
@@ -351,7 +351,7 @@ struct ActivityStatusTab: View {
 
     private var modelField: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("LLM endpoint")
+            Text("Provider endpoint")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
             TextField("https://openrouter.ai/api/v1", text: $baseURL)
@@ -364,25 +364,47 @@ struct ActivityStatusTab: View {
         }
     }
 
+    private var managedModeLabel: String {
+        switch config.backendMode {
+        case "cloud":
+            return "Cloud key"
+        case "self_hosted":
+            return "Server env key"
+        default:
+            return "Backend key"
+        }
+    }
+
+    private var managedKeyTitle: String {
+        switch config.backendMode {
+        case "cloud":
+            return "Cloud env key"
+        case "self_hosted":
+            return "Server env key"
+        default:
+            return "Backend key"
+        }
+    }
+
     private var managedCopy: String {
         switch config.backendMode {
         case "cloud":
-            return "Fisherman Cloud uses Fisherman's managed key from inside the Cloud CVM. Selected app, window-title, and OCR snippets are sent to the configured LLM provider for status generation."
+            return "Uses the provider key configured inside Fisherman Cloud. The key is not shipped in the Mac app and is never shown to users."
         case "self_hosted":
-            return "Your self-hosted server uses the managed key configured in that server's environment. This app does not SSH into the server or edit server env vars."
+            return "Uses the provider key configured in this backend server's environment. Fisherman does not bundle a key; new self-hosted users must add their own server env key."
         default:
-            return "Local Only keeps raw context on this Mac. Managed status requires a Cloud or self-hosted context home."
+            return "Local Only has no backend status worker. Use Cloud or Self-hosted for backend-managed status generation, or choose No LLM."
         }
     }
 
     private var byoCopy: String {
         switch config.backendMode {
         case "cloud":
-            return "Apply sends this key to Fisherman Cloud through signed FishKey auth. Cloud stores it encrypted in your tenant settings and decrypts it only inside the backend runtime to generate status."
+            return "Use a key you provide. It is sent to Fisherman Cloud through signed FishKey auth, stored encrypted in your tenant settings, and used only by the backend runtime."
         case "self_hosted":
-            return "Apply sends this key to your self-hosted backend through signed FishKey auth. The backend stores it encrypted in your tenant row and uses it for its own status worker."
+            return "Use a key you provide. It is sent to your self-hosted backend through signed FishKey auth, stored encrypted in your tenant row, and does not edit server env vars."
         default:
-            return "Local Only saves the mode, endpoint, and model on this Mac. BYO key storage is only supported when Cloud or Self-hosted is the active context home."
+            return "Local Only saves the mode, endpoint, and model on this Mac. BYO key storage is only supported when Cloud or Self-hosted is active."
         }
     }
 
