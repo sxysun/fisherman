@@ -216,7 +216,44 @@ def publish_status(
         raise LedgerError(f"relay rejected event: {err}") from e
     except Exception as e:
         raise LedgerError(f"relay unreachable: {e}") from e
-    return data.get("event_id", 0)
+    event_id = data.get("event_id", 0)
+    try:
+        _append_status_log(
+            ts=ts, digest=digest,
+            recipient_pubkey_hex=recipient_pubkey_hex,
+            event_id=event_id,
+        )
+    except Exception:
+        pass
+    return event_id
+
+
+def status_log_path() -> str:
+    return os.path.expanduser("~/.fisherman/status-log.jsonl")
+
+
+def _append_status_log(
+    *, ts: float, digest: dict[str, Any],
+    recipient_pubkey_hex: str, event_id: int,
+) -> None:
+    """Append a row per published status. Local audit feed for `fisherman card`.
+
+    Best-effort: never raises into the caller.
+    """
+    path = status_log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    row = {
+        "ts": ts,
+        "digest": digest,
+        "recipient_pubkey": recipient_pubkey_hex,
+        "event_id": event_id,
+    }
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def fetch_friend_status(

@@ -2872,6 +2872,53 @@ def _parse_since_to_ts(s: str | None) -> float | None:
         return None
 
 
+@main.command(name="card")
+@click.option("--day", default=None,
+              help="YYYY-MM-DD. Defaults to today.")
+@click.option("--since", default=None,
+              help="Window length, e.g. 24h, 3d. Overrides --day.")
+@click.option("--friends", "with_friends", is_flag=True,
+              help="Also include friends' published statuses from the relay.")
+@click.option("--html", "html_out", default=None,
+              help="Write a rendered HTML card to this path.")
+@click.option("--json", "as_json", is_flag=True,
+              help="Print the structured event list as JSON.")
+def card(day, since, with_friends, html_out, as_json):
+    """Show today's status timeline — the daily card as a log of your statuses.
+
+    Reads ~/.fisherman/status-log.jsonl (written by `publish-status`).
+    Add --friends to also fetch friends' recent statuses from the relay.
+    """
+    from fisherman import timeline as _tl
+
+    card_data = _tl.build_card(day=day, since=since, with_friends=with_friends)
+    if as_json:
+        click.echo(json.dumps({
+            "day_label": card_data["day_label"],
+            "my_events": card_data["my_events"],
+            "friend_events": card_data["friend_events"],
+        }, indent=2, ensure_ascii=False, default=str))
+        return
+    text = _tl.render_text(
+        my_events=card_data["my_events"],
+        friend_events=card_data["friend_events"],
+        day_label=card_data["day_label"],
+        friend_idx=card_data["friend_idx"],
+    )
+    click.echo(text)
+    if html_out:
+        html = _tl.render_html(
+            my_events=card_data["my_events"],
+            friend_events=card_data["friend_events"],
+            day_label=card_data["day_label"],
+            friend_idx=card_data["friend_idx"],
+        )
+        out = os.path.expanduser(html_out)
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(html)
+        click.echo(f"\nhtml: {out}", err=True)
+
+
 @main.command(name="publish-status")
 @click.option("--emoji", default=None)
 @click.option("--category", default=None)
