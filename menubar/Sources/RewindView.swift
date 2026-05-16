@@ -2,6 +2,32 @@ import SwiftUI
 import AppKit
 import Foundation
 
+// MARK: - Dedicated URLSession for Rewind
+
+/// Image fetches are bursty (16+ prefetches in flight during play). The
+/// shared URLSession caps at 6 connections per host which queues most of
+/// the burst. This session raises that cap to 12 and disables disk cache
+/// (we cache decoded NSImages in-process, not bytes).
+enum RewindNetworking {
+    static let imageSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpMaximumConnectionsPerHost = 12
+        cfg.timeoutIntervalForRequest = 15.0
+        cfg.timeoutIntervalForResource = 30.0
+        cfg.waitsForConnectivity = false
+        cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        return URLSession(configuration: cfg)
+    }()
+
+    static let indexSession: URLSession = {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.httpMaximumConnectionsPerHost = 4
+        cfg.timeoutIntervalForRequest = 25.0
+        cfg.timeoutIntervalForResource = 60.0
+        return URLSession(configuration: cfg)
+    }()
+}
+
 // MARK: - Frame index
 
 struct FrameRef: Identifiable, Equatable, Hashable {
@@ -31,6 +57,7 @@ func fetchFrameIndex(
     since: Date,
     until: Date
 ) async -> Result<[FrameRef], RewindFetchError> {
+    let session = RewindNetworking.indexSession
     let serverURL = config.effectiveOwnServerURL
     let candidates = config.ownActivityPortCandidates()
     guard !serverURL.isEmpty,
@@ -58,7 +85,7 @@ func fetchFrameIndex(
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 lastError = .requestFailed("No response from \(urlString)")
                 continue
@@ -112,11 +139,97 @@ struct ScreenshotResult {
     let window: String?
 }
 
+struct ThumbnailRef: Identifiable {
+    let id: Int
+    let tsMs: Int
+    let image: NSImage
+}
+
+/// Bulk-fetch all thumbnails for a day so the scrubber renders instantly
+/// regardless of network. Server returns up to 5000 entries in one shot;
+/// payload is typically 5–15MB for a full day of capture.
+@MainActor
+func fetchThumbnails(
+    config: ConfigManager,
+    since: Date,
+    until: Date
+) async -> Result<[ThumbnailRef], RewindFetchError> {
+    let session = RewindNetworking.indexSession
+    let serverURL = config.effectiveOwnServerURL
+    let candidates = config.ownActivityPortCandidates()
+    guard !serverURL.isEmpty,
+          let wsURL = URL(string: serverURL),
+          let host = wsURL.host
+    else { return .failure(.noServerConfigured) }
+
+    let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime]
+    let sinceStr = iso.string(from: since)
+    let untilStr = iso.string(from: until)
+
+    var lastError: RewindFetchError = .requestFailed("No reachable activity port.")
+    for port in candidates {
+        let portSegment = port.isEmpty ? "" : ":\(port)"
+        let urlString = "\(scheme)://\(host)\(portSegment)/api/thumbnails"
+            + "?since=\(sinceStr)&until=\(untilStr)"
+        guard let url = URL(string: urlString) else { continue }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 60.0
+        if let auth = config.signRequest() {
+            request.setValue(auth, forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                lastError = .requestFailed("No response from \(urlString)")
+                continue
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                return .failure(.unauthorized)
+            }
+            if http.statusCode == 404 {
+                lastError = .requestFailed(
+                    "Backend has no /api/thumbnails — redeploy needed."
+                )
+                continue
+            }
+            if http.statusCode != 200 {
+                lastError = .requestFailed("HTTP \(http.statusCode) from thumbnails")
+                continue
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let raw = json["thumbnails"] as? [[String: Any]]
+            else {
+                lastError = .decodeFailed
+                continue
+            }
+            let thumbs: [ThumbnailRef] = raw.compactMap { entry in
+                guard let id = entry["id"] as? Int,
+                      let tsMs = entry["ts_ms"] as? Int,
+                      let b64 = entry["thumb_b64"] as? String,
+                      let bytes = Data(base64Encoded: b64),
+                      let img = NSImage(data: bytes)
+                else { return nil }
+                return ThumbnailRef(id: id, tsMs: tsMs, image: img)
+            }
+            return .success(thumbs)
+        } catch {
+            lastError = .requestFailed(error.localizedDescription)
+            continue
+        }
+    }
+    return .failure(lastError)
+}
+
 @MainActor
 func fetchScreenshot(
     config: ConfigManager,
     frameId: Int
 ) async -> Result<ScreenshotResult, RewindFetchError> {
+    let session = RewindNetworking.imageSession
     let serverURL = config.effectiveOwnServerURL
     let candidates = config.ownActivityPortCandidates()
     guard !serverURL.isEmpty,
@@ -139,7 +252,7 @@ func fetchScreenshot(
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 lastError = .requestFailed("No response from \(urlString)")
                 continue
@@ -197,6 +310,14 @@ struct RewindWindowView: View {
     @State private var imageCache: [Int: ScreenshotResult] = [:]
     @State private var inFlightFetches: Set<Int> = []
 
+    // Pre-computed thumbnails (256px max, ~5KB each). Loaded in bulk on
+    // day open so the scrubber renders instantly even before any full-res
+    // image has been fetched. The full-res JPEG is layered on top once it
+    // arrives, so the user always sees something — never a black frame.
+    @State private var thumbsByDay: [Date: [Int: NSImage]] = [:]
+    @State private var loadingThumbsFor: Set<Date> = []
+    @State private var thumbsError: String?
+
     @State private var playing = false
     @State private var playSpeed: Double = 5.0
     @State private var playTask: Task<Void, Never>?
@@ -215,6 +336,19 @@ struct RewindWindowView: View {
     }
     private var currentFrame: FrameRef? {
         frames.indices.contains(currentIndex) ? frames[currentIndex] : nil
+    }
+
+    private var currentThumb: NSImage? {
+        guard let f = currentFrame else { return nil }
+        return thumbsByDay[selectedDate]?[f.id]
+    }
+
+    /// True when the currently displayed *full-res* bitmap matches the
+    /// scrubber position. The thumbnail (if present) doesn't count as a
+    /// "match" — it's a stand-in until the full-res arrives.
+    private var fullResMatchesCurrent: Bool {
+        guard let f = currentFrame else { return true }
+        return currentLoadedFrameId == f.id
     }
 
     private var dateLabel: String {
@@ -244,11 +378,13 @@ struct RewindWindowView: View {
         }
         .onAppear {
             fetchIndexIfNeeded(selectedDate)
+            fetchThumbsIfNeeded(selectedDate)
             loadFrameIfNeeded()
         }
         .onChange(of: selectedDate) { _, _ in
             stopPlay()
             fetchIndexIfNeeded(selectedDate)
+            fetchThumbsIfNeeded(selectedDate)
             currentImage = nil
             currentMeta = nil
             currentLoadedFrameId = nil
@@ -302,14 +438,16 @@ struct RewindWindowView: View {
 
             Button {
                 indexByDay[selectedDate] = nil
+                thumbsByDay[selectedDate] = nil
                 fetchIndexIfNeeded(selectedDate)
+                fetchThumbsIfNeeded(selectedDate)
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 12, weight: .semibold))
                     .frame(width: 14, height: 14)
             }
             .buttonStyle(.bordered).controlSize(.small)
-            .help("Refresh this day's index")
+            .help("Refresh this day's index + thumbs")
         }
     }
 
@@ -324,15 +462,28 @@ struct RewindWindowView: View {
     // MARK: preview
 
     private var framePreview: some View {
-        ZStack(alignment: .bottomLeading) {
+        ZStack {
+            // Base layer: black background
             Color.black
 
-            if let img = currentImage {
+            // Layer 1: thumbnail (low-res but instant). Always present
+            // once thumbs for the day have loaded — gives the scrubber
+            // an immediate response while full-res is in flight.
+            if let thumb = currentThumb {
+                Image(nsImage: thumb)
+                    .resizable()
+                    .interpolation(.medium)
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            // Layer 2: full-res image, covers the thumb when ready.
+            if let img = currentImage, fullResMatchesCurrent {
                 Image(nsImage: img)
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let err = imageError {
+            } else if let err = imageError, currentThumb == nil {
                 VStack(spacing: 6) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.system(size: 18))
@@ -367,36 +518,68 @@ struct RewindWindowView: View {
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            } else if currentFrame != nil {
+            } else if currentFrame != nil && currentImage == nil && currentThumb == nil {
                 ProgressView().controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            // Overlay: timestamp + app + window
-            if let f = currentFrame {
-                HStack(spacing: 6) {
-                    Text(fmtClock(f.timestamp))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white)
-                    if let meta = currentMeta {
-                        if let app = meta.app, !app.isEmpty {
-                            Text(app)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.white.opacity(0.85))
+            // Top-right loading badge: full-res for the current scrubber
+            // position is still in flight. We hide it once the thumb is
+            // up (visual signal of "loading" is unnecessary when there's
+            // already a usable image showing).
+            VStack {
+                HStack {
+                    Spacer()
+                    if !fullResMatchesCurrent && currentThumb == nil {
+                        ZStack {
+                            Circle()
+                                .fill(Color.black.opacity(0.6))
+                                .frame(width: 28, height: 28)
+                            ProgressView().controlSize(.small)
                         }
-                        if let window = meta.window, !window.isEmpty {
-                            Text("· \(window)")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.white.opacity(0.6))
-                                .lineLimit(1)
-                                .truncationMode(.tail)
+                        .padding(8)
+                    }
+                }
+                Spacer()
+            }
+            .allowsHitTesting(false)
+
+            // Bottom overlay: timestamp + app + window
+            if let f = currentFrame {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 6) {
+                        Text(fmtClock(f.timestamp))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(fullResMatchesCurrent ? .white : .white.opacity(0.55))
+                        if let meta = currentMeta {
+                            if let app = meta.app, !app.isEmpty {
+                                Text(app)
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.white.opacity(0.85))
+                            }
+                            if let window = meta.window, !window.isEmpty {
+                                Text("· \(window)")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.white.opacity(0.6))
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        if !fullResMatchesCurrent {
+                            // Subtle "still loading full-res" cue. Thumb
+                            // is already visible — this is just so the
+                            // user knows higher quality is incoming.
+                            Text(currentThumb == nil ? "loading…" : "preview")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.65))
                         }
                     }
-                    Spacer(minLength: 0)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.55))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.55))
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -483,10 +666,49 @@ struct RewindWindowView: View {
     private var statusLine: String {
         if loadingIndexFor.contains(selectedDate) { return "indexing…" }
         if frames.isEmpty { return "0 frames" }
-        return "\(frames.count) frames · \(fmtClock(frames.first!.timestamp)) → \(fmtClock(frames.last!.timestamp))"
+        let thumbsLoading = loadingThumbsFor.contains(selectedDate)
+        let thumbsReady = (thumbsByDay[selectedDate]?.count ?? 0)
+        let suffix: String
+        if thumbsLoading {
+            suffix = " · loading thumbs"
+        } else if thumbsReady > 0 {
+            suffix = " · \(thumbsReady) thumbs"
+        } else if thumbsError != nil {
+            suffix = " · thumbs unavailable"
+        } else {
+            suffix = ""
+        }
+        return "\(frames.count) frames · \(fmtClock(frames.first!.timestamp)) → \(fmtClock(frames.last!.timestamp))\(suffix)"
     }
 
     // MARK: fetching
+
+    private func fetchThumbsIfNeeded(_ day: Date) {
+        let dayStart = Calendar.current.startOfDay(for: day)
+        guard thumbsByDay[dayStart] == nil, !loadingThumbsFor.contains(dayStart) else { return }
+        guard let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart)
+        else { return }
+
+        loadingThumbsFor.insert(dayStart)
+        thumbsError = nil
+        Task {
+            let result = await fetchThumbnails(config: config, since: dayStart, until: dayEnd)
+            await MainActor.run {
+                loadingThumbsFor.remove(dayStart)
+                switch result {
+                case .success(let thumbs):
+                    var dict: [Int: NSImage] = [:]
+                    dict.reserveCapacity(thumbs.count)
+                    for t in thumbs {
+                        dict[t.id] = t.image
+                    }
+                    thumbsByDay[dayStart] = dict
+                case .failure(let err):
+                    thumbsError = err.localizedDescription
+                }
+            }
+        }
+    }
 
     private func fetchIndexIfNeeded(_ day: Date) {
         let dayStart = Calendar.current.startOfDay(for: day)
@@ -562,15 +784,21 @@ struct RewindWindowView: View {
 
     private func prefetch(around index: Int) {
         guard !frames.isEmpty else { return }
-        let radius = playing ? 4 : 2
-        for delta in 1...radius {
-            let ahead = index + delta
-            if frames.indices.contains(ahead) {
-                prefetchFrame(frames[ahead].id)
+        // During play we lean forward (12 ahead, 2 behind) since the
+        // playhead only moves one direction. When paused, balance the
+        // radius so left/right scrubs are equally responsive.
+        let ahead = playing ? 12 : 4
+        let behind = playing ? 2 : 4
+        for delta in 1...ahead {
+            let i = index + delta
+            if frames.indices.contains(i) {
+                prefetchFrame(frames[i].id)
             }
-            let behind = index - delta
-            if frames.indices.contains(behind) {
-                prefetchFrame(frames[behind].id)
+        }
+        for delta in 1...behind {
+            let i = index - delta
+            if frames.indices.contains(i) {
+                prefetchFrame(frames[i].id)
             }
         }
     }
@@ -625,7 +853,26 @@ struct RewindWindowView: View {
                     playing = false
                     break
                 }
-                positionByDay[selectedDate] = Double(currentIndex + 1)
+                // Adaptive frame-skip: if the next frame isn't cached yet,
+                // jump straight to the nearest cached frame ahead of the
+                // playhead instead of waiting. The slider keeps moving
+                // smoothly; we just drop frames the network can't deliver
+                // in time. Capped so we never skip more than what the
+                // current speed implies (10x = up to 10 frames per tick).
+                let maxSkip = max(1, Int(playSpeed.rounded()))
+                var nextIndex = currentIndex + 1
+                if imageCache[frames[nextIndex].id] == nil {
+                    var probe = nextIndex
+                    let limit = min(count - 1, nextIndex + maxSkip)
+                    while probe < limit, imageCache[frames[probe].id] == nil {
+                        probe += 1
+                    }
+                    // Even if we didn't find a cached one within maxSkip,
+                    // advancing maxSkip steps (vs 1) keeps the playhead
+                    // chasing the network rather than blocking on it.
+                    nextIndex = probe
+                }
+                positionByDay[selectedDate] = Double(min(count - 1, nextIndex))
             }
         }
     }
