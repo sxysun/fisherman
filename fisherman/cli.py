@@ -2881,9 +2881,12 @@ def _parse_since_to_ts(s: str | None) -> float | None:
               help="Also include friends' published statuses from the relay.")
 @click.option("--html", "html_out", default=None,
               help="Write a rendered HTML card to this path.")
+@click.option("--open", "open_in_browser", is_flag=True,
+              help="Render HTML to a temp file and open in your default browser. "
+                   "Implies --html if not set.")
 @click.option("--json", "as_json", is_flag=True,
               help="Print the structured event list as JSON.")
-def card(day, since, with_friends, html_out, as_json):
+def card(day, since, with_friends, html_out, open_in_browser, as_json):
     """Show today's status timeline — the daily card as a log of your statuses.
 
     Reads ~/.fisherman/status-log.jsonl (written by `publish-status`).
@@ -2900,26 +2903,35 @@ def card(day, since, with_friends, html_out, as_json):
             "friend_events": card_data["friend_events"],
         }, indent=2, ensure_ascii=False, default=str))
         return
-    text = _tl.render_text(
-        inferred_events=card_data["inferred_events"],
-        my_events=card_data["my_events"],
-        friend_events=card_data["friend_events"],
-        day_label=card_data["day_label"],
-        friend_idx=card_data["friend_idx"],
-    )
-    click.echo(text)
-    if html_out:
-        html = _tl.render_html(
+
+    if open_in_browser and not html_out:
+        html_out = f"/tmp/fisherman-card-{card_data['day_label'].split(' ')[0]}.html"
+
+    if not html_out:
+        text = _tl.render_text(
             inferred_events=card_data["inferred_events"],
             my_events=card_data["my_events"],
             friend_events=card_data["friend_events"],
             day_label=card_data["day_label"],
             friend_idx=card_data["friend_idx"],
         )
-        out = os.path.expanduser(html_out)
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(html)
-        click.echo(f"\nhtml: {out}", err=True)
+        click.echo(text)
+        return
+
+    html = _tl.render_html(
+        inferred_events=card_data["inferred_events"],
+        my_events=card_data["my_events"],
+        friend_events=card_data["friend_events"],
+        day_label=card_data["day_label"],
+        friend_idx=card_data["friend_idx"],
+    )
+    out = os.path.expanduser(html_out)
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(html)
+    click.echo(f"html: {out}", err=True)
+    if open_in_browser:
+        import webbrowser
+        webbrowser.open(f"file://{out}")
 
 
 @main.command(name="publish-status")
