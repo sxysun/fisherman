@@ -514,8 +514,10 @@ def users_revoke_device(pubkey: str, device_pubkey: str):
 @click.option("--max-frames", default=0,
               help="Stop after this many frames (0 = unlimited)")
 @click.option("--user-pubkey", help="Restrict to one tenant pubkey (hex)")
+@click.option("--concurrency", default=12, show_default=True,
+              help="Parallel R2 downloads per batch")
 def backfill_thumbs(since: str, until: str, batch_size: int,
-                    max_frames: int, user_pubkey: str):
+                    max_frames: int, user_pubkey: str, concurrency: int):
     """Generate thumb_jpeg for past frames that don't have one yet.
 
     Walks frames WHERE thumb_jpeg IS NULL AND image_key IS NOT NULL,
@@ -523,9 +525,11 @@ def backfill_thumbs(since: str, until: str, batch_size: int,
     with the same tenant data key as the original, and writes it back
     to the row. Idempotent — skips frames that already have a thumb.
 
-    Run after deploying the schema migration to populate historical
-    days so the Rewind scrubber works on them.
+    Run with no --since/--until to backfill every day with a capture.
+    Resumable: kill at any time and re-run, it picks up where it left off.
     """
+    import time
+    from concurrent.futures import ThreadPoolExecutor
     _ensure_encryption_key()
     from crypto import fernet_for_data_key
     from PIL import Image
@@ -550,9 +554,87 @@ def backfill_thumbs(since: str, until: str, batch_size: int,
     async def _run():
         storage = create_storage()
         pool = await _get_pool()
+        # Dedicated thread pool sized for our concurrency target. boto3 +
+        # PIL + Fernet are all blocking C work that releases the GIL, so
+        # threads scale well here.
+        executor = ThreadPoolExecutor(max_workers=max(4, concurrency * 2))
+        loop = asyncio.get_running_loop()
+
         total_done = 0
         total_failed = 0
         total_skipped = 0
+        failed_ids: set[int] = set()
+        # (user_pubkey, data_key_source) -> bytes | None
+        key_cache: dict[tuple[str, str], "bytes | None"] = {}
+        start_t = time.time()
+
+        async def _resolve_data_key(user_hex: str, src: str) -> "bytes | None":
+            cache_key = (user_hex, src)
+            if cache_key in key_cache:
+                return key_cache[cache_key]
+            if src == "server_wrapped":
+                async with pool.acquire() as conn:
+                    wrapped = await conn.fetchval(
+                        "SELECT wrapped_data_key FROM users WHERE user_pubkey = $1",
+                        user_hex,
+                    )
+                if wrapped is None:
+                    key_cache[cache_key] = None
+                    return None
+                data_key = unwrap_data_key(bytes(wrapped))
+                key_cache[cache_key] = data_key
+                return data_key
+            # Unknown / legacy: caller falls back to master key (None).
+            key_cache[cache_key] = None
+            return None
+
+        sem = asyncio.Semaphore(concurrency)
+
+        def _download_and_thumb(image_key: str, data_key) -> "tuple[bytes, bytes] | None":
+            """One frame's CPU/IO pipeline. Runs in a thread.
+            Returns (encrypted_thumb_bytes, raw_thumb_bytes_for_debug) or None on failure.
+            """
+            try:
+                jpeg = storage.download(image_key, data_key)
+            except Exception as exc:
+                return ("download_failed", str(exc))  # type: ignore
+            thumb = _thumb(jpeg)
+            if thumb is None:
+                return ("thumb_failed", "")  # type: ignore
+            try:
+                enc = fernet_for_data_key(data_key).encrypt(thumb)
+            except Exception as exc:
+                return ("encrypt_failed", str(exc))  # type: ignore
+            return (enc, b"")
+
+        async def _process_one(row) -> "tuple[int, bytes] | None":
+            nonlocal total_failed, total_skipped
+            async with sem:
+                src = row["data_key_source"]
+                if src == "client_provided":
+                    total_skipped += 1
+                    return None
+                try:
+                    data_key = await _resolve_data_key(row["user_pubkey"], src)
+                except Exception as exc:
+                    click.echo(f"  ! key lookup failed for frame {row['id']}: {exc}", err=True)
+                    failed_ids.add(row["id"])
+                    total_failed += 1
+                    return None
+
+                result = await loop.run_in_executor(
+                    executor, _download_and_thumb, row["image_key"], data_key,
+                )
+                # Pipeline errors come back as ("stage", "detail")
+                if isinstance(result[0], str):
+                    stage, detail = result
+                    click.echo(f"  ! {stage} for frame {row['id']}: {detail}", err=True)
+                    failed_ids.add(row["id"])
+                    total_failed += 1
+                    return None
+                enc = result[0]
+                return (row["id"], enc)
+
         try:
             while True:
                 clauses = ["thumb_jpeg IS NULL", "image_key IS NOT NULL"]
@@ -566,6 +648,11 @@ def backfill_thumbs(since: str, until: str, batch_size: int,
                 if user_pubkey:
                     params.append(user_pubkey.lower())
                     clauses.append(f"user_pubkey = ${len(params)}")
+                # Exclude IDs that have already failed this run so we don't
+                # spin on permanently-broken frames (e.g. R2 object deleted).
+                if failed_ids:
+                    params.append(list(failed_ids))
+                    clauses.append(f"id <> ALL(${len(params)})")
                 params.append(batch_size)
                 limit_idx = len(params)
 
@@ -580,72 +667,45 @@ def backfill_thumbs(since: str, until: str, batch_size: int,
                 if not rows:
                     break
 
-                # Resolve data keys per-row using server-wrapped keys.
-                # Backfill cannot handle client_provided keys (key isn't
-                # available server-side), so those rows get skipped.
-                for row in rows:
-                    src = row["data_key_source"]
-                    if src == "client_provided":
-                        total_skipped += 1
-                        continue
-                    try:
-                        # For server_wrapped, look up the user's wrapped
-                        # key and unwrap with the server master key.
-                        if src == "server_wrapped":
-                            async with pool.acquire() as conn:
-                                wrapped = await conn.fetchval(
-                                    "SELECT wrapped_data_key FROM users "
-                                    "WHERE user_pubkey = $1",
-                                    row["user_pubkey"],
-                                )
-                            if wrapped is None:
-                                # Legacy frame: master key only
-                                data_key = None
-                            else:
-                                data_key = unwrap_data_key(bytes(wrapped))
-                        else:
-                            data_key = None
-                    except Exception as exc:
-                        click.echo(f"  ! key lookup failed for frame {row['id']}: {exc}", err=True)
-                        total_failed += 1
-                        continue
-
-                    try:
-                        jpeg = storage.download(row["image_key"], data_key)
-                    except Exception as exc:
-                        click.echo(f"  ! download failed for frame {row['id']}: {exc}", err=True)
-                        total_failed += 1
-                        continue
-
-                    thumb = _thumb(jpeg)
-                    if thumb is None:
-                        total_failed += 1
-                        continue
-
-                    try:
-                        enc = fernet_for_data_key(data_key).encrypt(thumb)
-                        async with pool.acquire() as conn:
-                            await conn.execute(
-                                "UPDATE frames SET thumb_jpeg = $1 WHERE id = $2",
-                                enc,
-                                row["id"],
-                            )
-                    except Exception as exc:
-                        click.echo(f"  ! write failed for frame {row['id']}: {exc}", err=True)
-                        total_failed += 1
-                        continue
-
-                    total_done += 1
-                    if max_frames and total_done >= max_frames:
+                # Honor --max-frames mid-batch.
+                if max_frames:
+                    room = max_frames - total_done
+                    if room <= 0:
                         break
+                    rows = list(rows)[:room]
 
-                click.echo(f"  progress: {total_done} done, {total_failed} failed, {total_skipped} skipped (client-keyed)")
+                # Process the batch in parallel — concurrency-bounded by sem.
+                results = await asyncio.gather(*[_process_one(row) for row in rows])
+                updates = [r for r in results if r is not None]
+
+                # One batched UPDATE for the whole batch (inside a tx so
+                # partial failures don't leave half-written state).
+                if updates:
+                    async with pool.acquire() as conn:
+                        async with conn.transaction():
+                            await conn.executemany(
+                                "UPDATE frames SET thumb_jpeg = $1 WHERE id = $2",
+                                [(enc, fid) for fid, enc in updates],
+                            )
+                    total_done += len(updates)
+
+                elapsed = time.time() - start_t
+                rate = total_done / elapsed if elapsed > 0 else 0
+                click.echo(
+                    f"  progress: {total_done} done · {total_failed} failed · "
+                    f"{total_skipped} skipped · {rate:.1f}/s · {elapsed:.0f}s"
+                )
+
                 if max_frames and total_done >= max_frames:
                     break
         finally:
             await pool.close()
+            executor.shutdown(wait=True)
+
+        elapsed = time.time() - start_t
         click.echo(
-            f"done. backfilled {total_done} frames, {total_failed} failed, "
+            f"done in {elapsed:.0f}s. backfilled {total_done} frames "
+            f"({total_done / elapsed:.1f}/s avg), {total_failed} failed, "
             f"{total_skipped} skipped (client_provided keys can't be backfilled server-side)"
         )
 
