@@ -2398,6 +2398,102 @@ async def _http_screenshot(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _http_capture_days(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: GET /api/capture_days - thin per-day capture index.
+
+    Returns the distinct list of *user-local* dates that have at least
+    one captured frame in the requested window, plus the all-time
+    earliest/latest capture timestamps. Designed for calendar pickers
+    that want to show a dot under every day with data.
+
+    Auth: FishKey, scope read:status (no decrypt, just date enumeration).
+    Query params:
+      - since, until: ISO-8601 window bounds. Optional but recommended
+        (typically the visible month ± a buffer).
+      - tz_offset_seconds: integer offset from UTC. Server applies this
+        before bucketing into dates so the result reflects the user's
+        local-day boundaries. e.g. -21600 for US Mountain Time. Bounded
+        to ±14h for sanity.
+    Response: {"days": ["YYYY-MM-DD"], "earliest_ts_ms": N|null,
+              "latest_ts_ms": N|null}
+    """
+    db: asyncpg.Pool = request.app["db"]
+    try:
+        ctx = await _require_scoped_context(request, db, "read:status")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    since_raw = request.query.get("since")
+    until_raw = request.query.get("until")
+    tz_offset_raw = request.query.get("tz_offset_seconds", "0")
+
+    def _parse_iso(value: str) -> "datetime.datetime":
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.datetime.fromisoformat(value)
+
+    try:
+        since_ts = _parse_iso(since_raw) if since_raw else None
+        until_ts = _parse_iso(until_raw) if until_raw else None
+        tz_offset = int(tz_offset_raw)
+    except ValueError:
+        return web.json_response({"error": "Invalid parameter"}, status=400)
+
+    if abs(tz_offset) > 14 * 3600:
+        return web.json_response({"error": "tz_offset_seconds out of range"}, status=400)
+
+    clauses = [_tenant_predicate(), "image_key IS NOT NULL"]
+    params: list = [ctx.user_hex]
+    if since_ts is not None:
+        params.append(since_ts)
+        clauses.append(f"ts >= ${len(params)}")
+    if until_ts is not None:
+        params.append(until_ts)
+        clauses.append(f"ts < ${len(params)}")
+    params.append(tz_offset)
+    tz_idx = len(params)
+
+    try:
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="read_capture_days",
+            scope="read:status",
+            metadata={"since": since_raw, "until": until_raw, "tz_offset": tz_offset},
+        )
+        async with db.acquire() as conn:
+            day_rows = await conn.fetch(
+                f"SELECT DISTINCT "
+                f"(ts AT TIME ZONE 'UTC' + make_interval(secs => ${tz_idx}))::date AS local_day "
+                f"FROM frames WHERE {' AND '.join(clauses)} "
+                f"ORDER BY local_day ASC",
+                *params,
+            )
+            bound_rows = await conn.fetchrow(
+                f"SELECT MIN(ts) AS first_ts, MAX(ts) AS last_ts "
+                f"FROM frames WHERE {_tenant_predicate()} AND image_key IS NOT NULL",
+                ctx.user_hex,
+            )
+
+        days = [str(row["local_day"]) for row in day_rows]
+        first_ts = bound_rows["first_ts"] if bound_rows else None
+        last_ts = bound_rows["last_ts"] if bound_rows else None
+        return web.json_response({
+            "days": days,
+            "earliest_ts_ms": int(first_ts.timestamp() * 1000) if first_ts else None,
+            "latest_ts_ms": int(last_ts.timestamp() * 1000) if last_ts else None,
+        })
+    except Exception:
+        log.error("http_capture_days_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
 async def _http_thumbnails(request: "web.Request") -> "web.Response":
     """HTTP endpoint: GET /api/thumbnails - bulk thumbnails for Rewind.
 
@@ -3435,6 +3531,7 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/api/screenshot", _http_screenshot)
         app.router.add_get("/api/frame_index", _http_frame_index)
         app.router.add_get("/api/thumbnails", _http_thumbnails)
+        app.router.add_get("/api/capture_days", _http_capture_days)
         app.router.add_get("/api/transcripts", _http_transcripts)
         app.router.add_get("/api/context/export", _http_context_export)
         app.router.add_post("/api/context/import", _http_context_import)

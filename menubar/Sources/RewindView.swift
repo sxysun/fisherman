@@ -439,22 +439,12 @@ struct RewindWindowView: View {
             .buttonStyle(.plain)
             .help("Pick a date")
             .popover(isPresented: $calendarOpen) {
-                DatePicker(
-                    "Pick a day",
-                    selection: Binding(
-                        get: { selectedDate },
-                        set: { newValue in
-                            selectedDate = Calendar.current.startOfDay(for: newValue)
-                            calendarOpen = false
-                        }
-                    ),
-                    in: ...Date(),
-                    displayedComponents: .date
+                CapturesCalendarView(
+                    config: config,
+                    selectedDate: $selectedDate,
+                    isOpen: $calendarOpen
                 )
-                .datePickerStyle(.graphical)
-                .labelsHidden()
-                .padding(12)
-                .frame(minWidth: 280, minHeight: 280)
+                .preferredColorScheme(.dark)
             }
 
             Button { shiftDay(by: 1) } label: {
