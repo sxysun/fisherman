@@ -27,6 +27,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var welcomeWindow: NSWindow?
     private var dailyCardWindow: NSWindow?
     private var rewindWindow: NSWindow?
+    /// Shared "I want Rewind to show date X" channel. The Rewind window
+    /// reads requestedDate on appear and on every requestId bump, so
+    /// clicking Rewind from a Daily Card opened to May 11 takes the user
+    /// to May 11 — even if a Rewind window is already open on a different
+    /// day. Bumping `requestId` is what guarantees re-presentation fires
+    /// the .onChange even when the date hasn't otherwise changed.
+    private let rewindCoordinator = RewindCoordinator()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -301,8 +308,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         let view = DailyCardWindowView(
             state: state,
             config: cm,
-            onOpenRewind: { [weak self] in
-                Task { @MainActor in self?.openRewind() }
+            onOpenRewind: { [weak self] date in
+                Task { @MainActor in self?.openRewind(at: date) }
             }
         )
             .padding(EdgeInsets(top: 28, leading: 20, bottom: 20, trailing: 20))
@@ -350,7 +357,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 
     // MARK: - Rewind window
 
-    @MainActor func openRewind() {
+    @MainActor func openRewind(at date: Date? = nil) {
+        // Publish the target date BEFORE presenting the window so any
+        // already-running view picks it up immediately via .onChange.
+        let targetDay = Calendar.current.startOfDay(for: date ?? Date())
+        rewindCoordinator.requestedDate = targetDay
+        rewindCoordinator.requestId &+= 1
+
         if let existing = rewindWindow {
             presentRewindWindow(existing)
             return
@@ -358,7 +371,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 
         let state = appState!
         let cm = configManager!
-        let view = RewindWindowView(state: state, config: cm)
+        let coord = rewindCoordinator
+        let view = RewindWindowView(state: state, config: cm, coordinator: coord)
             .padding(EdgeInsets(top: 28, leading: 20, bottom: 20, trailing: 20))
             .frame(minWidth: 640, idealWidth: 820, minHeight: 540, idealHeight: 720)
             .background(Color.black)
@@ -411,6 +425,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     }
 }
 
+/// Shared "switch Rewind to date X" channel. AppDelegate owns one
+/// instance; both the menu code that opens the window and the view
+/// inside the window read/write `requestedDate` here, so a Rewind
+/// already on screen can be navigated to a different day without
+/// being torn down and rebuilt (preserving the image cache).
+///
+/// `requestId` is bumped on every open call so SwiftUI's .onChange
+/// fires even when the same date is requested twice — important so
+/// "click Rewind on May 11 → navigate inside Rewind to May 13 →
+/// close it → click Rewind on May 11 card again" actually snaps back
+/// to May 11 instead of staying on May 13.
+@Observable
+final class RewindCoordinator {
+    var requestedDate: Date = Calendar.current.startOfDay(for: Date())
+    var requestId: Int = 0
+}
+
 /// Daily Card popup with prev/next-day navigation. Owns its own selectedDate
 /// + per-day fetch cache so flipping back to a previously viewed day is
 /// instant. Falls back to AppState's live "me" history when displaying today
@@ -418,12 +449,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 private struct DailyCardWindowView: View {
     let state: AppState
     let config: ConfigManager
-    let onOpenRewind: () -> Void
+    /// Called with the date currently shown in the card so the Rewind
+    /// window opens at that day instead of always defaulting to today.
+    let onOpenRewind: (Date) -> Void
 
     @State private var selectedDate: Date = Calendar.current.startOfDay(for: Date())
     @State private var cache: [Date: [ActivityEntry]] = [:]
     @State private var loadingDates: Set<Date> = []
     @State private var lastError: String?
+    @State private var calendarOpen: Bool = false
 
     private var today: Date { Calendar.current.startOfDay(for: Date()) }
     private var isToday: Bool { selectedDate == today }
@@ -497,10 +531,39 @@ private struct DailyCardWindowView: View {
             .controlSize(.small)
             .help("Previous day")
 
-            Text(dateLabel)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.primary)
+            Button {
+                calendarOpen.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Text(dateLabel)
+                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "calendar")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
                 .frame(minWidth: 200, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Pick a date")
+            .popover(isPresented: $calendarOpen) {
+                DatePicker(
+                    "Pick a day",
+                    selection: Binding(
+                        get: { selectedDate },
+                        set: { newValue in
+                            selectedDate = Calendar.current.startOfDay(for: newValue)
+                            calendarOpen = false
+                        }
+                    ),
+                    in: ...Date(),
+                    displayedComponents: .date
+                )
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+                .padding(12)
+                .frame(minWidth: 280, minHeight: 280)
+            }
 
             Button {
                 shiftDay(by: 1)
@@ -529,7 +592,9 @@ private struct DailyCardWindowView: View {
                 .controlSize(.small)
             }
 
-            Button(action: onOpenRewind) {
+            Button {
+                onOpenRewind(selectedDate)
+            } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "play.rectangle")
                     Text("Rewind")
@@ -537,7 +602,7 @@ private struct DailyCardWindowView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("Open frame-by-frame Rewind for this day")
+            .help("Open Rewind for this day")
 
             Button {
                 cache[selectedDate] = nil

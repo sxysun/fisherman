@@ -295,8 +295,13 @@ private let kPlaybackBaseInterval: Double = 0.15   // seconds per index advance 
 struct RewindWindowView: View {
     let state: AppState
     let config: ConfigManager
+    /// Owned by AppDelegate, watched here so "click Rewind from a Daily
+    /// Card opened to May 11" actually navigates to May 11 even when a
+    /// Rewind window is already on screen showing a different day.
+    let coordinator: RewindCoordinator
 
     @State private var selectedDate: Date = Calendar.current.startOfDay(for: Date())
+    @State private var calendarOpen: Bool = false
     @State private var indexByDay: [Date: [FrameRef]] = [:]
     @State private var loadingIndexFor: Set<Date> = []
     @State private var indexError: String?
@@ -377,9 +382,16 @@ struct RewindWindowView: View {
             controls
         }
         .onAppear {
+            // First display: honor whichever day the open-call requested.
+            selectedDate = coordinator.requestedDate
             fetchIndexIfNeeded(selectedDate)
             fetchThumbsIfNeeded(selectedDate)
             loadFrameIfNeeded()
+        }
+        .onChange(of: coordinator.requestId) { _, _ in
+            // Re-opening Rewind from a different Daily Card snaps the
+            // view to that day even if we're already on screen.
+            selectedDate = coordinator.requestedDate
         }
         .onChange(of: selectedDate) { _, _ in
             stopPlay()
@@ -411,10 +423,39 @@ struct RewindWindowView: View {
             .buttonStyle(.bordered).controlSize(.small)
             .help("Previous day")
 
-            Text(dateLabel)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.primary)
+            Button {
+                calendarOpen.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Text(dateLabel)
+                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "calendar")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
                 .frame(minWidth: 200, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Pick a date")
+            .popover(isPresented: $calendarOpen) {
+                DatePicker(
+                    "Pick a day",
+                    selection: Binding(
+                        get: { selectedDate },
+                        set: { newValue in
+                            selectedDate = Calendar.current.startOfDay(for: newValue)
+                            calendarOpen = false
+                        }
+                    ),
+                    in: ...Date(),
+                    displayedComponents: .date
+                )
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+                .padding(12)
+                .frame(minWidth: 280, minHeight: 280)
+            }
 
             Button { shiftDay(by: 1) } label: {
                 Image(systemName: "chevron.right")
