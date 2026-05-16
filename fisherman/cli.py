@@ -983,6 +983,23 @@ def _same_commit(left: str | None, right: str | None) -> bool:
     return left.split("-", 1)[0] == right.split("-", 1)[0]
 
 
+def _installed_has_latest(install_dir, latest_full: str | None, installed_commit: str | None) -> bool:
+    """Return True if the installed commit is the same as or a descendant of the latest code commit.
+
+    Handles the case where the installed HEAD is a deploy-only commit (e.g. [skip ci]) that
+    comes after the latest real code commit, so we don't falsely report an update as available.
+    """
+    if not latest_full or not installed_commit or not install_dir:
+        return False
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", latest_full, installed_commit],
+        cwd=str(install_dir),
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 _UPDATE_RELEVANT_PATHS = (
     "fisherman",
     "menubar",
@@ -1148,6 +1165,7 @@ def update_status(as_json: bool, timeout: float):
         latest
         and installed.git_commit
         and not _same_commit(installed.git_commit, latest.get("commit"))
+        and not _installed_has_latest(installed.install_dir, latest.get("full_commit"), installed.git_commit)
     )
     payload["backend"] = _backend_version_payload(timeout=timeout)
 
