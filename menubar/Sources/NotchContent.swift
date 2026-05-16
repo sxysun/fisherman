@@ -87,8 +87,17 @@ struct ExpandedContent: View {
     @State private var hoveredUserId: String?
     @State private var repairingCapture = false
 
+    private var meHistory: [ActivityEntry] {
+        state.allActivity.first(where: { $0.id == "me" })?.history ?? []
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // Daily card hero — pulls today's activity from the "me" user's history
+            DailyCardView(history: meHistory)
+
+            Divider()
+
             // Header
             HStack {
                 Circle()
@@ -301,7 +310,7 @@ struct ExpandedContent: View {
             }
         }
         .padding(12)
-        .frame(width: 300)
+        .frame(width: 400)
     }
 
     private func statusRow(name: String, iconName: String, color: Color, label: String) -> some View {
