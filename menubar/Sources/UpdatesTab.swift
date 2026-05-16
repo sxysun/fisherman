@@ -33,6 +33,14 @@ private struct BackendVersionSummary {
 
 struct UpdatesTab: View {
     var config: ConfigManager
+    /// SettingsView passes its `dataOperationInProgress` binding so this
+    /// tab can gate the footer's Save/Cancel buttons while an update is
+    /// running. Without this, clicking Save mid-update would close the
+    /// window AND restart the daemon right as the upgrade subprocess is
+    /// about to kill the menubar — confusing for the user and racy for
+    /// the daemon. Wiring it here makes "Update in progress" mean Save
+    /// and Cancel are genuinely unavailable until the new app boots.
+    @Binding var operationInProgress: Bool
 
     @State private var installed = InstalledSummary()
     @State private var latest = LatestSummary()
@@ -60,6 +68,16 @@ struct UpdatesTab: View {
         }
         .onAppear {
             refreshInstalled()
+        }
+        .onChange(of: updating) { _, isUpdating in
+            // Reflect into the parent's data-operation binding so the
+            // footer's Save/Cancel buttons get disabled while the upgrade
+            // subprocess is running. Cleared automatically when updating
+            // flips false (success OR failure paths).
+            operationInProgress = isUpdating || checking
+        }
+        .onChange(of: checking) { _, isChecking in
+            operationInProgress = updating || isChecking
         }
     }
 
@@ -120,6 +138,16 @@ struct UpdatesTab: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(checking || updating)
+            }
+
+            if updating {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Update in progress. Settings will close and the menu app will restart automatically — don't click Save or Cancel.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }

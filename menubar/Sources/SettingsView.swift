@@ -115,7 +115,7 @@ struct SettingsView: View {
                             operationSummary: $dataOperationSummary
                         )
                     case .updates:
-                        UpdatesTab(config: config)
+                        UpdatesTab(config: config, operationInProgress: $dataOperationInProgress)
                     case .diagnostics:
                         DiagnosticsTab()
                     }
