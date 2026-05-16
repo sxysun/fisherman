@@ -2349,6 +2349,96 @@ async def _http_screenshot(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _http_frame_index(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: GET /api/frame_index - thin (id, ts_ms) index.
+
+    Built for the Rewind UI: enumerate every captured frame in a time
+    window in a single payload, then fetch images on-demand via
+    /api/screenshot?frame_id=... as the user scrubs. Unlike /api/query
+    this returns no OCR / window / urls, so a full day of capture stays
+    well under a megabyte.
+
+    Auth: FishKey, scope read:captures.
+    Query params:
+      - since, until: ISO-8601 timestamps. Both optional but typically
+        both supplied to scope to a single day.
+      - limit: default & max 50000 — enough for a full day at ~1.5fps.
+    Response: {"frames": [{"id": int, "ts_ms": int}, ...], "count": int}
+    sorted chronological (oldest first) so the scrubber index matches.
+    """
+    db: asyncpg.Pool = request.app["db"]
+    try:
+        ctx = await _require_scoped_context(request, db, "read:captures")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    since_raw = request.query.get("since")
+    until_raw = request.query.get("until")
+
+    def _parse_iso(value: str) -> "datetime.datetime":
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.datetime.fromisoformat(value)
+
+    try:
+        since_ts = _parse_iso(since_raw) if since_raw else None
+        until_ts = _parse_iso(until_raw) if until_raw else None
+    except ValueError:
+        return web.json_response(
+            {"error": "Invalid since/until timestamp; expected ISO-8601"},
+            status=400,
+        )
+
+    try:
+        limit = max(1, min(int(request.query.get("limit", "50000")), 50000))
+    except ValueError:
+        return web.json_response({"error": "Invalid limit"}, status=400)
+
+    clauses = [_tenant_predicate(), "image_key IS NOT NULL"]
+    params: list = [ctx.user_hex]
+    if since_ts is not None:
+        params.append(since_ts)
+        clauses.append(f"ts >= ${len(params)}")
+    if until_ts is not None:
+        params.append(until_ts)
+        clauses.append(f"ts < ${len(params)}")
+    params.append(limit)
+    limit_idx = len(params)
+
+    try:
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="read_frame_index",
+            scope="read:captures",
+            metadata={"since": since_raw, "until": until_raw, "limit": limit},
+        )
+        query = (
+            f"SELECT id, ts FROM frames "
+            f"WHERE {' AND '.join(clauses)} "
+            f"ORDER BY ts ASC LIMIT ${limit_idx}"
+        )
+        async with db.acquire() as conn:
+            rows = await conn.fetch(query, *params)
+        out = [
+            {
+                "id": row["id"],
+                "ts_ms": int(_row_ts_seconds(row["ts"]) * 1000),
+            }
+            for row in rows
+        ]
+        return web.json_response({"frames": out, "count": len(out)})
+    except Exception:
+        log.error("http_frame_index_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
 async def _http_transcripts(request: "web.Request") -> "web.Response":
     db: asyncpg.Pool = request.app["db"]
     try:
@@ -3172,6 +3262,7 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/api/activity_history", _http_activity_history)
         app.router.add_get("/api/query", _http_query)
         app.router.add_get("/api/screenshot", _http_screenshot)
+        app.router.add_get("/api/frame_index", _http_frame_index)
         app.router.add_get("/api/transcripts", _http_transcripts)
         app.router.add_get("/api/context/export", _http_context_export)
         app.router.add_post("/api/context/import", _http_context_import)
