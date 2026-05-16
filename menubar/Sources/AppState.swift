@@ -22,25 +22,39 @@ enum ActivityCategory: String {
     case design, writing, chat, email, meeting
     case browsing, news, reading, gaming, terminal, idle, waiting
 
+    /// Distinct hue per category, hand-tuned for dark-mode legibility.
+    /// Related categories live in the same color family (all "coding-like"
+    /// in the blue/cyan range, read/write in greens, comms in magentas) so
+    /// the bar still reads as topical groupings, but no two categories
+    /// share a color — same category always maps to the same color forever.
     var color: NSColor {
         switch self {
-        case .coding, .debugging, .codeReview, .readingDocs, .terminal:
-            return .systemBlue
-        case .reading, .writing:
-            return .systemGreen
-        case .chat, .email:
-            return .systemPurple
-        case .browsing, .news:
-            return .systemOrange
-        case .design:
-            return .systemYellow
-        case .meeting:
-            return .systemRed
-        case .gaming:
-            return .systemPink
-        case .idle, .waiting:
-            return .systemGray
+        case .coding:      return Self.hex(0x4F, 0xA8, 0xFF) // azure
+        case .debugging:   return Self.hex(0x5B, 0xC5, 0xC5) // cyan
+        case .codeReview:  return Self.hex(0x7A, 0x8C, 0xFF) // indigo
+        case .readingDocs: return Self.hex(0x4F, 0xD3, 0xA8) // mint
+        case .terminal:    return Self.hex(0x8B, 0x9F, 0xB8) // slate
+        case .reading:     return Self.hex(0x5B, 0xD1, 0x6A) // green
+        case .writing:     return Self.hex(0xA8, 0xD8, 0x5B) // lime
+        case .chat:        return Self.hex(0xC9, 0x5B, 0xD1) // magenta
+        case .email:       return Self.hex(0x8B, 0x6B, 0xD1) // violet
+        case .browsing:    return Self.hex(0xFF, 0x9F, 0x40) // orange
+        case .news:        return Self.hex(0xFF, 0xB8, 0x5B) // amber
+        case .design:      return Self.hex(0xFF, 0xD2, 0x3F) // yellow
+        case .meeting:     return Self.hex(0xFF, 0x5B, 0x6B) // red
+        case .gaming:      return Self.hex(0xFF, 0x6F, 0xB5) // pink
+        case .idle:        return Self.hex(0x6B, 0x72, 0x80) // gray
+        case .waiting:     return Self.hex(0x4A, 0x52, 0x60) // dark gray
         }
+    }
+
+    private static func hex(_ r: Int, _ g: Int, _ b: Int) -> NSColor {
+        NSColor(
+            red: CGFloat(r) / 255.0,
+            green: CGFloat(g) / 255.0,
+            blue: CGFloat(b) / 255.0,
+            alpha: 1.0
+        )
     }
 
     static func from(_ string: String) -> ActivityCategory {
