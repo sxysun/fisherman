@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS frames (
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS user_pubkey TEXT;
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS device_pubkey TEXT;
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS data_key_source TEXT NOT NULL DEFAULT 'server_wrapped';
+-- Pre-computed encrypted thumbnail (~256px max-dim JPEG, Fernet-encrypted
+-- with the same tenant data_key as the full image). Powers the Rewind
+-- scrubber: thousands of thumbnails fit in one bulk response without the
+-- R2 round-trip + full-res decrypt that /api/screenshot requires.
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS thumb_jpeg BYTEA;
 
 CREATE INDEX IF NOT EXISTS idx_frames_ts ON frames (ts);
 CREATE INDEX IF NOT EXISTS idx_frames_bundle ON frames (bundle_id);

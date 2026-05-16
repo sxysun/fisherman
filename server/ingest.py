@@ -814,6 +814,37 @@ def _decode_image_b64(value: object) -> bytes | None:
     return data
 
 
+_THUMB_MAX_DIM = 256
+_THUMB_QUALITY = 65
+
+
+def _generate_thumbnail(jpeg_bytes: bytes) -> bytes | None:
+    """Resize a JPEG to fit within _THUMB_MAX_DIM. Returns JPEG bytes or
+    None if Pillow is unavailable or decoding fails.
+
+    Used by the ingest path to pre-compute a tiny preview that the Rewind
+    scrubber can show without round-tripping to R2 for every frame. Output
+    is ~3-8KB depending on content (quality 65 LANCZOS resize) — small
+    enough that a full day of capture fits in a single bulk response.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    import io
+    try:
+        img = Image.open(io.BytesIO(jpeg_bytes))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.thumbnail((_THUMB_MAX_DIM, _THUMB_MAX_DIM), Image.LANCZOS)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=_THUMB_QUALITY, optimize=True)
+        return out.getvalue()
+    except Exception:
+        log.warning("thumbnail_generation_failed", exc_info=True)
+        return None
+
+
 def _coerce_ts(msg: dict) -> float:
     ts = msg.get("ts")
     if not isinstance(ts, (int, float)):
@@ -1055,14 +1086,31 @@ async def _handle_frame(
         loop.run_in_executor(_pool, partial(encrypt_text, window, tenant_data_key)),
     )
 
-    # Encrypt and upload image to R2 (I/O-bound, run in thread)
+    # Encrypt and upload image to R2 (I/O-bound, run in thread). Also
+    # generate a small encrypted thumbnail in parallel so the Rewind
+    # scrubber doesn't need to hit R2 + decrypt the full image for every
+    # frame the user scrubs past.
     image_key = None
+    thumb_enc = None
     jpeg_data = _decode_image_b64(msg.get("image"))
     if jpeg_data is not None:
-        image_key = await loop.run_in_executor(
+        upload_task = loop.run_in_executor(
             _pool,
             partial(r2.upload, jpeg_data, ts, user_pubkey=ctx.user_hex, data_key=tenant_data_key),
         )
+        thumb_task = loop.run_in_executor(
+            _pool,
+            partial(_generate_thumbnail, jpeg_data),
+        )
+        image_key, thumb_bytes = await asyncio.gather(upload_task, thumb_task)
+        if thumb_bytes is not None:
+            thumb_enc = await loop.run_in_executor(
+                _pool,
+                partial(
+                    fernet_for_data_key(tenant_data_key).encrypt,
+                    thumb_bytes,
+                ),
+            )
 
     # Extract routing
     routing = None
@@ -1078,9 +1126,9 @@ async def _handle_frame(
             INSERT INTO frames (user_pubkey, device_pubkey, ts, app, bundle_id,
                                 "window", ocr_text, urls,
                                 image_key, width, height, tier_hint, routing,
-                                data_key_source)
+                                data_key_source, thumb_jpeg)
             VALUES ($1, $2, to_timestamp($3), $4, $5, $6, $7, $8,
-                    $9, $10, $11, $12, $13::jsonb, $14)
+                    $9, $10, $11, $12, $13::jsonb, $14, $15)
             """,
             ctx.user_hex,
             ctx.actor_hex,
@@ -1096,6 +1144,7 @@ async def _handle_frame(
             tier_hint,
             routing,
             data_key_source,
+            thumb_enc,
         )
 
     log.info(
@@ -2349,6 +2398,128 @@ async def _http_screenshot(request: "web.Request") -> "web.Response":
         return web.json_response({"error": "Internal server error"}, status=500)
 
 
+async def _http_thumbnails(request: "web.Request") -> "web.Response":
+    """HTTP endpoint: GET /api/thumbnails - bulk thumbnails for Rewind.
+
+    Returns every pre-computed thumbnail in [since, until) in one shot
+    so the Rewind scrubber can render full-day fidelity without a per-
+    frame round-trip. Each thumbnail is ~3-8KB base64 JPEG (256px max).
+
+    Auth: FishKey, scope read:screenshots.
+    Query params:
+      - since, until: ISO-8601 timestamps. Typically [00:00, 24:00) of
+        a single day.
+      - limit: default & max 5000 — enough for a full day of capture.
+    Response: {"thumbnails": [{"id", "ts_ms", "thumb_b64"}], "count": N}
+    sorted chronological so the client's scrubber index aligns with
+    /api/frame_index.
+    """
+    db: asyncpg.Pool = request.app["db"]
+    try:
+        ctx = await _require_scoped_context(request, db, "read:screenshots")
+    except TenantEnrollmentError as e:
+        return _tenant_error_response(e)
+    except TenantKeyUnavailableError as e:
+        return _tenant_key_error_response(e)
+    except DeputyRateLimitError as e:
+        return _rate_error_response(e)
+    if ctx is None:
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    since_raw = request.query.get("since")
+    until_raw = request.query.get("until")
+
+    def _parse_iso(value: str) -> "datetime.datetime":
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.datetime.fromisoformat(value)
+
+    try:
+        since_ts = _parse_iso(since_raw) if since_raw else None
+        until_ts = _parse_iso(until_raw) if until_raw else None
+    except ValueError:
+        return web.json_response(
+            {"error": "Invalid since/until timestamp; expected ISO-8601"},
+            status=400,
+        )
+
+    try:
+        limit = max(1, min(int(request.query.get("limit", "5000")), 5000))
+    except ValueError:
+        return web.json_response({"error": "Invalid limit"}, status=400)
+
+    clauses = [_tenant_predicate(), "thumb_jpeg IS NOT NULL"]
+    params: list = [ctx.user_hex]
+    if since_ts is not None:
+        params.append(since_ts)
+        clauses.append(f"ts >= ${len(params)}")
+    if until_ts is not None:
+        params.append(until_ts)
+        clauses.append(f"ts < ${len(params)}")
+    params.append(limit)
+    limit_idx = len(params)
+
+    loop = asyncio.get_running_loop()
+    try:
+        await _record_access_event(
+            db,
+            ctx=ctx,
+            action="read_thumbnails",
+            scope="read:screenshots",
+            metadata={"since": since_raw, "until": until_raw, "limit": limit},
+        )
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT id, ts, thumb_jpeg, data_key_source FROM frames "
+                f"WHERE {' AND '.join(clauses)} "
+                f"ORDER BY ts ASC LIMIT ${limit_idx}",
+                *params,
+            )
+        if not rows:
+            return web.json_response({"thumbnails": [], "count": 0})
+
+        # Resolve unique data keys up-front (typically one per tenant)
+        # so we don't hit the key store per row.
+        key_cache: dict[str | None, str | bytes | None] = {}
+        rows_with_keys: list[tuple[int, int, bytes, "str | bytes | None"]] = []
+        for row in rows:
+            ks = _row_get(row, "data_key_source")
+            if ks not in key_cache:
+                key_cache[ks] = await _tenant_data_key(db, ctx.user_hex, ks)
+            thumb_enc = _row_get(row, "thumb_jpeg")
+            if not thumb_enc:
+                continue
+            rows_with_keys.append((
+                _row_get(row, "id"),
+                int(_row_ts_seconds(row["ts"]) * 1000),
+                bytes(thumb_enc),
+                key_cache[ks],
+            ))
+
+        def _decrypt_batch(items):
+            out = []
+            for fid, ts_ms, enc, key in items:
+                try:
+                    plain = fernet_for_data_key(key).decrypt(enc)
+                    out.append({
+                        "id": fid,
+                        "ts_ms": ts_ms,
+                        "thumb_b64": base64.b64encode(plain).decode("ascii"),
+                    })
+                except Exception:
+                    continue
+            return out
+
+        out = await loop.run_in_executor(
+            _pool,
+            partial(_decrypt_batch, rows_with_keys),
+        )
+        return web.json_response({"thumbnails": out, "count": len(out)})
+    except Exception:
+        log.error("http_thumbnails_error", exc_info=True)
+        return web.json_response({"error": "Internal server error"}, status=500)
+
+
 async def _http_frame_index(request: "web.Request") -> "web.Response":
     """HTTP endpoint: GET /api/frame_index - thin (id, ts_ms) index.
 
@@ -3263,6 +3434,7 @@ async def _run(host: str, port: int) -> None:
         app.router.add_get("/api/query", _http_query)
         app.router.add_get("/api/screenshot", _http_screenshot)
         app.router.add_get("/api/frame_index", _http_frame_index)
+        app.router.add_get("/api/thumbnails", _http_thumbnails)
         app.router.add_get("/api/transcripts", _http_transcripts)
         app.router.add_get("/api/context/export", _http_context_export)
         app.router.add_post("/api/context/import", _http_context_import)

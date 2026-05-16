@@ -506,5 +506,151 @@ def users_revoke_device(pubkey: str, device_pubkey: str):
     click.echo(f"revoked device: {device_pubkey} for {pubkey}")
 
 
+@cli.command(name="backfill-thumbs")
+@click.option("--since", "-s", help="Start time (e.g. '7d ago', '2026-04-01T00:00:00')")
+@click.option("--until", "-u", help="End time (default: now)")
+@click.option("--batch-size", default=200, show_default=True,
+              help="Frames per database batch")
+@click.option("--max-frames", default=0,
+              help="Stop after this many frames (0 = unlimited)")
+@click.option("--user-pubkey", help="Restrict to one tenant pubkey (hex)")
+def backfill_thumbs(since: str, until: str, batch_size: int,
+                    max_frames: int, user_pubkey: str):
+    """Generate thumb_jpeg for past frames that don't have one yet.
+
+    Walks frames WHERE thumb_jpeg IS NULL AND image_key IS NOT NULL,
+    downloads each from R2, generates a 256px thumbnail, encrypts it
+    with the same tenant data key as the original, and writes it back
+    to the row. Idempotent — skips frames that already have a thumb.
+
+    Run after deploying the schema migration to populate historical
+    days so the Rewind scrubber works on them.
+    """
+    _ensure_encryption_key()
+    from crypto import fernet_for_data_key
+    from PIL import Image
+    import io as _io
+
+    since_ts = _parse_time(since) if since else None
+    until_ts = _parse_time(until) if until else None
+
+    def _thumb(jpeg_bytes: bytes) -> bytes | None:
+        try:
+            img = Image.open(_io.BytesIO(jpeg_bytes))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img.thumbnail((256, 256), Image.LANCZOS)
+            out = _io.BytesIO()
+            img.save(out, format="JPEG", quality=65, optimize=True)
+            return out.getvalue()
+        except Exception as exc:
+            click.echo(f"  ! thumbnail failed: {exc}", err=True)
+            return None
+
+    async def _run():
+        storage = create_storage()
+        pool = await _get_pool()
+        total_done = 0
+        total_failed = 0
+        total_skipped = 0
+        try:
+            while True:
+                clauses = ["thumb_jpeg IS NULL", "image_key IS NOT NULL"]
+                params: list = []
+                if since_ts is not None:
+                    params.append(since_ts)
+                    clauses.append(f"ts >= ${len(params)}")
+                if until_ts is not None:
+                    params.append(until_ts)
+                    clauses.append(f"ts < ${len(params)}")
+                if user_pubkey:
+                    params.append(user_pubkey.lower())
+                    clauses.append(f"user_pubkey = ${len(params)}")
+                params.append(batch_size)
+                limit_idx = len(params)
+
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        f"SELECT id, image_key, data_key_source, user_pubkey "
+                        f"FROM frames WHERE {' AND '.join(clauses)} "
+                        f"ORDER BY ts ASC LIMIT ${limit_idx}",
+                        *params,
+                    )
+
+                if not rows:
+                    break
+
+                # Resolve data keys per-row using server-wrapped keys.
+                # Backfill cannot handle client_provided keys (key isn't
+                # available server-side), so those rows get skipped.
+                for row in rows:
+                    src = row["data_key_source"]
+                    if src == "client_provided":
+                        total_skipped += 1
+                        continue
+                    try:
+                        # For server_wrapped, look up the user's wrapped
+                        # key and unwrap with the server master key.
+                        if src == "server_wrapped":
+                            async with pool.acquire() as conn:
+                                wrapped = await conn.fetchval(
+                                    "SELECT wrapped_data_key FROM users "
+                                    "WHERE user_pubkey = $1",
+                                    row["user_pubkey"],
+                                )
+                            if wrapped is None:
+                                # Legacy frame: master key only
+                                data_key = None
+                            else:
+                                data_key = unwrap_data_key(bytes(wrapped))
+                        else:
+                            data_key = None
+                    except Exception as exc:
+                        click.echo(f"  ! key lookup failed for frame {row['id']}: {exc}", err=True)
+                        total_failed += 1
+                        continue
+
+                    try:
+                        jpeg = storage.download(row["image_key"], data_key)
+                    except Exception as exc:
+                        click.echo(f"  ! download failed for frame {row['id']}: {exc}", err=True)
+                        total_failed += 1
+                        continue
+
+                    thumb = _thumb(jpeg)
+                    if thumb is None:
+                        total_failed += 1
+                        continue
+
+                    try:
+                        enc = fernet_for_data_key(data_key).encrypt(thumb)
+                        async with pool.acquire() as conn:
+                            await conn.execute(
+                                "UPDATE frames SET thumb_jpeg = $1 WHERE id = $2",
+                                enc,
+                                row["id"],
+                            )
+                    except Exception as exc:
+                        click.echo(f"  ! write failed for frame {row['id']}: {exc}", err=True)
+                        total_failed += 1
+                        continue
+
+                    total_done += 1
+                    if max_frames and total_done >= max_frames:
+                        break
+
+                click.echo(f"  progress: {total_done} done, {total_failed} failed, {total_skipped} skipped (client-keyed)")
+                if max_frames and total_done >= max_frames:
+                    break
+        finally:
+            await pool.close()
+        click.echo(
+            f"done. backfilled {total_done} frames, {total_failed} failed, "
+            f"{total_skipped} skipped (client_provided keys can't be backfilled server-side)"
+        )
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     cli()
