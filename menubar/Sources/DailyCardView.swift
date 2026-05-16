@@ -123,8 +123,16 @@ private func dayParts(today: Date = Date()) -> (weekday: String, date: String, y
 
 struct DailyCardView: View {
     /// `history` should be the user's chronological activity entries —
-    /// typically `me.history` as populated by StatusPoller.pollAllHistory.
+    /// typically `me.history` as populated by StatusPoller.pollAllHistory,
+    /// or a fetched day-range from /api/activity_history?since=...&until=...
     let history: [ActivityEntry]
+    /// Date to render in the hero header. Defaults to today so callers that
+    /// only pass `history` keep their old behavior.
+    var displayDate: Date = Date()
+    /// Optional message shown in place of the timeline when `history` is
+    /// empty. Lets the popup distinguish "no data today yet" from
+    /// "no data on this past day".
+    var emptyMessage: String = "No activity for today yet — the categorizer is warming up."
 
     private var runs: [ActivityRun] { groupRuns(history) }
     private var stats: [CategoryStat] { categoryStats(history) }
@@ -158,7 +166,7 @@ struct DailyCardView: View {
     }
 
     private var heroHeader: some View {
-        let parts = dayParts()
+        let parts = dayParts(today: displayDate)
         return VStack(alignment: .leading, spacing: 2) {
             Text("DAILY CARD")
                 .font(.system(size: 9, weight: .semibold))
@@ -214,19 +222,20 @@ struct DailyCardView: View {
 
     private var categoryShareBar: some View {
         VStack(alignment: .leading, spacing: 6) {
-            GeometryReader { _ in
-                HStack(spacing: 1) {
+            GeometryReader { geo in
+                let spacing: CGFloat = 1
+                let gaps = CGFloat(max(0, stats.count - 1)) * spacing
+                let usable = max(0, geo.size.width - gaps)
+                HStack(spacing: spacing) {
                     ForEach(stats) { s in
                         Rectangle()
                             .fill(Color(nsColor: s.color))
-                            .frame(width: nil)
-                            .frame(maxWidth: .infinity)
-                            .layoutPriority(s.share)
+                            .frame(width: max(2, usable * CGFloat(s.share)))
                     }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 3))
             }
-            .frame(height: 6)
+            .frame(height: 8)
             FlowLayout(spacing: 5) {
                 ForEach(stats.prefix(6)) { s in
                     HStack(spacing: 4) {
@@ -340,11 +349,116 @@ struct DailyCardView: View {
     }
 
     private var emptyState: some View {
-        Text("No activity for today yet — the categorizer is warming up.")
+        Text(emptyMessage)
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             .padding(.vertical, 12)
     }
+}
+
+// MARK: - Activity history fetch helper
+
+enum ActivityHistoryFetchError: Error, LocalizedError {
+    case noServerConfigured
+    case requestFailed(String)
+    case unauthorized
+    case decodeFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .noServerConfigured: return "No backend configured."
+        case .requestFailed(let msg): return msg
+        case .unauthorized: return "Backend rejected the request (auth)."
+        case .decodeFailed: return "Backend returned an unreadable response."
+        }
+    }
+}
+
+/// Fetch activity entries between [since, until). Tries each port candidate
+/// the config exposes (`config.ownActivityPortCandidates`) until one returns
+/// HTTP 200, mirroring StatusPoller's fallback logic.
+@MainActor
+func fetchActivityHistory(
+    config: ConfigManager,
+    since: Date,
+    until: Date
+) async -> Result<[ActivityEntry], ActivityHistoryFetchError> {
+    let serverURL = config.effectiveOwnServerURL
+    let candidates = config.ownActivityPortCandidates()
+    guard !serverURL.isEmpty,
+          let wsURL = URL(string: serverURL),
+          let host = wsURL.host
+    else { return .failure(.noServerConfigured) }
+
+    let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime]
+    let sinceStr = iso.string(from: since)
+    let untilStr = iso.string(from: until)
+
+    var lastError: ActivityHistoryFetchError = .requestFailed("No reachable activity port.")
+
+    for port in candidates {
+        let portSegment = port.isEmpty ? "" : ":\(port)"
+        let urlString = "\(scheme)://\(host)\(portSegment)/api/activity_history"
+            + "?since=\(sinceStr)&until=\(untilStr)"
+        guard let url = URL(string: urlString) else { continue }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8.0
+        if let auth = config.signRequest() {
+            request.setValue(auth, forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                lastError = .requestFailed("No response from \(urlString)")
+                continue
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                return .failure(.unauthorized)
+            }
+            if http.statusCode != 200 {
+                lastError = .requestFailed("HTTP \(http.statusCode) from activity history")
+                continue
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let raw = json["entries"] as? [[String: Any]]
+            else {
+                lastError = .decodeFailed
+                continue
+            }
+
+            let primary = ISO8601DateFormatter()
+            primary.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let fallback = ISO8601DateFormatter()
+            fallback.formatOptions = [.withInternetDateTime]
+
+            let entries: [ActivityEntry] = raw.compactMap { entry in
+                guard let emoji = entry["emoji"] as? String,
+                      let category = entry["category"] as? String,
+                      let status = entry["status"] as? String,
+                      let tsStr = entry["timestamp"] as? String
+                else { return nil }
+                let ts = primary.date(from: tsStr)
+                    ?? fallback.date(from: tsStr)
+                    ?? Date()
+                return ActivityEntry(
+                    emoji: emoji, category: category, status: status, timestamp: ts
+                )
+            }
+            // Defensive: an older backend that doesn't recognize since/until
+            // returns the most-recent N entries regardless of range. Filter
+            // here so navigating to yesterday never accidentally shows today.
+            let filtered = entries.filter { $0.timestamp >= since && $0.timestamp < until }
+            return .success(filtered)
+        } catch {
+            lastError = .requestFailed(error.localizedDescription)
+            continue
+        }
+    }
+    return .failure(lastError)
 }
 
 // MARK: - FlowLayout (wraps chips onto new lines)

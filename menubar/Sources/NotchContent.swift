@@ -82,22 +82,14 @@ struct ExpandedContent: View {
     let onViewFrames: () -> Void
     let onRepairCapture: () -> Void
     let onSettings: () -> Void
+    let onOpenCard: () -> Void
     let onQuit: () -> Void
 
     @State private var hoveredUserId: String?
     @State private var repairingCapture = false
 
-    private var meHistory: [ActivityEntry] {
-        state.allActivity.first(where: { $0.id == "me" })?.history ?? []
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Daily card hero — pulls today's activity from the "me" user's history
-            DailyCardView(history: meHistory)
-
-            Divider()
-
             // Header
             HStack {
                 Circle()
@@ -279,38 +271,72 @@ struct ExpandedContent: View {
 
             Divider()
 
-            // Actions
-            HStack(spacing: 8) {
-                Button(state.isPaused ? "Resume" : "Pause") {
-                    onPauseResume()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+            // Actions — icon buttons with tooltips. Card keeps its label as the
+            // primary affordance; the rest are SF Symbols so nothing truncates
+            // at the 300pt notch width.
+            HStack(spacing: 6) {
+                iconButton(
+                    systemName: state.isPaused ? "play.fill" : "pause.fill",
+                    help: state.isPaused ? "Resume capture" : "Pause capture",
+                    action: onPauseResume
+                )
 
-                Button("View Frames") {
-                    onViewFrames()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                iconButton(
+                    systemName: "square.grid.2x2",
+                    help: "View captured frames",
+                    action: onViewFrames
+                )
 
-                Button("Settings") {
-                    onSettings()
+                Button(action: onOpenCard) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "calendar.day.timeline.left")
+                        Text("Card")
+                    }
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .controlSize(.small)
+                .help("Open today's Daily Card")
+
+                iconButton(
+                    systemName: "gearshape",
+                    help: "Settings",
+                    action: onSettings
+                )
 
                 Spacer()
 
-                Button("Quit") {
-                    onQuit()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .tint(.red)
+                iconButton(
+                    systemName: "power",
+                    help: "Quit Fisherman",
+                    tint: .red,
+                    action: onQuit
+                )
             }
         }
         .padding(12)
-        .frame(width: 400)
+        .frame(width: 300)
+    }
+
+    @ViewBuilder
+    private func iconButton(
+        systemName: String,
+        help: String,
+        tint: Color? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        let btn = Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 14, height: 14)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .help(help)
+        if let tint {
+            btn.tint(tint)
+        } else {
+            btn
+        }
     }
 
     private func statusRow(name: String, iconName: String, color: Color, label: String) -> some View {

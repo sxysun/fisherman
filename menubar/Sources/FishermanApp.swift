@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var hoverCancellable: AnyCancellable?
     private var settingsWindow: NSWindow?
     private var welcomeWindow: NSWindow?
+    private var dailyCardWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -61,6 +62,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
                 onSettings: { [weak self] in
                     Task { @MainActor in
                         self?.openSettings()
+                    }
+                },
+                onOpenCard: { [weak self] in
+                    Task { @MainActor in
+                        self?.openDailyCard()
                     }
                 },
                 onQuit: {
@@ -232,10 +238,238 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         }
     }
 
+    // MARK: - Daily Card window
+
+    @MainActor private func openDailyCard() {
+        if let existing = dailyCardWindow {
+            presentDailyCardWindow(existing)
+            return
+        }
+
+        let state = appState!
+        let cm = configManager!
+        // Black background to match the notch aesthetic. Forced dark color
+        // scheme so .primary/.secondary text stays readable on black even
+        // if the system is in light mode.
+        let view = DailyCardWindowView(state: state, config: cm)
+            .padding(EdgeInsets(top: 28, leading: 20, bottom: 20, trailing: 20))
+            .frame(minWidth: 460, idealWidth: 520, minHeight: 480, idealHeight: 620)
+            .background(Color.black)
+            .preferredColorScheme(.dark)
+
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 520, height: 620)
+
+        let window = DailyCardPanel(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Daily Card"
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.backgroundColor = .black
+        window.isOpaque = true
+        window.isMovableByWindowBackground = true
+        window.contentView = hostingView
+        window.delegate = self
+        window.isFloatingPanel = false
+        window.hidesOnDeactivate = false
+        window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 460, height: 420)
+
+        dailyCardWindow = window
+        presentDailyCardWindow(window)
+    }
+
+    @MainActor private func presentDailyCardWindow(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.setIsVisible(true)
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         if window === settingsWindow { settingsWindow = nil }
         if window === welcomeWindow { welcomeWindow = nil }
+        if window === dailyCardWindow { dailyCardWindow = nil }
+    }
+}
+
+/// Daily Card popup with prev/next-day navigation. Owns its own selectedDate
+/// + per-day fetch cache so flipping back to a previously viewed day is
+/// instant. Falls back to AppState's live "me" history when displaying today
+/// before the first fetch returns, so the window never opens empty.
+private struct DailyCardWindowView: View {
+    let state: AppState
+    let config: ConfigManager
+
+    @State private var selectedDate: Date = Calendar.current.startOfDay(for: Date())
+    @State private var cache: [Date: [ActivityEntry]] = [:]
+    @State private var loadingDates: Set<Date> = []
+    @State private var lastError: String?
+
+    private var today: Date { Calendar.current.startOfDay(for: Date()) }
+    private var isToday: Bool { selectedDate == today }
+    private var canGoForward: Bool { selectedDate < today }
+
+    /// Live "me" history from the poller — used as a placeholder for today
+    /// before the first authoritative fetch lands so the window has content
+    /// to render immediately on open.
+    private var liveMeHistory: [ActivityEntry] {
+        state.allActivity.first(where: { $0.id == "me" })?.history ?? []
+    }
+
+    private var displayedHistory: [ActivityEntry] {
+        if let cached = cache[selectedDate] { return cached }
+        if isToday { return liveMeHistory }
+        return []
+    }
+
+    private var dateLabel: String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US")
+        if isToday {
+            f.dateFormat = "EEEE MMM d"
+            return "Today · \(f.string(from: selectedDate))"
+        }
+        let cal = Calendar.current
+        if let yest = cal.date(byAdding: .day, value: -1, to: today),
+           selectedDate == yest {
+            f.dateFormat = "EEEE MMM d"
+            return "Yesterday · \(f.string(from: selectedDate))"
+        }
+        f.dateFormat = "EEEE MMM d, yyyy"
+        return f.string(from: selectedDate)
+    }
+
+    private var emptyMessage: String {
+        if loadingDates.contains(selectedDate) { return "Loading…" }
+        if let err = lastError { return err }
+        if isToday { return "No activity today yet — capture is warming up." }
+        return "No activity recorded on this day."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            navHeader
+            Divider().opacity(0.4)
+            DailyCardView(
+                history: displayedHistory,
+                displayDate: selectedDate,
+                emptyMessage: emptyMessage
+            )
+        }
+        .onAppear {
+            fetchIfNeeded(selectedDate)
+        }
+        .onChange(of: selectedDate) { _, newValue in
+            fetchIfNeeded(newValue)
+        }
+    }
+
+    private var navHeader: some View {
+        HStack(spacing: 8) {
+            Button {
+                shiftDay(by: -1)
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 14, height: 14)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Previous day")
+
+            Text(dateLabel)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+                .frame(minWidth: 200, alignment: .leading)
+
+            Button {
+                shiftDay(by: 1)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 14, height: 14)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!canGoForward)
+            .help(canGoForward ? "Next day" : "Already on today")
+
+            if loadingDates.contains(selectedDate) {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            Spacer()
+
+            if !isToday {
+                Button("Today") {
+                    selectedDate = today
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            Button {
+                cache[selectedDate] = nil
+                fetchIfNeeded(selectedDate)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 14, height: 14)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Refresh this day")
+        }
+    }
+
+    private func shiftDay(by days: Int) {
+        guard let next = Calendar.current.date(byAdding: .day, value: days, to: selectedDate)
+        else { return }
+        let nextStart = Calendar.current.startOfDay(for: next)
+        if nextStart > today { return }
+        selectedDate = nextStart
+    }
+
+    private func fetchIfNeeded(_ day: Date) {
+        let dayStart = Calendar.current.startOfDay(for: day)
+        guard cache[dayStart] == nil, !loadingDates.contains(dayStart) else { return }
+        guard let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart)
+        else { return }
+
+        loadingDates.insert(dayStart)
+        lastError = nil
+        Task {
+            let result = await fetchActivityHistory(
+                config: config,
+                since: dayStart,
+                until: dayEnd
+            )
+            await MainActor.run {
+                loadingDates.remove(dayStart)
+                switch result {
+                case .success(let entries):
+                    cache[dayStart] = entries
+                case .failure(let err):
+                    // Don't blow away cached data — only surface the error
+                    // when the day genuinely has nothing to show.
+                    if cache[dayStart] == nil {
+                        lastError = err.localizedDescription
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -245,6 +479,11 @@ private final class SettingsPanel: NSPanel {
 }
 
 private final class WelcomePanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+private final class DailyCardPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
