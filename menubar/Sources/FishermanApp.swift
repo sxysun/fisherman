@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var settingsWindow: NSWindow?
     private var welcomeWindow: NSWindow?
     private var dailyCardWindow: NSWindow?
+    private var rewindWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -297,7 +298,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         // Black background to match the notch aesthetic. Forced dark color
         // scheme so .primary/.secondary text stays readable on black even
         // if the system is in light mode.
-        let view = DailyCardWindowView(state: state, config: cm)
+        let view = DailyCardWindowView(
+            state: state,
+            config: cm,
+            onOpenRewind: { [weak self] in
+                Task { @MainActor in self?.openRewind() }
+            }
+        )
             .padding(EdgeInsets(top: 28, leading: 20, bottom: 20, trailing: 20))
             .frame(minWidth: 460, idealWidth: 520, minHeight: 480, idealHeight: 620)
             .background(Color.black)
@@ -341,11 +348,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         window.orderFrontRegardless()
     }
 
+    // MARK: - Rewind window
+
+    @MainActor func openRewind() {
+        if let existing = rewindWindow {
+            presentRewindWindow(existing)
+            return
+        }
+
+        let state = appState!
+        let cm = configManager!
+        let view = RewindWindowView(state: state, config: cm)
+            .padding(EdgeInsets(top: 28, leading: 20, bottom: 20, trailing: 20))
+            .frame(minWidth: 640, idealWidth: 820, minHeight: 540, idealHeight: 720)
+            .background(Color.black)
+            .preferredColorScheme(.dark)
+
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 820, height: 720)
+
+        let window = RewindPanel(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Rewind"
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.backgroundColor = .black
+        window.isOpaque = true
+        window.isMovableByWindowBackground = true
+        window.contentView = hostingView
+        window.delegate = self
+        window.isFloatingPanel = false
+        window.hidesOnDeactivate = false
+        window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 640, height: 480)
+
+        rewindWindow = window
+        presentRewindWindow(window)
+    }
+
+    @MainActor private func presentRewindWindow(_ window: NSWindow) {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.setIsVisible(true)
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         if window === settingsWindow { settingsWindow = nil }
         if window === welcomeWindow { welcomeWindow = nil }
         if window === dailyCardWindow { dailyCardWindow = nil }
+        if window === rewindWindow { rewindWindow = nil }
     }
 }
 
@@ -356,6 +418,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 private struct DailyCardWindowView: View {
     let state: AppState
     let config: ConfigManager
+    let onOpenRewind: () -> Void
 
     @State private var selectedDate: Date = Calendar.current.startOfDay(for: Date())
     @State private var cache: [Date: [ActivityEntry]] = [:]
@@ -466,6 +529,16 @@ private struct DailyCardWindowView: View {
                 .controlSize(.small)
             }
 
+            Button(action: onOpenRewind) {
+                HStack(spacing: 4) {
+                    Image(systemName: "play.rectangle")
+                    Text("Rewind")
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Open frame-by-frame Rewind for this day")
+
             Button {
                 cache[selectedDate] = nil
                 fetchIfNeeded(selectedDate)
@@ -530,6 +603,11 @@ private final class WelcomePanel: NSPanel {
 }
 
 private final class DailyCardPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+private final class RewindPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 }
