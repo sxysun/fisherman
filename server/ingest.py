@@ -1996,10 +1996,17 @@ async def _http_migrate_client_key(request: "web.Request") -> "web.Response":
 
 
 async def _http_activity_history(request: "web.Request") -> "web.Response":
-    """HTTP endpoint: GET /api/activity_history - returns recent activity entries.
+    """HTTP endpoint: GET /api/activity_history - returns activity entries.
 
     Auth: FishKey ed25519 signature (owner/tenant or scoped deputy).
-    Query params: limit (default 10, max 50)
+    Query params:
+      - limit: default 10, capped at 50 when no date range is given (recent
+        view used by the menubar live status). When `since` and/or `until`
+        are provided, the cap is raised to 5000 so a full day fits in one
+        request.
+      - since, until: ISO-8601 timestamps (e.g. 2026-05-15T00:00:00Z). Either
+        or both may be provided. Both inclusive on the lower bound,
+        exclusive on the upper bound.
     """
     db: asyncpg.Pool = request.app["db"]
     try:
@@ -2014,7 +2021,35 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
         log.warning("http_auth_rejected", remote=request.remote)
         return web.json_response({"error": "Unauthorized"}, status=401)
 
-    limit = min(int(request.query.get("limit", "10")), 50)
+    since_raw = request.query.get("since")
+    until_raw = request.query.get("until")
+
+    def _parse_iso(value: str) -> "datetime.datetime":
+        # accept trailing 'Z' as UTC
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.datetime.fromisoformat(value)
+
+    since_ts: "datetime.datetime | None" = None
+    until_ts: "datetime.datetime | None" = None
+    try:
+        if since_raw:
+            since_ts = _parse_iso(since_raw)
+        if until_raw:
+            until_ts = _parse_iso(until_raw)
+    except ValueError:
+        return web.json_response(
+            {"error": "Invalid since/until timestamp; expected ISO-8601"},
+            status=400,
+        )
+
+    has_range = since_ts is not None or until_ts is not None
+    default_limit = 5000 if has_range else 10
+    max_limit = 5000 if has_range else 50
+    try:
+        limit = min(int(request.query.get("limit", str(default_limit))), max_limit)
+    except ValueError:
+        return web.json_response({"error": "Invalid limit"}, status=400)
 
     loop = asyncio.get_running_loop()
 
@@ -2024,20 +2059,30 @@ async def _http_activity_history(request: "web.Request") -> "web.Response":
             ctx=ctx,
             action="read_activity_history",
             scope="read:status",
-            metadata={"limit": limit},
+            metadata={
+                "limit": limit,
+                "since": since_raw,
+                "until": until_raw,
+            },
+        )
+        # Build query with optional ts >= since and ts < until clauses.
+        clauses = [_tenant_predicate(), "activity IS NOT NULL"]
+        params: list = [ctx.user_hex]
+        if since_ts is not None:
+            params.append(since_ts)
+            clauses.append(f"ts >= ${len(params)}")
+        if until_ts is not None:
+            params.append(until_ts)
+            clauses.append(f"ts < ${len(params)}")
+        params.append(limit)
+        limit_param_idx = len(params)
+        where = " AND ".join(clauses)
+        query = (
+            f"SELECT ts, activity, data_key_source FROM frames "
+            f"WHERE {where} ORDER BY ts DESC LIMIT ${limit_param_idx}"
         )
         async with db.acquire() as conn:
-            rows = await conn.fetch(
-                f"""
-                SELECT ts, activity, data_key_source
-                FROM frames
-                WHERE {_tenant_predicate()} AND activity IS NOT NULL
-                ORDER BY ts DESC
-                LIMIT $2
-                """,
-                ctx.user_hex,
-                limit,
-            )
+            rows = await conn.fetch(query, *params)
 
         if not rows:
             return web.json_response({"entries": []})
