@@ -2895,11 +2895,13 @@ def card(day, since, with_friends, html_out, as_json):
     if as_json:
         click.echo(json.dumps({
             "day_label": card_data["day_label"],
+            "inferred_events": card_data["inferred_events"],
             "my_events": card_data["my_events"],
             "friend_events": card_data["friend_events"],
         }, indent=2, ensure_ascii=False, default=str))
         return
     text = _tl.render_text(
+        inferred_events=card_data["inferred_events"],
         my_events=card_data["my_events"],
         friend_events=card_data["friend_events"],
         day_label=card_data["day_label"],
@@ -2908,6 +2910,7 @@ def card(day, since, with_friends, html_out, as_json):
     click.echo(text)
     if html_out:
         html = _tl.render_html(
+            inferred_events=card_data["inferred_events"],
             my_events=card_data["my_events"],
             friend_events=card_data["friend_events"],
             day_label=card_data["day_label"],
