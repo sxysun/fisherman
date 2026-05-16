@@ -360,6 +360,100 @@ def render_text(
     return "\n".join(lines)
 
 
+_CATEGORY_PALETTE = {
+    "coding":        "#a8d4a8",
+    "terminal":      "#a8d4a8",
+    "implementation":"#a8d4a8",
+    "debugging":     "#f5a5a5",
+    "fixing bugs":   "#f5a5a5",
+    "design":        "#d4b0e0",
+    "ux":            "#d4b0e0",
+    "browsing":      "#9cb8d8",
+    "reading":       "#f0d489",
+    "reading docs":  "#f0d489",
+    "documentation": "#f0d489",
+    "chat":          "#f5b8d4",
+    "messaging":     "#f5b8d4",
+    "authentication":"#e8c8a8",
+    "data viz":      "#9cb8d8",
+    "research":      "#c0d8b8",
+    "writing":       "#e0c8a8",
+    "review":        "#cccccc",
+    "planning":      "#b8d4c8",
+    "meeting":       "#f5b8d4",
+    "video":         "#c8a8d0",
+}
+
+
+def _category_color(category: str | None) -> str:
+    if not category:
+        return "#bcbcc4"
+    key = (category or "").lower().strip()
+    return _CATEGORY_PALETTE.get(key, "#bcbcc4")
+
+
+def _group_runs(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse adjacent same-category events into a single session run."""
+    runs: list[dict[str, Any]] = []
+    for ev in events:
+        cat = (ev["digest"].get("category") or "").lower().strip()
+        emoji = (ev["digest"].get("emoji") or "").strip()
+        status = (ev["digest"].get("status") or "").strip()
+        if runs and runs[-1]["category"] == cat:
+            runs[-1]["end_ts"] = ev["ts"]
+            runs[-1]["events"].append({"ts": ev["ts"], "emoji": emoji, "status": status})
+            runs[-1]["emojis"][emoji] = runs[-1]["emojis"].get(emoji, 0) + 1
+        else:
+            runs.append({
+                "category": cat,
+                "start_ts": ev["ts"],
+                "end_ts": ev["ts"],
+                "events": [{"ts": ev["ts"], "emoji": emoji, "status": status}],
+                "emojis": {emoji: 1} if emoji else {},
+            })
+    for r in runs:
+        if r["emojis"]:
+            r["dominant_emoji"] = max(r["emojis"].items(), key=lambda kv: kv[1])[0] or "·"
+        else:
+            r["dominant_emoji"] = "·"
+        r["duration_s"] = max(60, int(r["end_ts"] - r["start_ts"]))
+        r["color"] = _category_color(r["category"])
+        seen_status: set[str] = set()
+        r["distinct_statuses"] = []
+        for e in r["events"]:
+            s = e["status"]
+            if s and s not in seen_status:
+                seen_status.add(s)
+                r["distinct_statuses"].append(s)
+    return runs
+
+
+def _fmt_duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    rem = minutes % 60
+    return f"{hours}h{rem:02d}m" if rem else f"{hours}h"
+
+
+def _category_stats(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return [{category, color, count, share}] sorted by count desc."""
+    if not events:
+        return []
+    counts: dict[str, int] = {}
+    for ev in events:
+        cat = ((ev["digest"].get("category") or "").lower().strip() or "other")
+        counts[cat] = counts.get(cat, 0) + 1
+    total = sum(counts.values()) or 1
+    rows = [{"category": c, "count": n, "share": n / total, "color": _category_color(c)}
+            for c, n in counts.items()]
+    rows.sort(key=lambda r: r["count"], reverse=True)
+    return rows
+
+
 def render_html(
     *,
     inferred_events: list[dict[str, Any]],
@@ -373,84 +467,502 @@ def render_html(
     def esc(value: object) -> str:
         return _html.escape(str(value or ""))
 
-    def row_html(ev: dict[str, Any], prefix_html: str = "") -> str:
-        left, right = _digest_one_line(ev["digest"])
-        return (
-            f"<tr><td class='ts'>{esc(_fmt_hhmm(ev['ts']))}</td>"
-            f"<td>{prefix_html}"
-            f"<span class='left'>{esc(left)}</span>"
-            f"<span class='right'>{esc(right)}</span>"
-            f"</td></tr>"
+    # ----- hero header -----
+    day_obj: _dt.date | None = None
+    if day_label:
+        try:
+            day_obj = _dt.date.fromisoformat(day_label.split(" ")[0])
+        except ValueError:
+            day_obj = None
+    if day_obj:
+        weekday_str = day_obj.strftime("%A")
+        date_str = day_obj.strftime("%B %-d")
+        year_str = day_obj.strftime("%Y")
+    else:
+        weekday_str = ""
+        date_str = day_label or "today"
+        year_str = ""
+
+    # ----- stats -----
+    all_inferred = inferred_events
+    runs = _group_runs(all_inferred)
+    cat_stats = _category_stats(all_inferred)
+    n_events = len(all_inferred)
+    n_categories = len(cat_stats)
+    hours_touched = len({_dt.datetime.fromtimestamp(e["ts"]).hour for e in all_inferred})
+    top_cat = cat_stats[0]["category"] if cat_stats else "—"
+    time_span = ""
+    if all_inferred:
+        first_ts = all_inferred[0]["ts"]
+        last_ts = all_inferred[-1]["ts"]
+        time_span = f"{_fmt_hhmm(first_ts)} → {_fmt_hhmm(last_ts)}"
+
+    # ----- category share bar -----
+    cat_bar_html = ""
+    if cat_stats:
+        segments = "".join(
+            f"<div class='seg' style='flex: {r['share']:.4f}; background: {r['color']};' "
+            f"title='{esc(r['category'])} · {r['count']}'></div>"
+            for r in cat_stats
+        )
+        chips = "".join(
+            f"<span class='chip'>"
+            f"<span class='swatch' style='background:{r['color']}'></span>"
+            f"<span class='chip-label'>{esc(r['category'])}</span>"
+            f"<span class='chip-count'>{r['count']}</span>"
+            f"</span>"
+            for r in cat_stats
+        )
+        cat_bar_html = (
+            "<div class='cat-section'>"
+            f"<div class='cat-bar'>{segments}</div>"
+            f"<div class='cat-chips'>{chips}</div>"
+            "</div>"
         )
 
-    bits = []
-    if inferred_events: bits.append(f"{len(inferred_events)} activities")
-    if my_events: bits.append(f"{len(my_events)} published")
-    if friend_events: bits.append(f"{len(friend_events)} friends")
-    summary = ", ".join(bits) if bits else "empty"
+    # ----- activity timeline (grouped into runs) -----
+    runs_html = ""
+    if runs:
+        rendered_runs = []
+        for r in runs:
+            ev_count = len(r["events"])
+            start_label = _fmt_hhmm(r["start_ts"])
+            duration = _fmt_duration(r["duration_s"])
+            n_distinct = len(r["distinct_statuses"])
+            # single-status run → compact one-liner
+            if n_distinct == 1 and ev_count == 1:
+                rendered_runs.append(f"""
+  <article class='run run-single' style='--accent: {r["color"]};'>
+    <span class='run-time'>{esc(start_label)}</span>
+    <span class='run-emoji'>{esc(r['dominant_emoji'])}</span>
+    <span class='run-cat'>{esc(r['category'] or 'other')}</span>
+    <span class='run-status'>{esc(r['distinct_statuses'][0])}</span>
+  </article>""")
+                continue
+            # multi-status run → header + bullet list
+            statuses_html = "".join(
+                f"<li>{esc(s)}</li>" for s in r["distinct_statuses"][:8]
+            )
+            if not statuses_html:
+                statuses_html = "<li class='dim'>(no status text)</li>"
+            ev_more = ""
+            if n_distinct > 8:
+                ev_more = f"<li class='dim'>+ {n_distinct - 8} more</li>"
+            meta_bits = []
+            if ev_count > 1:
+                meta_bits.append(f"{ev_count} events")
+            if r["duration_s"] > 60:
+                meta_bits.append(esc(duration))
+            meta_html = ""
+            if meta_bits:
+                meta_html = (
+                    "<span class='run-meta'>"
+                    + "".join(f"<span class='dot'>·</span><span>{m}</span>" for m in meta_bits)
+                    + "</span>"
+                )
+            rendered_runs.append(f"""
+  <article class='run run-multi' style='--accent: {r["color"]};'>
+    <header class='run-head'>
+      <span class='run-time'>{esc(start_label)}</span>
+      <span class='run-emoji'>{esc(r['dominant_emoji'])}</span>
+      <span class='run-cat'>{esc(r['category'] or 'other')}</span>
+      {meta_html}
+    </header>
+    <ul class='run-body'>{statuses_html}{ev_more}</ul>
+  </article>""")
+        runs_html = "".join(rendered_runs)
 
-    activity_rows = "".join(row_html(ev) for ev in inferred_events)
-    mine_rows = []
-    for ev in my_events:
-        names = [friend_idx.get(r, (r or "?")[:8]) for r in (ev.get("recipients") or [])]
-        suffix = ""
-        if names:
-            suffix = "<span class='suffix'>→ " + ", ".join("@" + esc(n) for n in names) + "</span>"
-        mine_rows.append(row_html(ev) + suffix)
-    mine_table = "".join(mine_rows)
-
-    friend_rows = ""
-    if friend_events:
-        for ev in friend_events:
-            handle = f"<span class='handle'>@{esc(ev.get('friend_name') or '?')}</span> "
-            friend_rows += row_html(ev, prefix_html=handle)
-
-    sections = []
-    if inferred_events:
-        sections.append(f"<h2>activity</h2><table>{activity_rows}</table>")
-    if my_events or friend_events is not None:
-        sections.append(
-            f"<h2>published</h2>"
-            f"<table>{mine_table}</table>" if my_events else
-            f"<h2>published</h2><p class='empty'>nothing published in this window</p>"
+    # ----- published statuses -----
+    published_html = ""
+    if my_events:
+        rows = []
+        for ev in my_events:
+            left, right = _digest_one_line(ev["digest"])
+            t = _fmt_hhmm(ev["ts"])
+            names = [friend_idx.get(r, (r or "?")[:8]) for r in (ev.get("recipients") or [])]
+            recipients_html = ""
+            if names:
+                recipients_html = (
+                    "<span class='recipients'>→ "
+                    + " ".join(f"<span class='handle'>@{esc(n)}</span>" for n in names)
+                    + "</span>"
+                )
+            rows.append(
+                f"<div class='pub-row'>"
+                f"<span class='ts'>{esc(t)}</span>"
+                f"<span class='pub-left'>{esc(left)}</span>"
+                f"<span class='pub-right'>{esc(right)}</span>"
+                f"{recipients_html}"
+                f"</div>"
+            )
+        published_html = (
+            "<section class='block'>"
+            "<h2>published</h2>"
+            f"<div class='pub-list'>{''.join(rows)}</div>"
+            "</section>"
         )
+    elif my_events is not None and not my_events:
+        # Only show empty published section if user hinted they care (had any events at all)
+        pass
+
+    # ----- friends section -----
+    friends_html = ""
     if friend_events is not None:
         if friend_events:
-            sections.append(f"<h2>friends</h2><table>{friend_rows}</table>")
+            rows = []
+            for ev in friend_events:
+                left, right = _digest_one_line(ev["digest"])
+                t = _fmt_hhmm(ev["ts"])
+                handle = ev.get("friend_name") or "?"
+                rows.append(
+                    f"<div class='pub-row'>"
+                    f"<span class='ts'>{esc(t)}</span>"
+                    f"<span class='handle big-handle'>@{esc(handle)}</span>"
+                    f"<span class='pub-left'>{esc(left)}</span>"
+                    f"<span class='pub-right'>{esc(right)}</span>"
+                    f"</div>"
+                )
+            friends_html = (
+                "<section class='block'>"
+                "<h2>friends</h2>"
+                f"<div class='pub-list'>{''.join(rows)}</div>"
+                "</section>"
+            )
         else:
-            sections.append("<h2>friends</h2><p class='empty'>no friend statuses in window</p>")
+            friends_html = (
+                "<section class='block'>"
+                "<h2>friends</h2>"
+                "<p class='empty'>no friend statuses in this window — "
+                "is the relay reachable?</p>"
+                "</section>"
+            )
 
-    body_html = "".join(sections)
-    if not body_html:
-        body_html = "<p class='empty'>nothing for this day</p>"
+    activity_section = ""
+    if runs_html:
+        activity_section = (
+            "<section class='block'>"
+            "<h2>activity</h2>"
+            f"<div class='runs'>{runs_html}</div>"
+            "</section>"
+        )
+    elif inferred_events is not None:
+        activity_section = (
+            "<section class='block'>"
+            "<h2>activity</h2>"
+            "<p class='empty'>no activity inferred yet — "
+            "categorizer may still be warming up</p>"
+            "</section>"
+        )
+
+    if not (activity_section or published_html or friends_html):
+        body_html = "<p class='empty very-big'>nothing for this day</p>"
+    else:
+        body_html = activity_section + published_html + friends_html
 
     return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<title>Daily Card · {esc(day_label or 'today')}</title>
-<style>
-  :root {{ color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }}
-  body {{ background:#0b0b0d; color:#f4f4f5; margin:0; padding:32px;
-          display:flex; justify-content:center; }}
-  main {{ width:min(720px, 100%); background:#121216; border:1px solid #1d1d22;
-           border-radius:18px; padding:28px 32px; }}
-  h1 {{ font-size:22px; margin:0 0 4px; letter-spacing:-.01em; }}
-  .summary {{ color:#a1a1aa; font-size:13px; margin-bottom:22px; }}
-  h2 {{ font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.08em;
-        color:#71717a; margin:22px 0 8px; }}
-  table {{ width:100%; border-collapse:collapse; }}
-  td {{ padding:6px 0; vertical-align:top; line-height:1.45; font-size:14px; }}
-  td.ts {{ color:#71717a; font-family:ui-monospace, monospace; width:60px; padding-right:14px; }}
-  .left {{ display:inline-block; min-width:140px; color:#d4d4d8; }}
-  .right {{ color:#f4f4f5; }}
-  .suffix {{ color:#52525b; margin-left:8px; font-size:13px; }}
-  .handle {{ color:#9bb5e8; margin-right:10px; }}
-  .empty {{ color: #52525b; font-style: italic; }}
-</style></head>
-<body><main>
-  <h1>Daily Card · {esc(day_label or 'today')}</h1>
-  <div class="summary">{esc(summary)}</div>
-  {body_html}
-</main></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Daily Card · {esc(date_str)}</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      --bg: #0a0a0c;
+      --surface: #131318;
+      --surface-2: #1b1b22;
+      --border: rgba(255,255,255,.06);
+      --border-2: rgba(255,255,255,.04);
+      --text: #f4f4f5;
+      --text-2: #d4d4d8;
+      --muted: #a1a1aa;
+      --muted-2: #71717a;
+      --muted-3: #52525b;
+      --accent: #c8e0a8;
+      --info: #9bb5e8;
+      --love: #f5b4d4;
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+                    "Inter", system-ui, sans-serif;
+      --font-display: "SF Pro Display", -apple-system, BlinkMacSystemFont,
+                       system-ui, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+    }}
+    * {{ box-sizing: border-box; }}
+    html, body {{
+      margin: 0; padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 14.5px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }}
+    body {{
+      padding: 40px 24px 56px;
+      display: flex;
+      justify-content: center;
+    }}
+    main {{
+      width: min(760px, 100%);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 36px 40px 38px;
+      box-shadow: 0 24px 70px rgba(0,0,0,.36);
+    }}
+
+    /* ----- hero ----- */
+    .hero {{
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 18px; flex-wrap: wrap;
+      padding-bottom: 22px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 26px;
+    }}
+    .hero .left {{ display: flex; flex-direction: column; gap: 4px; }}
+    .hero .kicker {{
+      font-size: 11px; font-weight: 600;
+      letter-spacing: .12em; text-transform: uppercase;
+      color: var(--muted-2);
+    }}
+    .hero .date {{
+      font-family: var(--font-display);
+      font-size: 36px; font-weight: 600;
+      letter-spacing: -.02em;
+      line-height: 1.05;
+      color: var(--text);
+    }}
+    .hero .weekday {{
+      color: var(--accent);
+      font-weight: 500;
+    }}
+    .hero .year {{ color: var(--muted-2); font-weight: 400; margin-left: 6px; }}
+    .hero .right {{
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted-2);
+      text-align: right;
+    }}
+    .hero .span {{ display: block; margin-top: 4px; color: var(--muted); }}
+
+    /* ----- stat tiles ----- */
+    .stats {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 10px;
+      margin-bottom: 24px;
+    }}
+    .stat {{
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 11px 14px;
+    }}
+    .stat .label {{
+      font-size: 10px; color: var(--muted-2);
+      text-transform: uppercase; letter-spacing: .08em;
+    }}
+    .stat .value {{
+      font-family: var(--font-display);
+      font-size: 22px; font-weight: 500;
+      letter-spacing: -.01em;
+      margin-top: 4px;
+      color: var(--text);
+    }}
+    .stat .value.text {{ font-size: 16px; }}
+
+    /* ----- category share ----- */
+    .cat-section {{ margin-bottom: 24px; }}
+    .cat-bar {{
+      display: flex; width: 100%;
+      height: 8px; border-radius: 4px;
+      overflow: hidden;
+      background: var(--surface-2);
+      margin-bottom: 10px;
+    }}
+    .cat-bar .seg {{ height: 100%; min-width: 2px; }}
+    .cat-chips {{
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }}
+    .chip {{
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 9px 3px 7px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      font-size: 12px;
+    }}
+    .chip .swatch {{
+      display: inline-block;
+      width: 7px; height: 7px;
+      border-radius: 50%;
+    }}
+    .chip-label {{ color: var(--text-2); }}
+    .chip-count {{ color: var(--muted-2); font-family: var(--font-mono); font-size: 11px; }}
+
+    /* ----- sections ----- */
+    .block {{ margin-top: 28px; }}
+    h2 {{
+      font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: .1em;
+      color: var(--muted-2);
+      margin: 0 0 14px;
+    }}
+
+    /* ----- activity runs ----- */
+    .runs {{ display: flex; flex-direction: column; gap: 1px; }}
+    .run {{
+      border-left: 3px solid var(--accent);
+      padding-left: 14px;
+      margin-left: 2px;
+    }}
+    /* single-event row — compact one-liner */
+    .run-single {{
+      display: grid;
+      grid-template-columns: 50px 22px minmax(110px, 0.30fr) 1fr;
+      align-items: baseline;
+      gap: 12px;
+      padding: 6px 0;
+    }}
+    .run-single .run-time {{
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted-2);
+    }}
+    .run-single .run-emoji {{ font-size: 15px; line-height: 1; text-align: center; }}
+    .run-single .run-cat {{
+      font-size: 13px; color: var(--muted);
+      letter-spacing: .005em;
+    }}
+    .run-single .run-status {{
+      color: var(--text);
+      font-size: 13.5px;
+    }}
+
+    /* multi-event session block */
+    .run-multi {{
+      padding: 14px 0 12px;
+    }}
+    .run-multi + .run-multi {{ margin-top: 4px; }}
+    .run-head {{
+      display: flex; align-items: baseline; gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }}
+    .run-head .run-time {{
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted-2);
+      min-width: 40px;
+    }}
+    .run-head .run-emoji {{ font-size: 17px; line-height: 1; }}
+    .run-head .run-cat {{
+      font-weight: 600; font-size: 14px;
+      color: var(--text);
+      letter-spacing: .005em;
+    }}
+    .run-meta {{
+      color: var(--muted-2); font-size: 11px;
+      font-family: var(--font-mono);
+      display: inline-flex; align-items: center; gap: 6px;
+    }}
+    .run-meta .dot {{ color: var(--muted-3); }}
+    .run-body {{
+      list-style: none; padding: 0; margin: 0;
+      display: flex; flex-direction: column; gap: 3px;
+      font-size: 13.5px;
+      color: var(--text-2);
+      padding-left: 4px;
+    }}
+    .run-body li {{
+      position: relative;
+      padding-left: 14px;
+    }}
+    .run-body li::before {{
+      content: "·";
+      position: absolute; left: 2px; top: -1px;
+      color: var(--muted-3);
+    }}
+    .run-body li.dim {{ color: var(--muted-3); font-style: italic; }}
+
+    /* ----- published / friends rows ----- */
+    .pub-list {{ display: flex; flex-direction: column; gap: 0; }}
+    .pub-row {{
+      display: flex; align-items: baseline; gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-2);
+      font-size: 13.5px;
+    }}
+    .pub-row:last-child {{ border-bottom: none; }}
+    .pub-row .ts {{
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--muted-2);
+      min-width: 44px;
+    }}
+    .pub-row .pub-left {{
+      color: var(--text-2);
+      min-width: 130px;
+    }}
+    .pub-row .pub-right {{ color: var(--text); flex: 1; }}
+    .pub-row .recipients {{
+      color: var(--muted-2); font-size: 12px;
+    }}
+    .pub-row .handle {{
+      color: var(--love);
+      font-size: 12px;
+    }}
+    .pub-row .handle.big-handle {{
+      color: var(--info);
+      font-weight: 500;
+      font-size: 13px;
+      min-width: 80px;
+    }}
+
+    .empty {{ color: var(--muted-3); font-style: italic; }}
+    .empty.very-big {{ text-align: center; padding: 40px 0; font-size: 16px; }}
+
+    @media (max-width: 480px) {{
+      body {{ padding: 22px 12px; }}
+      main {{ padding: 24px 20px; }}
+      .hero .date {{ font-size: 28px; }}
+      .run {{ padding-left: 12px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header class='hero'>
+      <div class='left'>
+        <div class='kicker'>Daily Card</div>
+        <div class='date'>
+          {f"<span class='weekday'>{esc(weekday_str)}</span> " if weekday_str else ""}<span>{esc(date_str)}</span>
+          {f"<span class='year'>{esc(year_str)}</span>" if year_str else ""}
+        </div>
+      </div>
+      <div class='right'>
+        {f"<div>{n_events} event{'' if n_events == 1 else 's'}</div>" if n_events else ""}
+        {f"<span class='span'>{esc(time_span)}</span>" if time_span else ""}
+      </div>
+    </header>
+
+    {(
+      "<div class='stats'>"
+      f"<div class='stat'><div class='label'>events</div><div class='value'>{n_events}</div></div>"
+      f"<div class='stat'><div class='label'>categories</div><div class='value'>{n_categories}</div></div>"
+      f"<div class='stat'><div class='label'>active hours</div><div class='value'>{hours_touched}</div></div>"
+      f"<div class='stat'><div class='label'>top focus</div><div class='value text'>{esc(top_cat)}</div></div>"
+      "</div>"
+    ) if n_events else ""}
+
+    {cat_bar_html}
+
+    {body_html}
+  </main>
+</body>
+</html>
 """
 
 
