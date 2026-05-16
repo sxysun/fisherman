@@ -30,6 +30,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
+        // macOS does not enforce single-instance for LSUIElement apps. During
+        // "Update Fisherman", the upgrade subprocess pkill's the old menubar
+        // and then `open -a Fisherman` launches the new one — but the two can
+        // briefly overlap, leaving two notches on screen. Take a "new wins"
+        // approach: terminate any sibling instance before we wire up our own
+        // DynamicNotch.
+        terminateOlderInstances()
+
         configManager = ConfigManager()
         configManager.load()
 
@@ -120,6 +128,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         hoverCancellable?.cancel()
         statusPoller?.stop()
         processManager?.stopAll()
+    }
+
+    // MARK: - Single-instance enforcement
+
+    private func terminateOlderInstances() {
+        let me = NSRunningApplication.current
+        let bid = Bundle.main.bundleIdentifier ?? "com.fisherman.menubar"
+        let siblings = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+            .filter { $0.processIdentifier != me.processIdentifier }
+        guard !siblings.isEmpty else { return }
+
+        NSLog("[Fisherman] found \(siblings.count) older Fisherman instance(s); terminating to enforce single-instance")
+        for app in siblings {
+            _ = app.terminate()
+        }
+
+        // Wait up to 3s for graceful exit. Polling `runningApplications` is
+        // safe on the main thread before the run loop starts — each call is
+        // a fresh OS query, no KVO required.
+        let deadline = Date().addingTimeInterval(3.0)
+        while Date() < deadline {
+            let alive = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+                .filter { $0.processIdentifier != me.processIdentifier }
+            if alive.isEmpty { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+
+        // Force-terminate stragglers (typically blocked in their own
+        // applicationWillTerminate stopping the daemon).
+        let stragglers = NSRunningApplication.runningApplications(withBundleIdentifier: bid)
+            .filter { $0.processIdentifier != me.processIdentifier }
+        for app in stragglers {
+            NSLog("[Fisherman] force-terminating straggler PID \(app.processIdentifier)")
+            _ = app.forceTerminate()
+        }
+        // Small settle so the menu bar slot is fully released before we
+        // claim it via DynamicNotch.
+        Thread.sleep(forTimeInterval: 0.3)
     }
 
     // MARK: - Welcome wizard
