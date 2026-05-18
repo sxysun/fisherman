@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import os
+import re
+import time
+from pathlib import Path
+from typing import Optional
+
+import aiohttp
+
+from .schemas import CandidateEvent, CriticResult
+
+
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+CRITIC_VERSION = "productivity_v1"
+
+PRIVACY_RE = re.compile(
+    r"\b(password|passwd|api[_ -]?key|secret|token|bearer|ssn|credit card|cvv)\b",
+    flags=re.IGNORECASE,
+)
+SCREEN_QUOTE_HINT = re.compile(r'"[^"]{40,}"')
+
+
+def regex_check(message: str) -> CriticResult:
+    flags: list[str] = []
+    reasons: list[str] = []
+    if PRIVACY_RE.search(message):
+        flags.append("privacy_leak")
+        reasons.append("message contains sensitive-keyword pattern")
+    if SCREEN_QUOTE_HINT.search(message):
+        flags.append("screen_quote")
+        reasons.append("message contains a long quoted span — likely screen quote")
+    if len(message) > 200:
+        flags.append("verbose")
+        reasons.append(f"message exceeds 200 chars ({len(message)})")
+    # Multi-paragraph output is a stronger signal of preamble / framing.
+    if message.count("\n\n") >= 1 or message.count("\n") >= 3:
+        flags.append("multi_paragraph")
+        reasons.append("multi-paragraph output — preamble or framing present")
+    if not message.strip():
+        flags.append("empty")
+        reasons.append("empty message")
+    return CriticResult(
+        version=CRITIC_VERSION,
+        pass_=len(flags) == 0,
+        reasons=reasons,
+        flags=flags,
+        latency_ms=0,
+    )
+
+
+async def llm_check(message: str, event: CandidateEvent, config: dict) -> Optional[CriticResult]:
+    """Optional LLM critic pass. Returns None on failure (don't block)."""
+    base_url = config.get("base_url", "").rstrip("/")
+    model = config.get("model")
+    if not base_url or not model:
+        return None
+    api_key = config.get("api_key") or os.environ.get(config.get("api_key_env", ""), "")
+
+    prompt_path = PROMPTS_DIR / "critic" / "productivity_v1.md"
+    if not prompt_path.exists():
+        return None
+    system_prompt = prompt_path.read_text()
+
+    user_payload = (
+        f"MESSAGE TO REVIEW:\n{message}\n\n"
+        f"SCREEN CONTEXT (frontmost app + ocr snippet):\n"
+        f"  app: {event.screen.frontmost_app}\n"
+        f"  ocr: {event.screen.ocr_snippet[:200]}\n"
+    )
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["x-api-key"] = api_key
+
+    from .realizer import chat_completions_url
+    t0 = time.monotonic()
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.post(
+                chat_completions_url(base_url),
+                headers=headers,
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 80,
+                },
+            ) as r:
+                if r.status != 200:
+                    return None
+                data = await r.json()
+    except Exception:
+        return None
+
+    text = (
+        ((data.get("choices") or [{}])[0].get("message", {}) or {}).get("content") or ""
+    ).strip().lower()
+    latency_ms = int((time.monotonic() - t0) * 1000)
+
+    if text.startswith("pass") or text == "ok":
+        return CriticResult(version=CRITIC_VERSION, pass_=True, reasons=[], flags=[], latency_ms=latency_ms)
+    return CriticResult(
+        version=CRITIC_VERSION,
+        pass_=False,
+        reasons=[text[:200]],
+        flags=["llm_block"],
+        latency_ms=latency_ms,
+    )
+
+
+async def check(message: str, event: CandidateEvent, config: dict) -> CriticResult:
+    """Combined regex + optional LLM check. Regex is veto-power; LLM augments."""
+    rgx = regex_check(message)
+    if not rgx.pass_:
+        return rgx
+    llm = await llm_check(message, event, config) if config.get("enabled", True) else None
+    if llm is None:
+        return rgx
+    if not llm.pass_:
+        # combine flags
+        return CriticResult(
+            version=CRITIC_VERSION,
+            pass_=False,
+            reasons=rgx.reasons + llm.reasons,
+            flags=rgx.flags + llm.flags,
+            latency_ms=llm.latency_ms,
+        )
+    return llm

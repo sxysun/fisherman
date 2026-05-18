@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fisherman Harness Architecture and Gap Audit</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #171717;
+      --muted: #646b73;
+      --subtle: #8a9199;
+      --line: #d8dde3;
+      --panel: #f7f8fa;
+      --panel2: #eef2f6;
+      --ok: #166534;
+      --warn: #9a3412;
+      --bad: #991b1b;
+      --blue: #1d4ed8;
+      --bg: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }
+    main {
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 48px 32px 80px;
+    }
+    header {
+      border-bottom: 2px solid var(--ink);
+      padding-bottom: 22px;
+      margin-bottom: 28px;
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(32px, 5vw, 56px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+    h2 {
+      margin: 38px 0 12px;
+      padding-top: 8px;
+      font-size: 24px;
+      line-height: 1.2;
+      border-top: 1px solid var(--line);
+    }
+    h3 {
+      margin: 24px 0 8px;
+      font-size: 16px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--muted);
+    }
+    p { margin: 0 0 12px; }
+    code {
+      font: 13px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--panel2);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+    .dek {
+      max-width: 900px;
+      font-size: 18px;
+      color: var(--muted);
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .grid {
+      display: grid;
+      gap: 14px;
+    }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--panel);
+    }
+    .card h3 { margin-top: 0; }
+    .verdict {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+    .score {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      background: #101418;
+      color: white;
+      border-radius: 8px;
+      padding: 26px;
+    }
+    .score .num { font-size: 64px; font-weight: 700; line-height: 1; }
+    .score .label { color: #c7cbd1; }
+    .status-ok { color: var(--ok); font-weight: 650; }
+    .status-warn { color: var(--warn); font-weight: 650; }
+    .status-bad { color: var(--bad); font-weight: 650; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 22px;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+    }
+    th {
+      background: var(--panel2);
+      font-weight: 700;
+    }
+    tr:nth-child(even) td { background: #fbfcfd; }
+    ul { margin: 8px 0 0 20px; padding: 0; }
+    li { margin: 4px 0; }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin: 16px 0;
+    }
+    .node {
+      min-height: 96px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      position: relative;
+    }
+    .node strong { display: block; margin-bottom: 4px; }
+    .node small { color: var(--muted); }
+    .arrow {
+      color: var(--subtle);
+      font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      margin: -4px 0 8px;
+    }
+    .callout {
+      border-left: 4px solid var(--blue);
+      background: #eff6ff;
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin: 14px 0;
+    }
+    .risk-high { border-left: 4px solid var(--bad); }
+    .risk-med { border-left: 4px solid var(--warn); }
+    .risk-low { border-left: 4px solid var(--ok); }
+    .print-note { color: var(--muted); font-size: 13px; }
+    @media (max-width: 860px) {
+      main { padding: 32px 18px 64px; }
+      .grid.two, .grid.three, .verdict, .flow { grid-template-columns: 1fr; }
+      h1 { font-size: 36px; }
+    }
+    @media print {
+      main { max-width: none; padding: 24px; }
+      .card, .node { break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Fisherman Harness Architecture and Gap Audit</h1>
+    <p class="dek">A direct assessment of the proactive-presence harness as of May 18, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
+    <div class="meta">
+      <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
+      <span class="pill">Smoke tests: 14/14 passing</span>
+      <span class="pill">Approx. source/docs: 50 files, 7.8k lines</span>
+      <span class="pill">Generated: 2026-05-18</span>
+    </div>
+  </header>
+
+  <section class="verdict">
+    <div class="card">
+      <h2 style="margin-top:0;border-top:0;padding-top:0;">Executive Verdict</h2>
+      <p><strong>The harness is architecturally coherent for a local research prototype.</strong> It has the right primitive loop: observe screen state, turn it into a candidate event, gate interventions, realize a goal-aware message, push it through a low-friction UI, capture outcomes, and replay policy decisions offline.</p>
+      <p><strong>It is not yet a frontier-lab-grade harness.</strong> The missing pieces are not mostly UI polish. They are measurement, counterfactual evaluation, privacy controls before model calls, persistent typed storage, experimentation discipline, and enough labeled data to tune or learn a policy.</p>
+      <p><strong>Best current use:</strong> dogfood on one machine with explicit Today goals, collect labels, and use the trace data to harden the policy. Do not treat current ping quality as validated.</p>
+    </div>
+    <div class="score">
+      <div class="num">6/10</div>
+      <div class="label">research-harness maturity</div>
+      <div style="height:12px"></div>
+      <div class="label">Dogfood: yes<br>Production: no<br>Lab-grade eval: not yet</div>
+    </div>
+  </section>
+
+  <h2>Repository Boundary</h2>
+  <div class="grid two">
+    <div class="card">
+      <h3>Commit model</h3>
+      <p><code>harness/</code> should be committed in this repository because it depends on Fisherman's local HTTP API and DynamicNotchKit. It should still be treated as a separate package and research harness, not as Fisherman app runtime.</p>
+      <ul>
+        <li>Own Python package: <code>harness/pyproject.toml</code></li>
+        <li>Own config/data root: <code>~/.harness</code></li>
+        <li>Own Swift notch app: <code>harness/notch</code></li>
+        <li>Own CI workflow: <code>.github/workflows/harness-ci.yml</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Update isolation</h3>
+      <p>The main app update checker is path-scoped and deliberately excludes <code>harness/</code>. Harness-only commits should not show up as "Update Fisherman" in the Settings -> Updates tab.</p>
+      <ul>
+        <li><code>fisherman/cli.py</code> uses <code>_UPDATE_RELEVANT_PATHS</code>; <code>harness/</code> is not included.</li>
+        <li>The DMG payload list excludes <code>harness/</code>.</li>
+        <li>The app bootstrap/upgrade sync lists exclude <code>harness/</code>.</li>
+        <li>Main CI now ignores harness-only changes; Harness CI owns them.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>How The Harness Works</h2>
+  <div class="flow">
+    <div class="node"><strong>1. Fisherman capture</strong><small>Fisherman daemon exposes frames, OCR, app/window metadata, status, and query endpoints on localhost.</small></div>
+    <div class="node"><strong>2. Candidate synthesis</strong><small><code>candidate.py</code> snapshots screen context and current user prefs into a typed <code>CandidateEvent</code>.</small></div>
+    <div class="node"><strong>3. Scene reading</strong><small>Rules tag coarse scenes. Optional VLM overlay adds specificity, sensitivity, and intent signals.</small></div>
+    <div class="node"><strong>4. Short memory</strong><small><code>SessionMemory</code> tracks recent apps/scenes, switches, time on current app, and recent outcomes.</small></div>
+    <div class="node"><strong>5. Gate</strong><small><code>rule_v0</code> applies hard gates, cooldown, snooze, negative-feedback backoff, and goal/opportunity reasons.</small></div>
+    <div class="node"><strong>6. Realizer</strong><small>OpenAI-compatible chat endpoint receives daily goal, why-now, compact state, and optionally the current JPEG.</small></div>
+    <div class="node"><strong>7. Critic</strong><small>Regex critic blocks obvious secrets, long quotes, verbose output, or empty/multi-paragraph messages. LLM critic is optional.</small></div>
+    <div class="node"><strong>8. Notch + reward</strong><small>Swift notch displays the pill, captures hover/approach/click/dismiss/timeout, and writes signal-derived reward.</small></div>
+  </div>
+  <p class="arrow">Fisherman -> CandidateEvent -> Scene/VLM -> Memory -> Gate -> Realizer -> Critic -> Pending pill -> Outcome -> Reward -> Trace -> Replay/labels</p>
+
+  <h2>What Is Strong</h2>
+  <div class="grid three">
+    <div class="card risk-low">
+      <h3>Right dependency direction</h3>
+      <p>The harness depends on Fisherman through HTTP. Fisherman does not import or ship the harness as app runtime. This keeps the experimental loop replaceable.</p>
+    </div>
+    <div class="card risk-low">
+      <h3>Goal-aware intervention model</h3>
+      <p>The current design avoids a brittle fixed-intent catalog. The gate emits why-now reasons and the realizer composes against the daily goal and actual visual context.</p>
+    </div>
+    <div class="card risk-low">
+      <h3>Feedback loop exists</h3>
+      <p>Outcomes, hover traces, retro labels, replay, score, and reward are in place. That is the right skeleton for improving intervention policy over time.</p>
+    </div>
+    <div class="card risk-low">
+      <h3>Native surface is appropriate</h3>
+      <p>The notch pill is less disruptive than a modal/chat UI and can capture richer intent signals than a notification alone.</p>
+    </div>
+    <div class="card risk-low">
+      <h3>Local-first logs</h3>
+      <p>All core trace artifacts live under <code>~/.harness</code>. That makes dogfooding inspectable and easy to reset.</p>
+    </div>
+    <div class="card risk-low">
+      <h3>Testable seams</h3>
+      <p>The modules are small enough to unit test: gate, scene overlay, reward, trace patching, and snooze behavior now have smoke coverage.</p>
+    </div>
+  </div>
+
+  <h2>Critical Gaps vs. A Frontier-Lab Harness</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Area</th>
+        <th>Current state</th>
+        <th>Frontier-lab bar</th>
+        <th>Priority</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Evaluation data</td>
+        <td>Live traces exist, but labels are sparse and metrics are not yet statistically meaningful.</td>
+        <td>Gold datasets, human labels, disagreement analysis, held-out evals, and stable policy acceptance criteria.</td>
+        <td class="status-bad">P0</td>
+      </tr>
+      <tr>
+        <td>Counterfactual policy eval</td>
+        <td>Replay can rerun the gate over candidates, but it does not model realizer quality, user mood, delayed outcomes, or randomized holdout.</td>
+        <td>Shadow policies, exploration buckets, calibrated propensities, IPS/doubly robust estimates where appropriate.</td>
+        <td class="status-bad">P0</td>
+      </tr>
+      <tr>
+        <td>Privacy before network</td>
+        <td>VLM/realizer may receive screenshots before local redaction. Sensitive detection is currently after or during model interpretation.</td>
+        <td>Local preflight redaction, per-domain allow/deny policy, model-call audit trail, and explicit endpoint trust boundaries.</td>
+        <td class="status-bad">P0</td>
+      </tr>
+      <tr>
+        <td>Persistent storage</td>
+        <td>JSONL files under <code>~/.harness</code>. Outcome attachment rewrites <code>traces.jsonl</code>.</td>
+        <td>SQLite or event-log store with schema versions, idempotency, indexes, and concurrent-writer safety.</td>
+        <td class="status-warn">P1</td>
+      </tr>
+      <tr>
+        <td>Policy learning</td>
+        <td>Handwritten <code>rule_v0</code> with simple sensitivity settings.</td>
+        <td>Label-informed personalization, calibrated learned gate, exploration/exploitation discipline, and rollbackable policy versions.</td>
+        <td class="status-warn">P1</td>
+      </tr>
+      <tr>
+        <td>State management</td>
+        <td>Config reload requires restart. Daemon is foreground-oriented. Policy state is a JSON file.</td>
+        <td>Launchd service, health probes, live config reload, crash recovery, and monotonic state transitions.</td>
+        <td class="status-warn">P1</td>
+      </tr>
+      <tr>
+        <td>Realizer trust</td>
+        <td>Hermes can do server-side tool use, but tool calls and reasoning are mostly opaque to the harness.</td>
+        <td>Observable tool traces, explicit capability budget, prompt/version diffing, and replayable realization tests.</td>
+        <td class="status-warn">P1</td>
+      </tr>
+      <tr>
+        <td>UX semantics</td>
+        <td>Notch pill works and captures interactions. Approach geometry is approximate.</td>
+        <td>Measured display lifecycle, no lost pending messages, accessibility, multi-monitor correctness, and tested no-overlap states.</td>
+        <td class="status-warn">P2</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Audit Fixes Applied</h2>
+  <div class="grid two">
+    <div class="card">
+      <h3>Correctness</h3>
+      <ul>
+        <li>Removed hardcoded API key from repo defaults; Settings -> Model now owns local key entry.</li>
+        <li>Fixed cooldown persistence across daemon ticks.</li>
+        <li>Made negative-feedback backoff time-bounded.</li>
+        <li>Made expired snoozes inactive instead of permanent blockers.</li>
+        <li>Made the "Later" notch action actually set a 30-minute snooze.</li>
+        <li>Made notch auto-dismiss respect the pending payload expiration.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Data and eval</h3>
+      <ul>
+        <li>Preserved VLM specificity and intent signals through the event schema.</li>
+        <li>Included scene detail and intent signals in the realizer brief.</li>
+        <li>Attached outcomes and reward to matching trace rows.</li>
+        <li>Improved replay to use live config, policy state, outcomes, and cooldown simulation.</li>
+        <li>URL-encoded Fisherman query tool parameters.</li>
+        <li>Switched session-memory timestamp parsing to UTC-safe parsing.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Risk Register</h2>
+  <div class="card risk-high">
+    <h3>P0: Key rotation and screenshot privacy</h3>
+    <p>A real-looking API key was present in the repo defaults before this audit. Even though source defaults are now blank, the old key remains in the local <code>~/.harness/config.toml</code> until replaced. Rotate it. Separately, the current privacy story is not lab-grade because the system can send raw screenshots to the configured model endpoint before local redaction.</p>
+  </div>
+  <div class="card risk-high">
+    <h3>P0: No meaningful policy metrics yet</h3>
+    <p>The harness can count pings and outcomes, but there are not enough retrospective labels or controlled holdouts to say whether the gate is good. A frontier lab would not ship a proactive assistant loop without measured false-interruption rate, missed-help rate, and calibrated confidence.</p>
+  </div>
+  <div class="card risk-med">
+    <h3>P1: JSONL storage will become the next bottleneck</h3>
+    <p>JSONL is fine for first dogfood, but it is weak for concurrent writers, schema evolution, joins, and fast label/replay queries. Move traces, candidates, outcomes, labels, and policy versions into SQLite once the event schema stabilizes.</p>
+  </div>
+  <div class="card risk-med">
+    <h3>P1: Replay is still not the real system</h3>
+    <p>Replay now simulates memory and cooldown better than before, but it still excludes realizer quality, critic behavior, VLM nondeterminism, user context, and delayed action. Treat it as a gate-regression tool, not a full offline product metric.</p>
+  </div>
+
+  <h2>Definition Of A Completely Working Harness</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Milestone</th>
+        <th>Concrete bar</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Dogfood-ready</td>
+        <td>Daemon starts via launchd, survives app restarts, no hardcoded secrets, no update-check leakage, and 20-30 retro labels collected.</td>
+      </tr>
+      <tr>
+        <td>Policy-eval-ready</td>
+        <td>At least 500 labeled candidates, frozen datasets, policy versioning, replay under 10 seconds for a day of candidates, and a dashboard showing precision, false-interruption rate, and missed-help rate.</td>
+      </tr>
+      <tr>
+        <td>Privacy-ready</td>
+        <td>Local screenshot redaction before any external model call, explicit per-provider config, sensitive-domain suppression, and auditable model-call logs.</td>
+      </tr>
+      <tr>
+        <td>Personalization-ready</td>
+        <td>Few-shot realizer examples from accepted/rejected local labels, learned or calibrated gate features, and rollbackable policy configs.</td>
+      </tr>
+      <tr>
+        <td>Production-grade</td>
+        <td>SQLite store, migrations, launchd packaging, observability, crash recovery, CI on all harness paths, release notes, security review, and documented rollback path.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Recommended Roadmap</h2>
+  <div class="grid two">
+    <div class="card">
+      <h3>Next 24 hours</h3>
+      <ul>
+        <li>Rotate the leaked key and set the new key in Settings -> Model.</li>
+        <li>Commit <code>harness/</code> and the path-scoped Harness CI.</li>
+        <li>Dogfood with one clear Today goal.</li>
+        <li>Label 20-30 decisions in <code>:7893/label</code>.</li>
+        <li>Write down every annoying or missed intervention immediately.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Next engineering pass</h3>
+      <ul>
+        <li>Add launchd install/start/stop for the harness daemon.</li>
+        <li>Add live config reload after Settings saves.</li>
+        <li>Make pending delivery idempotent so a notch crash cannot drop a message.</li>
+        <li>Move trace/outcome/label storage to SQLite.</li>
+        <li>Add local preflight redaction before VLM/realizer calls.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Data pass</h3>
+      <ul>
+        <li>Freeze daily datasets.</li>
+        <li>Add label-quality review and confidence handling.</li>
+        <li>Build confusion tables for ping/no-ping vs. retro label.</li>
+        <li>Introduce randomized holdout or at least randomized shadow-policy scoring.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Model pass</h3>
+      <ul>
+        <li>Feed accepted/rejected examples into the realizer.</li>
+        <li>Evaluate candidate VLMs against a small visual gold set.</li>
+        <li>Keep the rule gate as baseline and compare learned gates against it.</li>
+        <li>Log model prompt version, endpoint, and image bytes for every realization.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Bottom Line</h2>
+  <div class="callout">
+    <p>The core idea is sound: a proactive assistant should be evaluated as an intervention policy, not just as a chat prompt. This build has the right loop and enough instrumentation to start learning from real use.</p>
+    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is privacy preflight, labeled data, replay quality, storage integrity, and policy evaluation.</p>
+  </div>
+  <p class="print-note">Tip: use the browser print dialog to save this file as a PDF if a PDF artifact is needed.</p>
+</main>
+</body>
+</html>

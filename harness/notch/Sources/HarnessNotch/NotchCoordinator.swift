@@ -1,0 +1,184 @@
+import AppKit
+import DynamicNotchKit
+import Foundation
+import SwiftUI
+
+private let APPROACH_HALO_PX: CGFloat = 200
+
+@MainActor
+final class NotchCoordinator {
+    private let client: HarnessClient
+    let state = HarnessState()
+
+    // The DynamicNotch instance. Generic over the three view types so we don't
+    // wrap everything in AnyView.
+    private var notch: DynamicNotch<HarnessExpanded, HarnessCompactLeading, HarnessCompactTrailing>?
+    private var pollTimer: Timer?
+
+    private var currentDecisionID: String?
+    private var displayedAt: Date?
+    private var autoDismissTask: Task<Void, Never>?
+
+    // Interaction tracking
+    private var events: [InteractionEvent] = []
+    private var mouseMonitorGlobal: Any?
+    private var mouseMonitorLocal: Any?
+    private var lastWasNearPill = false
+
+    init(baseURL: String) {
+        self.client = HarnessClient(baseURLString: baseURL)
+
+        // Install handlers up front so views can call into the coordinator.
+        state.actionHandler = { [weak self] action in
+            Task { @MainActor in self?.onAction(action: action) }
+        }
+        state.hoverHandler = { [weak self] target, entered in
+            self?.recordEvent(kind: entered ? "hover_start" : "hover_end", target: target)
+        }
+    }
+
+    func start() {
+        let st = state
+        notch = DynamicNotch(
+            hoverBehavior: [],   // we manage show/hide explicitly; no hover-to-expand
+            style: .auto
+        ) {
+            HarnessExpanded(state: st)
+        } compactLeading: {
+            HarnessCompactLeading(state: st)
+        } compactTrailing: {
+            HarnessCompactTrailing(state: st)
+        }
+
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+    }
+
+    func stop() {
+        pollTimer?.invalidate()
+        autoDismissTask?.cancel()
+        stopMouseTracking()
+        let n = notch
+        Task { await n?.hide() }
+    }
+
+    // MARK: - Polling
+
+    private func poll() {
+        if currentDecisionID != nil { return }
+        client.getPending { [weak self] pending in
+            guard let self = self, let pending = pending else { return }
+            Task { @MainActor in self.show(pending: pending) }
+        }
+    }
+
+    // MARK: - Show / dismiss
+
+    private func show(pending: PendingPayload) {
+        currentDecisionID = pending.decisionID
+        displayedAt = Date()
+        events.removeAll(keepingCapacity: true)
+        lastWasNearPill = false
+        state.current = pending
+
+        let n = notch
+        Task { await n?.expand() }
+        startMouseTracking()
+
+        autoDismissTask?.cancel()
+        autoDismissTask = Task { [weak self, decisionID = pending.decisionID] in
+            let fallbackDelay = 8.0
+            let delay = pending.expiresAtUnix.map {
+                max(1.0, min(60.0, $0 - Date().timeIntervalSince1970))
+            } ?? fallbackDelay
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if Task.isCancelled { return }
+            await MainActor.run {
+                guard let self = self, self.currentDecisionID == decisionID else { return }
+                self.onAction(action: "timed_out")
+            }
+        }
+    }
+
+    private func onAction(action: String) {
+        guard let did = currentDecisionID else { return }
+        currentDecisionID = nil
+        autoDismissTask?.cancel()
+        autoDismissTask = nil
+        stopMouseTracking()
+
+        let latency = displayedAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
+        displayedAt = nil
+
+        let collected = events
+        events.removeAll(keepingCapacity: true)
+        client.postOutcome(
+            decisionID: did,
+            action: action,
+            latencyMs: latency,
+            interactions: collected
+        )
+
+        state.current = nil
+        let n = notch
+        Task { await n?.hide() }
+    }
+
+    // MARK: - Interaction tracking
+
+    private func recordEvent(kind: String, target: String? = nil) {
+        guard let start = displayedAt else { return }
+        let t_ms = Int(Date().timeIntervalSince(start) * 1000)
+        events.append(InteractionEvent(t_ms: t_ms, kind: kind, target: target))
+    }
+
+    private func startMouseTracking() {
+        stopMouseTracking()
+        let halo = computeApproachRect()
+        let handler: (NSEvent) -> Void = { [weak self] _ in
+            guard let self = self else { return }
+            let p = NSEvent.mouseLocation
+            let near = halo.contains(p)
+            if near != self.lastWasNearPill {
+                self.recordEvent(kind: near ? "approach" : "leave_proximity")
+                self.lastWasNearPill = near
+            }
+        }
+        mouseMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved], handler: handler)
+        mouseMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { ev in
+            handler(ev); return ev
+        }
+    }
+
+    private func stopMouseTracking() {
+        if let m = mouseMonitorGlobal { NSEvent.removeMonitor(m); mouseMonitorGlobal = nil }
+        if let m = mouseMonitorLocal  { NSEvent.removeMonitor(m); mouseMonitorLocal  = nil }
+    }
+
+    /// Compute a rough approach rectangle around the visible pill. We don't
+    /// have direct access to DynamicNotch's window frame, so approximate from
+    /// screen geometry: top-center of the primary (preferably notched) screen.
+    private func computeApproachRect() -> NSRect {
+        guard let screen = primaryScreen() else { return .zero }
+        let frame = screen.frame
+        let pillW: CGFloat = 600
+        let pillH: CGFloat = 120
+        let cx = frame.midX
+        let topY = frame.maxY
+        let pillRect = NSRect(
+            x: cx - pillW / 2,
+            y: topY - pillH,
+            width: pillW,
+            height: pillH
+        )
+        return pillRect.insetBy(dx: -APPROACH_HALO_PX, dy: -APPROACH_HALO_PX)
+    }
+
+    private func primaryScreen() -> NSScreen? {
+        if let notched = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) {
+            return notched
+        }
+        return NSScreen.main ?? NSScreen.screens.first
+    }
+}

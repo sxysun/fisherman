@@ -5,11 +5,15 @@ on:
     branches: [main]
     paths-ignore:
       - "website/**"
+      - "harness/**"
       - ".github/workflows/website.yml"
+      - ".github/workflows/harness-ci.yml"
   pull_request:
     paths-ignore:
       - "website/**"
+      - "harness/**"
       - ".github/workflows/website.yml"
+      - ".github/workflows/harness-ci.yml"
   workflow_dispatch:
 
 concurrency:

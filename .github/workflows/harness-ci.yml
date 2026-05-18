@@ -1,0 +1,45 @@
+name: Harness CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - ".github/workflows/harness-ci.yml"
+  pull_request:
+    paths:
+      - "harness/**"
+      - ".github/workflows/harness-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: harness-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Harness smoke + notch build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync harness dependencies
+        run: |
+          cd harness
+          uv sync
+          uv pip install -e .
+
+      - name: Python smoke tests
+        run: |
+          cd harness
+          .venv/bin/python -m pytest tests/test_smoke.py -q
+
+      - name: Swift notch build
+        run: |
+          cd harness/notch
+          swift build -c release
