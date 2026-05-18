@@ -88,6 +88,10 @@ def test_privacy_redacts_bearer_tokens():
 
 
 def test_realizer_redacts_ocr_and_skips_sensitive_image():
+    class ShouldNotFetchFisherman:
+        async def list_frames(self, count=1):
+            raise AssertionError("sensitive frames should not fetch screenshots")
+
     event = schemas.CandidateEvent()
     event.screen.ocr_snippet = "token = ghp_abcdefghijklmnopqrstuvwxyz123456"
     event.screen.sensitive_scene = True
@@ -95,6 +99,13 @@ def test_realizer_redacts_ocr_and_skips_sensitive_image():
     state = realizer_mod._serialize_state(event, mem)
     assert "ghp_" not in state
     assert "[REDACTED:" in state
+
+    image_b64, image_bytes, flags = asyncio.run(
+        realizer_mod._fetch_latest_frame_b64(ShouldNotFetchFisherman(), event)
+    )
+    assert image_b64 is None
+    assert image_bytes == 0
+    assert flags
 
 
 def test_realizer_frame_fetch_returns_privacy_tuple_when_no_frame():
