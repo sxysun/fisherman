@@ -218,6 +218,8 @@ def test(intent: str, push: bool, message: Optional[str], app: Optional[str]) ->
             click.echo(f"  vision:   ✓ image attached ({r.image_bytes // 1024} KB JPEG)")
         else:
             click.echo("  vision:   (no image attached)")
+        if r.privacy_flags:
+            click.echo(f"  privacy:  {r.privacy_flags}")
         if r.tool_calls:
             click.echo(f"  tools:    {len(r.tool_calls)} call(s)")
             for tc in r.tool_calls:

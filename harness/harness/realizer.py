@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 
 import aiohttp
 
+from . import image_redaction
 from . import privacy
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, MemorySnapshot, Realization, ToolCall
@@ -169,6 +170,7 @@ async def _fetch_latest_frame_b64(
     event: CandidateEvent,
     *,
     skip_on_sensitive_ocr: bool = True,
+    redact_sensitive_screenshots: bool = True,
 ) -> tuple[Optional[str], int, list[str]]:
     """Return (base64_jpeg, byte_count, privacy_flags). None/0 if unavailable.
 
@@ -177,10 +179,12 @@ async def _fetch_latest_frame_b64(
     really on screen.
     """
     flags: list[str] = []
-    if skip_on_sensitive_ocr:
-        reasons = privacy.sensitive_reasons(event.screen.ocr_snippet)
-        if event.screen.sensitive_scene or reasons:
-            flags.extend(reasons or ["sensitive_scene"])
+    reasons = privacy.sensitive_reasons(event.screen.ocr_snippet)
+    sensitive = event.screen.sensitive_scene or bool(reasons)
+    if sensitive:
+        flags.extend(reasons or ["sensitive_scene"])
+        if skip_on_sensitive_ocr and not redact_sensitive_screenshots:
+            flags.append("image_suppressed_sensitive_ocr")
             return None, 0, flags
 
     frames = await fc.list_frames(count=1)
@@ -196,6 +200,24 @@ async def _fetch_latest_frame_b64(
     img = await fc.get_frame_image(ts_ms)
     if not img:
         return None, 0, flags
+
+    if sensitive:
+        if redact_sensitive_screenshots:
+            redacted = image_redaction.redact_jpeg_bytes(img)
+            if redacted.redacted:
+                flags.append(f"image_redacted:{len(redacted.boxes)}")
+                flags.extend(f"image_redaction_reason:{r}" for r in redacted.reasons)
+                return (
+                    base64.b64encode(redacted.image_bytes).decode("ascii"),
+                    len(redacted.image_bytes),
+                    flags,
+                )
+            flags.append(redacted.error or "image_redaction_no_match")
+
+        if skip_on_sensitive_ocr:
+            flags.append("image_suppressed_sensitive_ocr")
+            return None, 0, flags
+
     return base64.b64encode(img).decode("ascii"), len(img), flags
 
 
@@ -236,6 +258,7 @@ async def realize(
             fisherman,
             event,
             skip_on_sensitive_ocr=bool(config.get("skip_vision_on_sensitive_ocr", True)),
+            redact_sensitive_screenshots=bool(config.get("redact_sensitive_screenshots", True)),
         )
 
     # Hermes accepts both a string `content` and an array of content blocks.

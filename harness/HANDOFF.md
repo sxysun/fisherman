@@ -80,6 +80,7 @@ harness/
 │   ├── store.py                  jsonl append/tail
 │   ├── reward.py                 signal-derived reward (replaces ad-hoc weights)
 │   ├── privacy.py                local OCR secret detection + text redaction
+│   ├── image_redaction.py        local Apple Vision box masking for screenshots
 │   ├── schemas.py                ALL dataclasses
 │   ├── config.py                 TOML config + default
 │   ├── label_ui.py               rewind-style labeling web UI
@@ -118,7 +119,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           19 tests; pytest passes
+└── tests/test_smoke.py           21 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -180,7 +181,8 @@ User flow once it's running:
    - Per-candidate scene tagger (google/gemma-3-4b-it on OpenRouter, ~$1/mo)
      Smart-triggered: only fires when app+OCR change and ≥30s since last call
    - Realizer (hermes-agent, multimodal): sees current JPEG when composing messages
-     unless local OCR privacy preflight suppresses image attachment
+     unless local OCR privacy preflight suppresses image attachment; sensitive
+     JPEGs are locally masked first when Apple Vision can locate matching boxes
    Together: VLM can compensate when Fisherman's frontmost_app metadata is stale
 
 ✅ Goal-driven model
@@ -213,8 +215,8 @@ User flow once it's running:
 ✅ Harness privacy preflight
    - OCR text is scanned locally for secret-like patterns before model prompts
    - Realizer/tool/critic OCR snippets are redacted before network calls
-   - Sensitive frames skip screenshot attachment; exact key-region blur still
-     needs OCR bounding boxes from Fisherman
+   - Sensitive frames are masked locally using Apple Vision text boxes before
+     screenshot model calls; if masking fails, image attachment is suppressed
 ```
 
 ---
@@ -373,7 +375,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 19/19
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 21/21
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

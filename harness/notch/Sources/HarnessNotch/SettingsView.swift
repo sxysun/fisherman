@@ -341,6 +341,12 @@ struct RealizerTab: View {
             FormRow("Send screenshot (vision)", hint: "attach JPEG to each ping") {
                 Toggle("", isOn: $model.includeVision).labelsHidden()
             }
+            FormRow("Mask sensitive screenshots", hint: "local OCR masks key/token text boxes") {
+                Toggle("", isOn: $model.redactSensitiveScreenshots).labelsHidden()
+            }
+            FormRow("Fail closed on sensitive OCR", hint: "skip image if local masking cannot prove it worked") {
+                Toggle("", isOn: $model.skipVisionOnSensitiveOCR).labelsHidden()
+            }
         }
     }
 }

@@ -25,6 +25,8 @@ final class SettingsModel: ObservableObject {
     @Published var maxTokens: Int = 80
     @Published var timeoutSec: Int = 45
     @Published var includeVision: Bool = true
+    @Published var skipVisionOnSensitiveOCR: Bool = true
+    @Published var redactSensitiveScreenshots: Bool = true
 
     @Published var rewardWelcomed: Double = 3.0
     @Published var rewardAnnoying: Double = -5.0
@@ -76,6 +78,8 @@ final class SettingsModel: ObservableObject {
             $maxTokens.map { _ in () }.eraseToAnyPublisher(),
             $timeoutSec.map { _ in () }.eraseToAnyPublisher(),
             $includeVision.map { _ in () }.eraseToAnyPublisher(),
+            $skipVisionOnSensitiveOCR.map { _ in () }.eraseToAnyPublisher(),
+            $redactSensitiveScreenshots.map { _ in () }.eraseToAnyPublisher(),
             $rewardWelcomed.map { _ in () }.eraseToAnyPublisher(),
             $rewardAnnoying.map { _ in () }.eraseToAnyPublisher(),
             $rewardPrivacy.map { _ in () }.eraseToAnyPublisher(),
@@ -170,6 +174,12 @@ final class SettingsModel: ObservableObject {
         maxTokens = c["realizer"]["max_tokens"].int
         timeoutSec = c["realizer"]["timeout_sec"].int
         includeVision = c["realizer"]["include_vision"].bool
+        skipVisionOnSensitiveOCR = c["realizer"]["skip_vision_on_sensitive_ocr"].raw is NSNull
+            ? true
+            : c["realizer"]["skip_vision_on_sensitive_ocr"].bool
+        redactSensitiveScreenshots = c["realizer"]["redact_sensitive_screenshots"].raw is NSNull
+            ? true
+            : c["realizer"]["redact_sensitive_screenshots"].bool
 
         rewardWelcomed = c["reward"]["weights"]["welcomed"].double
         rewardAnnoying = c["reward"]["weights"]["annoying"].double
@@ -208,6 +218,8 @@ final class SettingsModel: ObservableObject {
         c["realizer"]["max_tokens"] = JSON(any: maxTokens)
         c["realizer"]["timeout_sec"] = JSON(any: timeoutSec)
         c["realizer"]["include_vision"] = JSON(any: includeVision)
+        c["realizer"]["skip_vision_on_sensitive_ocr"] = JSON(any: skipVisionOnSensitiveOCR)
+        c["realizer"]["redact_sensitive_screenshots"] = JSON(any: redactSensitiveScreenshots)
 
         var rewardBlock = c["reward"].dict
         var weights = (rewardBlock["weights"] as? [String: Any]) ?? [:]

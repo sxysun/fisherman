@@ -69,6 +69,10 @@ include_vision = true
 # Local privacy preflight: if OCR looks like a key/token/password, redact OCR
 # in text prompts and do not attach the screenshot to external model calls.
 skip_vision_on_sensitive_ocr = true
+# If a sensitive frame would otherwise be suppressed, try local Apple Vision OCR
+# on the JPEG and mask matching text boxes before attaching the image. Failure
+# still falls back to skip_vision_on_sensitive_ocr.
+redact_sensitive_screenshots = true
 
 [realizer.tools]
 query_fisherman_history = false

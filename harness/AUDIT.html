@@ -191,7 +191,7 @@
     <p class="dek">A direct assessment of the proactive-presence harness as of May 18, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
-      <span class="pill">Smoke tests: 19/19 passing</span>
+      <span class="pill">Smoke tests: 21/21 passing</span>
       <span class="pill">Approx. source/docs: 50 files, 7.8k lines</span>
       <span class="pill">Generated: 2026-05-18</span>
     </div>
@@ -302,8 +302,8 @@
       </tr>
       <tr>
         <td>Privacy before network</td>
-        <td>First-pass OCR preflight now redacts secret-like text and suppresses screenshot attachment for sensitive frames. Exact region blur still needs OCR bounding boxes.</td>
-        <td>OCR bounding boxes, local region masking, per-domain allow/deny policy, model-call audit trail, and explicit endpoint trust boundaries.</td>
+        <td>Local OCR preflight redacts secret-like text. Sensitive screenshots are locally masked using Apple Vision text boxes before realizer model calls; if masking fails, the image is suppressed.</td>
+        <td>Token-level masking beyond whole text-line boxes, per-domain allow/deny policy, model-call audit trail, and explicit endpoint trust boundaries.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>
@@ -351,6 +351,7 @@
         <li>Made the "Later" notch action actually set a 30-minute snooze.</li>
         <li>Made notch auto-dismiss respect the pending payload expiration.</li>
         <li>Added local OCR privacy preflight before screenshot model calls.</li>
+        <li>Added harness-local screenshot masking for secret-like OCR boxes.</li>
       </ul>
     </div>
     <div class="card">
@@ -369,7 +370,7 @@
   <h2>Risk Register</h2>
   <div class="card risk-high">
     <h3>P0: Key rotation and screenshot privacy</h3>
-    <p>A real-looking API key was present in the repo defaults before this audit. Even though source defaults are now blank, the old key remains in the local <code>~/.harness/config.toml</code> until replaced. The harness now redacts secret-like OCR and skips screenshot attachments when OCR looks sensitive, but exact in-image masking still requires OCR bounding boxes.</p>
+    <p>A real-looking API key was present in the repo defaults before this audit. Even though source defaults are now blank, the old key remains in the local <code>~/.harness/config.toml</code> until replaced. The harness now redacts secret-like OCR and masks sensitive screenshot text boxes locally before realizer model calls; if masking cannot be verified, screenshot attachment is suppressed.</p>
   </div>
   <div class="card risk-high">
     <h3>P0: No meaningful policy metrics yet</h3>
@@ -403,7 +404,7 @@
       </tr>
       <tr>
         <td>Privacy-ready</td>
-        <td>OCR preflight exists. Remaining bar: exact region masking, explicit per-provider config, sensitive-domain suppression, and auditable model-call logs.</td>
+        <td>OCR preflight and line-box masking exist. Remaining bar: token-level masking, explicit per-provider config, sensitive-domain suppression, and auditable model-call logs.</td>
       </tr>
       <tr>
         <td>Personalization-ready</td>
@@ -435,7 +436,7 @@
         <li>Add live config reload after Settings saves.</li>
         <li>Make pending delivery idempotent so a notch crash cannot drop a message.</li>
         <li>Move trace/outcome/label storage to SQLite.</li>
-        <li>Add OCR bounding boxes and exact local region masking before VLM/realizer calls.</li>
+        <li>Add token-level OCR boxes, sensitive-domain suppression, and auditable model-call logs.</li>
       </ul>
     </div>
     <div class="card">
@@ -461,7 +462,7 @@
   <h2>Bottom Line</h2>
   <div class="callout">
     <p>The core idea is sound: a proactive assistant should be evaluated as an intervention policy, not just as a chat prompt. This build has the right loop and enough instrumentation to start learning from real use.</p>
-    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is exact screenshot redaction, labeled data, replay quality, storage integrity, and policy evaluation.</p>
+    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is auditable model-call logging, labeled data, replay quality, storage integrity, and policy evaluation.</p>
   </div>
   <p class="print-note">Tip: use the browser print dialog to save this file as a PDF if a PDF artifact is needed.</p>
 </main>

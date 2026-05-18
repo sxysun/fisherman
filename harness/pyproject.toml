@@ -6,6 +6,10 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.10",
     "click>=8.0",
+    "Pillow>=10.0",
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
     "structlog>=24.0",
 ]
 

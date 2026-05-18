@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import time
 
@@ -10,6 +11,7 @@ from harness import candidate as candidate_mod
 from harness import critic as critic_mod
 from harness import fisherman_client as fc_mod
 from harness import gate as gate_mod
+from harness import image_redaction as image_redaction_mod
 from harness import memory as memory_mod
 from harness import privacy as privacy_mod
 from harness import push as push_mod
@@ -34,6 +36,7 @@ def test_imports():
     assert critic_mod
     assert push_mod
     assert privacy_mod
+    assert image_redaction_mod
     assert server_mod
 
 
@@ -101,11 +104,77 @@ def test_realizer_redacts_ocr_and_skips_sensitive_image():
     assert "[REDACTED:" in state
 
     image_b64, image_bytes, flags = asyncio.run(
-        realizer_mod._fetch_latest_frame_b64(ShouldNotFetchFisherman(), event)
+        realizer_mod._fetch_latest_frame_b64(
+            ShouldNotFetchFisherman(),
+            event,
+            redact_sensitive_screenshots=False,
+        )
     )
     assert image_b64 is None
     assert image_bytes == 0
     assert flags
+
+
+def test_image_redaction_masks_sensitive_ocr_box():
+    from PIL import Image
+
+    img = Image.new("RGB", (120, 60), "white")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    data = buf.getvalue()
+
+    result = image_redaction_mod.redact_jpeg_bytes(
+        data,
+        ocr_runner=lambda _: [
+            image_redaction_mod.OcrBox(
+                text="OPENROUTER_API_KEY=or-v1-testsecret1234567890",
+                bbox=(10, 10, 110, 30),
+            )
+        ],
+    )
+    assert result.redacted
+    assert "assignment_secret" in result.reasons
+    assert result.boxes
+
+    with Image.open(io.BytesIO(result.image_bytes)) as out:
+        red, green, blue = out.getpixel((20, 20))
+    assert red < 40 and green < 40 and blue < 40
+
+
+def test_realizer_redacts_sensitive_screenshot_when_boxes_match():
+    from PIL import Image
+
+    class OneFrameFisherman:
+        async def list_frames(self, count=1):
+            return [{"ts": 1.0, "has_image": True}]
+
+        async def get_frame_image(self, ts_ms):
+            img = Image.new("RGB", (120, 60), "white")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=95)
+            return buf.getvalue()
+
+    old_runner = image_redaction_mod.ocr_boxes_from_vision
+    image_redaction_mod.ocr_boxes_from_vision = lambda _: [
+        image_redaction_mod.OcrBox(
+            text="token = ghp_abcdefghijklmnopqrstuvwxyz123456",
+            bbox=(10, 10, 110, 30),
+        )
+    ]
+    try:
+        event = schemas.CandidateEvent()
+        event.screen.ocr_snippet = "token = [REDACTED:github_token]"
+        event.screen.sensitive_scene = True
+        image_b64, image_bytes, flags = asyncio.run(
+            realizer_mod._fetch_latest_frame_b64(OneFrameFisherman(), event)
+        )
+    finally:
+        image_redaction_mod.ocr_boxes_from_vision = old_runner
+
+    assert image_b64 is not None
+    assert image_bytes > 0
+    assert "sensitive_scene" in flags
+    assert "image_redacted:1" in flags
 
 
 def test_realizer_frame_fetch_returns_privacy_tuple_when_no_frame():
