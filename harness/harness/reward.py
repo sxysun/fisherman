@@ -11,7 +11,9 @@ The four intent_signal tiers, plus terminal user action, map to scalar reward:
     snoozed           committed           0.0      not now, not never
     dismissed         committed          -1.5      actively rejected
     muted             committed          -2.0      stronger rejection
-    timed_out         considered         +0.5      hovered, didn't commit
+    timed_out         positive_considered +0.5     hovered Yes, didn't commit
+    timed_out         snooze_considered   0.0      hovered Later, didn't commit
+    timed_out         rejection_considered -0.8    hovered dismiss, didn't commit
     timed_out         approached         -0.2      noticed but ignored
     timed_out         ignored            -1.0      didn't even see it
     blocked (critic)  —                  -5.0      hard veto (e.g. privacy)
@@ -53,8 +55,12 @@ def compute_reward(outcome: dict) -> dict:
     elif action == "blocked":
         value, note = -5.0, "critic_block"
     elif action == "timed_out":
-        if signal == "considered":
+        if signal in ("positive_considered", "considered"):
             value, note = 0.5, "considered_not_committed"
+        elif signal == "snooze_considered":
+            value, note = 0.0, "snooze_considered_not_committed"
+        elif signal == "rejection_considered":
+            value, note = -0.8, "rejection_considered_not_committed"
         elif signal == "approached":
             value, note = -0.2, "noticed_walked_past"
         else:

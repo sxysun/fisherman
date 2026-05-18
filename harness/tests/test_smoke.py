@@ -281,6 +281,40 @@ def test_rule_v0_negative_feedback_backoff_is_time_bounded():
     assert "recent_negative_feedback" in blocked.reason_codes
 
 
+def test_rule_v0_soft_reject_hover_backoff_is_live_signal():
+    from policies import rule_v0
+
+    event = schemas.CandidateEvent()
+    event.screen.frame_age_sec = 5.0
+    event.screen.ocr_snippet = "ship harness"
+    event.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
+    mem = schemas.MemorySnapshot.build(
+        recent_apps=["Chrome"],
+        recent_scenes=["reading_browser"],
+        recent_outcomes=[],
+        app_switches_last_15m=0,
+        minutes_on_current_app=95.0,
+    )
+    cfg = {
+        "cooldown_min": 5,
+        "negative_feedback_backoff_min": 15,
+        "quiet_hours_start": 3,
+        "quiet_hours_end": 4,
+        "sensitivity": "responsive",
+        "daily_goal": "ship harness",
+        "allowed_intents": [],
+    }
+    soft_reject = [{
+        "user_action": "timed_out",
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "interaction_summary": {"intent_signal": "rejection_considered"},
+    }]
+
+    blocked = rule_v0.decide(event, mem, soft_reject, cfg)
+    assert blocked.action == "no_ping"
+    assert "recent_negative_feedback" in blocked.reason_codes
+
+
 def test_rule_v0_snooze_expires():
     from policies import rule_v0
 
@@ -371,9 +405,15 @@ def test_reward_signal_based():
     # considered
     r = reward.compute_reward({
         "user_action": "timed_out",
-        "interaction_summary": {"intent_signal": "considered"},
+        "interaction_summary": {"intent_signal": "positive_considered"},
     })
     assert r["value"] == 0.5
+    # hovered dismiss, then timed out: soft rejection, not positive consideration
+    r = reward.compute_reward({
+        "user_action": "timed_out",
+        "interaction_summary": {"intent_signal": "rejection_considered"},
+    })
+    assert r["value"] == -0.8
     # clicked
     r = reward.compute_reward({"user_action": "clicked"})
     assert r["value"] == 2.0
@@ -392,3 +432,14 @@ def test_critic_regex_blocks_secret():
 def test_critic_regex_passes_clean():
     result = critic_mod.regex_check("5 app switches in 8 min. Mute Slack for 25?")
     assert result.pass_
+
+
+def test_interaction_summary_is_target_aware():
+    summary = server_mod._summarize_interactions([
+        {"t_ms": 50, "kind": "approach"},
+        {"t_ms": 100, "kind": "hover_start", "target": "dismiss"},
+        {"t_ms": 420, "kind": "hover_end", "target": "dismiss"},
+    ])
+    assert summary["intent_signal"] == "rejection_considered"
+    assert summary["considered_targets"] == ["dismiss"]
+    assert summary["total_hover_ms_by_target"]["dismiss"] == 320

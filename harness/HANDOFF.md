@@ -119,7 +119,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           21 tests; pytest passes
+└── tests/test_smoke.py           23 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -211,6 +211,8 @@ User flow once it's running:
 ✅ Outcome capture rich enough for RL
    - Per outcome: clicked/dismissed/snoozed/timed_out
    - + interaction_summary with hover targets, approach count, intent_signal tier
+   - Hovering dismiss and then timing out is treated as soft rejection and
+     feeds the live recent-negative-feedback backoff
 
 ✅ Harness privacy preflight
    - OCR text is scanned locally for secret-like patterns before model prompts
@@ -375,7 +377,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 21/21
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 23/23
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

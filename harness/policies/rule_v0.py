@@ -52,7 +52,11 @@ def _snoozed_active(snoozed_until: str | None, event_ts_iso: str | None = None) 
 def _has_recent_negative_feedback(recent_outcomes: list[dict], backoff_min: float) -> bool:
     cutoff = time.time() - backoff_min * 60
     for outcome in recent_outcomes:
-        if outcome.get("user_action") not in ("dismissed", "muted"):
+        action = outcome.get("user_action")
+        summary = outcome.get("interaction_summary") or {}
+        signal = summary.get("intent_signal")
+        negative = action in ("dismissed", "muted") or signal == "rejection_considered"
+        if not negative:
             continue
         ts = _iso_to_unix(outcome.get("ts"))
         if ts is not None and ts >= cutoff:

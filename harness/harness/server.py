@@ -126,20 +126,28 @@ def _summarize_interactions(events: list) -> dict:
     for tgt, start_t in hover_open.items():
         hover_total[tgt] = hover_total.get(tgt, 0) + max(0, last_t - start_t)
 
-    # Convenience flag for downstream reward shaping.
+    # Convenience flag for downstream reward shaping. Target matters: hovering
+    # "dismiss" is a very different signal from hovering "yes".
     any_hover = bool(considered)
+    if "dismiss" in considered:
+        intent_signal = "rejection_considered"
+    elif "later" in considered:
+        intent_signal = "snooze_considered"
+    elif "yes" in considered:
+        intent_signal = "positive_considered"
+    elif any_hover:
+        intent_signal = "considered"
+    elif first_approach is not None:
+        intent_signal = "approached"
+    else:
+        intent_signal = "ignored"
     return {
         "first_approach_t_ms": first_approach,
         "n_approaches": n_approaches,
         "considered_targets": sorted(considered),
         "total_hover_ms_by_target": hover_total,
         "any_hover": any_hover,
-        "intent_signal": (
-            "committed" if False  # filled by caller when action != timed_out
-            else "considered" if any_hover
-            else "approached" if first_approach is not None
-            else "ignored"
-        ),
+        "intent_signal": intent_signal,
     }
 
 
