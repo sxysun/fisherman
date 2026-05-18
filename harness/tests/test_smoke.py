@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -10,6 +11,7 @@ from harness import critic as critic_mod
 from harness import fisherman_client as fc_mod
 from harness import gate as gate_mod
 from harness import memory as memory_mod
+from harness import privacy as privacy_mod
 from harness import push as push_mod
 from harness import realizer as realizer_mod
 from harness import scene as scene_mod
@@ -31,6 +33,7 @@ def test_imports():
     assert realizer_mod
     assert critic_mod
     assert push_mod
+    assert privacy_mod
     assert server_mod
 
 
@@ -60,6 +63,59 @@ def test_scene_tag_codes_for_context_switch():
         recent_apps=["Cursor", "Slack", "Chrome", "Notion", "Discord", "iTerm2", "Figma"],
     )
     assert tag.label == "rapid_context_switching"
+
+
+def test_privacy_redacts_secret_text_and_marks_scene_sensitive():
+    text = 'OPENROUTER_API_KEY="or-v1-testsecret1234567890"'
+    scan = privacy_mod.scan_text(text)
+    assert scan.sensitive
+    assert "or-v1-testsecret" not in scan.redacted_text
+    assert "assignment_secret" in scan.reasons
+    assert "[REDACTED:" in scan.redacted_text
+
+    event = schemas.CandidateEvent()
+    event.screen.ocr_snippet = text
+    tag = scene_mod.tag(event, recent_apps=["Cursor"])
+    assert tag.label == "sensitive"
+
+
+def test_privacy_redacts_bearer_tokens():
+    text = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456"
+    scan = privacy_mod.scan_text(text)
+    assert scan.sensitive
+    assert "abcdefghijklmnopqrstuvwxyz" not in scan.redacted_text
+    assert "bearer_token" in scan.reasons
+
+
+def test_realizer_redacts_ocr_and_skips_sensitive_image():
+    event = schemas.CandidateEvent()
+    event.screen.ocr_snippet = "token = ghp_abcdefghijklmnopqrstuvwxyz123456"
+    event.screen.sensitive_scene = True
+    mem = schemas.MemorySnapshot.build([], [], [], 0, 0)
+    state = realizer_mod._serialize_state(event, mem)
+    assert "ghp_" not in state
+    assert "[REDACTED:" in state
+
+
+def test_realizer_frame_fetch_returns_privacy_tuple_when_no_frame():
+    class EmptyFisherman:
+        async def list_frames(self, count=1):
+            return []
+
+    event = schemas.CandidateEvent()
+    image_b64, image_bytes, flags = asyncio.run(
+        realizer_mod._fetch_latest_frame_b64(EmptyFisherman(), event)
+    )
+    assert image_b64 is None
+    assert image_bytes == 0
+    assert flags == []
+
+
+def test_scene_vlm_skips_sensitive_ocr_before_network():
+    event = schemas.CandidateEvent()
+    event.screen.frame_age_sec = 1
+    event.screen.ocr_snippet = "api_key = sk-abcdefghijklmnopqrstuvwxyz"
+    assert scene_vlm_mod._should_skip(event, min_interval_sec=0) == "sensitive_ocr"
 
 
 def test_rule_v0_no_ping_when_in_call():

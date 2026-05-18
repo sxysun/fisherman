@@ -191,7 +191,7 @@
     <p class="dek">A direct assessment of the proactive-presence harness as of May 18, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
-      <span class="pill">Smoke tests: 14/14 passing</span>
+      <span class="pill">Smoke tests: 19/19 passing</span>
       <span class="pill">Approx. source/docs: 50 files, 7.8k lines</span>
       <span class="pill">Generated: 2026-05-18</span>
     </div>
@@ -302,9 +302,9 @@
       </tr>
       <tr>
         <td>Privacy before network</td>
-        <td>VLM/realizer may receive screenshots before local redaction. Sensitive detection is currently after or during model interpretation.</td>
-        <td>Local preflight redaction, per-domain allow/deny policy, model-call audit trail, and explicit endpoint trust boundaries.</td>
-        <td class="status-bad">P0</td>
+        <td>First-pass OCR preflight now redacts secret-like text and suppresses screenshot attachment for sensitive frames. Exact region blur still needs OCR bounding boxes.</td>
+        <td>OCR bounding boxes, local region masking, per-domain allow/deny policy, model-call audit trail, and explicit endpoint trust boundaries.</td>
+        <td class="status-warn">P1</td>
       </tr>
       <tr>
         <td>Persistent storage</td>
@@ -350,6 +350,7 @@
         <li>Made expired snoozes inactive instead of permanent blockers.</li>
         <li>Made the "Later" notch action actually set a 30-minute snooze.</li>
         <li>Made notch auto-dismiss respect the pending payload expiration.</li>
+        <li>Added local OCR privacy preflight before screenshot model calls.</li>
       </ul>
     </div>
     <div class="card">
@@ -368,7 +369,7 @@
   <h2>Risk Register</h2>
   <div class="card risk-high">
     <h3>P0: Key rotation and screenshot privacy</h3>
-    <p>A real-looking API key was present in the repo defaults before this audit. Even though source defaults are now blank, the old key remains in the local <code>~/.harness/config.toml</code> until replaced. Rotate it. Separately, the current privacy story is not lab-grade because the system can send raw screenshots to the configured model endpoint before local redaction.</p>
+    <p>A real-looking API key was present in the repo defaults before this audit. Even though source defaults are now blank, the old key remains in the local <code>~/.harness/config.toml</code> until replaced. The harness now redacts secret-like OCR and skips screenshot attachments when OCR looks sensitive, but exact in-image masking still requires OCR bounding boxes.</p>
   </div>
   <div class="card risk-high">
     <h3>P0: No meaningful policy metrics yet</h3>
@@ -402,7 +403,7 @@
       </tr>
       <tr>
         <td>Privacy-ready</td>
-        <td>Local screenshot redaction before any external model call, explicit per-provider config, sensitive-domain suppression, and auditable model-call logs.</td>
+        <td>OCR preflight exists. Remaining bar: exact region masking, explicit per-provider config, sensitive-domain suppression, and auditable model-call logs.</td>
       </tr>
       <tr>
         <td>Personalization-ready</td>
@@ -420,8 +421,8 @@
     <div class="card">
       <h3>Next 24 hours</h3>
       <ul>
-        <li>Rotate the leaked key and set the new key in Settings -> Model.</li>
-        <li>Commit <code>harness/</code> and the path-scoped Harness CI.</li>
+        <li>Keep the model key in Settings -> Model or a local environment variable, not repo defaults.</li>
+        <li>Dogfood the path-scoped Harness CI after every harness-only push.</li>
         <li>Dogfood with one clear Today goal.</li>
         <li>Label 20-30 decisions in <code>:7893/label</code>.</li>
         <li>Write down every annoying or missed intervention immediately.</li>
@@ -434,7 +435,7 @@
         <li>Add live config reload after Settings saves.</li>
         <li>Make pending delivery idempotent so a notch crash cannot drop a message.</li>
         <li>Move trace/outcome/label storage to SQLite.</li>
-        <li>Add local preflight redaction before VLM/realizer calls.</li>
+        <li>Add OCR bounding boxes and exact local region masking before VLM/realizer calls.</li>
       </ul>
     </div>
     <div class="card">
@@ -460,7 +461,7 @@
   <h2>Bottom Line</h2>
   <div class="callout">
     <p>The core idea is sound: a proactive assistant should be evaluated as an intervention policy, not just as a chat prompt. This build has the right loop and enough instrumentation to start learning from real use.</p>
-    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is privacy preflight, labeled data, replay quality, storage integrity, and policy evaluation.</p>
+    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is exact screenshot redaction, labeled data, replay quality, storage integrity, and policy evaluation.</p>
   </div>
   <p class="print-note">Tip: use the browser print dialog to save this file as a PDF if a PDF artifact is needed.</p>
 </main>

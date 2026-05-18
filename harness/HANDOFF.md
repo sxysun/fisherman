@@ -74,10 +74,12 @@ harness/
 │   ├── memory.py                 rolling 2h session + content-addressed snapshots
 │   ├── gate.py                   loads policy module by name
 │   ├── realizer.py               openai-compatible agent loop, sends vision JPEG
+│   │                              unless privacy preflight suppresses it
 │   ├── critic.py                 regex + LLM veto
 │   ├── push.py                   notch_pill or terminal_notifier backend
 │   ├── store.py                  jsonl append/tail
 │   ├── reward.py                 signal-derived reward (replaces ad-hoc weights)
+│   ├── privacy.py                local OCR secret detection + text redaction
 │   ├── schemas.py                ALL dataclasses
 │   ├── config.py                 TOML config + default
 │   ├── label_ui.py               rewind-style labeling web UI
@@ -116,7 +118,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           12 tests; pytest passes
+└── tests/test_smoke.py           19 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -178,7 +180,8 @@ User flow once it's running:
    - Per-candidate scene tagger (google/gemma-3-4b-it on OpenRouter, ~$1/mo)
      Smart-triggered: only fires when app+OCR change and ≥30s since last call
    - Realizer (hermes-agent, multimodal): sees current JPEG when composing messages
-   Together: VLM bypasses Fisherman's broken frontmost_app metadata
+     unless local OCR privacy preflight suppresses image attachment
+   Together: VLM can compensate when Fisherman's frontmost_app metadata is stale
 
 ✅ Goal-driven model
    - Daily goal field in Today tab
@@ -207,9 +210,11 @@ User flow once it's running:
    - Per outcome: clicked/dismissed/snoozed/timed_out
    - + interaction_summary with hover targets, approach count, intent_signal tier
 
-✅ Fisherman fix shipped and deployed locally
-   - capture.py uses CG window stack first, NSWorkspace as fallback
-   - Rebuilt FishermanMenu and restarted HarnessNotch on 2026-05-18
+✅ Harness privacy preflight
+   - OCR text is scanned locally for secret-like patterns before model prompts
+   - Realizer/tool/critic OCR snippets are redacted before network calls
+   - Sensitive frames skip screenshot attachment; exact key-region blur still
+     needs OCR bounding boxes from Fisherman
 ```
 
 ---
@@ -217,17 +222,18 @@ User flow once it's running:
 ## Known issues / things to verify
 
 ```
-⚠ Fisherman frontmost_app fix is deployed only in the current local build
-   The source uses the CG window owner stack even when the menubar app forces
-   screencapture, so the visible-app fix is active after the 2026-05-18 local
-   rebuild. Fresh installs or old app bundles still need a rebuild/reinstall.
+⚠ Fisherman frontmost_app source fix is not part of the harness commit
+   Earlier local work explored using the CG window owner stack before
+   NSWorkspace fallback, but the pushed harness commits intentionally avoid
+   Fisherman runtime paths. If frontmost_app is still stale in dogfood, make
+   and ship that Fisherman change as a separate app/runtime commit.
 
 ⚠ Hermes does its tool-using server-side
-   We send the screenshot + brief and get a message back. Hermes may search
-   its own memory (the user saw "rolling summary" in a curl response earlier)
-   but doesn't expose tool_calls in the response. We have nothing to surface
-   beyond the final message. Tracking field `provider_reasoning` if hermes
-   ever adds it (none right now).
+   We send the brief plus screenshot when privacy preflight allows it, then
+   get a message back. Hermes may search its own memory (the user saw
+   "rolling summary" in a curl response earlier) but doesn't expose tool_calls
+   in the response. We have nothing to surface beyond the final message.
+   Tracking field `provider_reasoning` if hermes ever adds it (none right now).
 
 ⚠ Daemon restart required after Save in Settings
    Live config reload isn't wired. After changing settings + Save, you must
@@ -367,7 +373,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 14/14
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 19/19
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 
 import aiohttp
 
+from . import privacy
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, MemorySnapshot, Realization, ToolCall
 
@@ -97,7 +98,7 @@ async def _execute_tool(
                 "ts": r.get("ts"),
                 "app": r.get("app"),
                 "window": r.get("window"),
-                "ocr_snippet": (r.get("ocr_text") or "")[:200],
+                "ocr_snippet": privacy.redact_text(r.get("ocr_text") or "")[:200],
             }
             for r in results
         ]
@@ -111,7 +112,7 @@ async def _execute_tool(
             {
                 "ts": r.get("ts"),
                 "app": r.get("app"),
-                "ocr_snippet": (r.get("ocr_text") or "")[:200],
+                "ocr_snippet": privacy.redact_text(r.get("ocr_text") or "")[:200],
             }
             for r in frames
         ]
@@ -136,7 +137,7 @@ def _serialize_state(
     Includes the daily_goal + why_now so the goal-aware prompt can use them.
     Stays under ~10 lines to keep token cost low.
     """
-    ocr = (event.screen.ocr_snippet or "").strip().replace("\n", " ")
+    ocr = privacy.redact_text(event.screen.ocr_snippet or "").strip().replace("\n", " ")
     if len(ocr) > 180:
         ocr = ocr[:180] + "…"
     lines: list[str] = []
@@ -163,27 +164,39 @@ def _serialize_state(
     return "\n".join(lines)
 
 
-async def _fetch_latest_frame_b64(fc: FishermanClient) -> tuple[Optional[str], int]:
-    """Return (base64_jpeg, byte_count). Both None/0 if unavailable.
+async def _fetch_latest_frame_b64(
+    fc: FishermanClient,
+    event: CandidateEvent,
+    *,
+    skip_on_sensitive_ocr: bool = True,
+) -> tuple[Optional[str], int, list[str]]:
+    """Return (base64_jpeg, byte_count, privacy_flags). None/0 if unavailable.
 
     Fisherman's frontmost_app metadata is sometimes wrong (stale or stuck), so
     handing the actual JPEG to the VLM lets it bypass that and see what's
     really on screen.
     """
+    flags: list[str] = []
+    if skip_on_sensitive_ocr:
+        reasons = privacy.sensitive_reasons(event.screen.ocr_snippet)
+        if event.screen.sensitive_scene or reasons:
+            flags.extend(reasons or ["sensitive_scene"])
+            return None, 0, flags
+
     frames = await fc.list_frames(count=1)
     if not frames:
-        return None, 0
+        return None, 0, flags
     fr = frames[0]
     try:
         ts_ms = int(float(fr.get("ts", 0)) * 1000)
     except (TypeError, ValueError):
-        return None, 0
+        return None, 0, flags
     if not fr.get("has_image", True):
-        return None, 0
+        return None, 0, flags
     img = await fc.get_frame_image(ts_ms)
     if not img:
-        return None, 0
-    return base64.b64encode(img).decode("ascii"), len(img)
+        return None, 0, flags
+    return base64.b64encode(img).decode("ascii"), len(img), flags
 
 
 async def realize(
@@ -217,8 +230,13 @@ async def realize(
 
     image_b64: Optional[str] = None
     image_bytes_n = 0
+    privacy_flags: list[str] = []
     if include_vision:
-        image_b64, image_bytes_n = await _fetch_latest_frame_b64(fisherman)
+        image_b64, image_bytes_n, privacy_flags = await _fetch_latest_frame_b64(
+            fisherman,
+            event,
+            skip_on_sensitive_ocr=bool(config.get("skip_vision_on_sensitive_ocr", True)),
+        )
 
     # Hermes accepts both a string `content` and an array of content blocks.
     # When vision is on AND an image was successfully fetched, send blocks.
@@ -356,5 +374,6 @@ async def realize(
         latency_ms=int((time.monotonic() - started) * 1000),
         vision_used=image_b64 is not None,
         image_bytes=image_bytes_n,
+        privacy_flags=privacy_flags,
         error=error,
     )

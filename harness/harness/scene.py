@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from . import privacy
 from .schemas import CandidateEvent, SceneTag
 
 
@@ -48,7 +49,11 @@ def tag(event: CandidateEvent, recent_apps: list[str]) -> SceneTag:
     app = event.screen.frontmost_app or ""
     ocr = event.screen.ocr_snippet or ""
 
-    if _has_keyword(ocr, SENSITIVE_KEYWORDS):
+    if (
+        event.screen.sensitive_scene
+        or _has_keyword(ocr, SENSITIVE_KEYWORDS)
+        or privacy.scan_text(ocr).sensitive
+    ):
         return SceneTag(label="sensitive", strength="strong", source="rule", confidence=0.95)
 
     distinct_recent = len(set(recent_apps[-10:])) if recent_apps else 0

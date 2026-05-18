@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
+from . import privacy
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, ContextSignals, ScreenContext, SceneTag, UserPref
 
@@ -30,7 +31,9 @@ async def synthesize(
         screen = ScreenContext(active=False)
     else:
         f = frames[0]
-        ocr = (f.get("ocr_text") or "")[:OCR_SNIPPET_MAX]
+        ocr_full = f.get("ocr_text") or ""
+        scan = privacy.scan_text(ocr_full)
+        ocr = scan.redacted_text[:OCR_SNIPPET_MAX]
         ts = f.get("ts") or 0.0
         screen = ScreenContext(
             active=True,
@@ -39,7 +42,7 @@ async def synthesize(
             window_title=f.get("window"),
             ocr_snippet=ocr,
             frame_age_sec=max(0.0, _now_unix() - float(ts)),
-            sensitive_scene=False,
+            sensitive_scene=scan.sensitive,
         )
 
     context = ContextSignals(

@@ -8,6 +8,7 @@ from typing import Optional
 
 import aiohttp
 
+from . import privacy
 from .schemas import CandidateEvent, CriticResult
 
 
@@ -67,7 +68,7 @@ async def llm_check(message: str, event: CandidateEvent, config: dict) -> Option
         f"MESSAGE TO REVIEW:\n{message}\n\n"
         f"SCREEN CONTEXT (frontmost app + ocr snippet):\n"
         f"  app: {event.screen.frontmost_app}\n"
-        f"  ocr: {event.screen.ocr_snippet[:200]}\n"
+        f"  ocr: {privacy.redact_text(event.screen.ocr_snippet)[:200]}\n"
     )
 
     headers = {"Content-Type": "application/json"}

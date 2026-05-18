@@ -66,6 +66,9 @@ temperature = 0.3
 # Send the actual screen JPEG to hermes as a multimodal content block.
 # Robust to Fisherman's sometimes-stale frontmost_app metadata.
 include_vision = true
+# Local privacy preflight: if OCR looks like a key/token/password, redact OCR
+# in text prompts and do not attach the screenshot to external model calls.
+skip_vision_on_sensitive_ocr = true
 
 [realizer.tools]
 query_fisherman_history = false

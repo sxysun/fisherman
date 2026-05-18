@@ -111,6 +111,7 @@ class Realization:
     latency_ms: int = 0
     vision_used: bool = False
     image_bytes: int = 0
+    privacy_flags: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
     def to_dict(self) -> dict:

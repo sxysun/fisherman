@@ -25,6 +25,7 @@ from typing import Optional
 
 import aiohttp
 
+from . import privacy
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, SceneTag
 
@@ -73,6 +74,8 @@ def _should_skip(event: CandidateEvent, min_interval_sec: float) -> Optional[str
         return f"cooldown ({int(min_interval_sec - (now - _last_call_ts))}s left)"
     if not (event.screen.ocr_snippet or "").strip():
         return "no_ocr"
+    if event.screen.sensitive_scene or privacy.scan_text(event.screen.ocr_snippet).sensitive:
+        return "sensitive_ocr"
     if event.screen.frame_age_sec > 60:
         return "frame_too_old"
     sig = _signal(event)
