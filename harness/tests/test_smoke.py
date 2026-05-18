@@ -13,6 +13,7 @@ from harness import fisherman_client as fc_mod
 from harness import gate as gate_mod
 from harness import image_redaction as image_redaction_mod
 from harness import memory as memory_mod
+from harness import model_audit as model_audit_mod
 from harness import privacy as privacy_mod
 from harness import push as push_mod
 from harness import realizer as realizer_mod
@@ -37,6 +38,7 @@ def test_imports():
     assert push_mod
     assert privacy_mod
     assert image_redaction_mod
+    assert model_audit_mod
     assert server_mod
 
 
@@ -380,6 +382,38 @@ def test_store_attaches_outcome_to_trace(tmp_path):
         rows = store_mod.tail_jsonl("traces.jsonl")
         assert rows[0]["outcome"] == outcome
         assert rows[0]["reward"] == reward
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_model_audit_sanitizes_url_and_writes_recent_rows(tmp_path):
+    from harness import dashboard_ui as dashboard_mod
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        row = model_audit_mod.record_model_call(
+            purpose="realizer",
+            base_url="https://user:secret@example.com/v1?api_key=bad",
+            endpoint="https://user:secret@example.com/v1/chat/completions?token=bad",
+            model="demo",
+            status="ok",
+            candidate_id="cand_test",
+            prompt_version="goal_aware_v1",
+            latency_ms=123,
+            tokens_in=10,
+            tokens_out=3,
+            vision_used=True,
+            image_bytes=42,
+            privacy_flags=["image_redacted:1"],
+            extra={"prompt_hash": model_audit_mod.text_hash("prompt")},
+        )
+        assert row["base_url"] == "https://example.com/v1"
+        assert row["endpoint"] == "https://example.com/v1/chat/completions"
+        assert "secret" not in json.dumps(row)
+        assert store_mod.tail_jsonl("model_calls.jsonl", n=1)[0]["model_call_id"].startswith("mc_")
+        data = dashboard_mod._aggregate()
+        assert data["recent_model_calls"][0]["purpose"] == "realizer"
     finally:
         store_mod.HARNESS_DIR = old_dir
 

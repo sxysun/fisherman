@@ -191,7 +191,7 @@
     <p class="dek">A direct assessment of the proactive-presence harness as of May 18, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
-      <span class="pill">Smoke tests: 23/23 passing</span>
+      <span class="pill">Smoke tests: 24/24 passing</span>
       <span class="pill">Approx. source/docs: 50 files, 7.8k lines</span>
       <span class="pill">Generated: 2026-05-18</span>
     </div>
@@ -303,7 +303,7 @@
       <tr>
         <td>Privacy before network</td>
         <td>Local OCR preflight redacts secret-like text. Sensitive screenshots are locally masked using Apple Vision text boxes before realizer model calls; if masking fails, the image is suppressed.</td>
-        <td>Token-level masking beyond whole text-line boxes, per-domain allow/deny policy, model-call audit trail, and explicit endpoint trust boundaries.</td>
+        <td>Token-level masking beyond whole text-line boxes, per-domain allow/deny policy, and explicit endpoint trust boundaries.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>
@@ -361,6 +361,7 @@
         <li>Included scene detail and intent signals in the realizer brief.</li>
         <li>Attached outcomes and reward to matching trace rows.</li>
         <li>Made hover-target reward target-aware, so hovering dismiss is soft rejection rather than positive consideration.</li>
+        <li>Added a privacy-safe model-call audit ledger for realizer, scene VLM, and LLM critic calls.</li>
         <li>Improved replay to use live config, policy state, outcomes, and cooldown simulation.</li>
         <li>URL-encoded Fisherman query tool parameters.</li>
         <li>Switched session-memory timestamp parsing to UTC-safe parsing.</li>
@@ -405,7 +406,7 @@
       </tr>
       <tr>
         <td>Privacy-ready</td>
-        <td>OCR preflight and line-box masking exist. Remaining bar: token-level masking, explicit per-provider config, sensitive-domain suppression, and auditable model-call logs.</td>
+        <td>OCR preflight, line-box masking, and model-call audit logs exist. Remaining bar: token-level masking, explicit per-provider config, and sensitive-domain suppression.</td>
       </tr>
       <tr>
         <td>Personalization-ready</td>
@@ -437,7 +438,7 @@
         <li>Add live config reload after Settings saves.</li>
         <li>Make pending delivery idempotent so a notch crash cannot drop a message.</li>
         <li>Move trace/outcome/label storage to SQLite.</li>
-        <li>Add token-level OCR boxes, sensitive-domain suppression, and auditable model-call logs.</li>
+        <li>Add token-level OCR boxes, sensitive-domain suppression, and per-provider trust boundaries.</li>
       </ul>
     </div>
     <div class="card">
@@ -463,7 +464,7 @@
   <h2>Bottom Line</h2>
   <div class="callout">
     <p>The core idea is sound: a proactive assistant should be evaluated as an intervention policy, not just as a chat prompt. This build has the right loop and enough instrumentation to start learning from real use.</p>
-    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is auditable model-call logging, labeled data, replay quality, storage integrity, and policy evaluation.</p>
+    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is labeled data, replay quality, storage integrity, and policy evaluation.</p>
   </div>
   <p class="print-note">Tip: use the browser print dialog to save this file as a PDF if a PDF artifact is needed.</p>
 </main>

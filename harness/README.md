@@ -35,7 +35,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a rule-based gate that returns `{action, reason_codes, why_now}`, and if ping is warranted, calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. A critic vets the message, then a Swift notch app picks it up via HTTP polling and renders a pill. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards in `~/.harness/traces.jsonl`.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a rule-based gate that returns `{action, reason_codes, why_now}`, and if ping is warranted, calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app picks it up via HTTP polling and renders a pill. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards in `~/.harness/traces.jsonl`.
 
 ## Configuration
 
@@ -76,7 +76,7 @@ harness/
 ├── prompts/        Realizer + critic prompts
 ├── notch/          Swift app (HarnessNotch.app)
 ├── eval/           replay.py, score.py (offline policy analysis)
-├── tests/          smoke tests (23/23 passing)
+├── tests/          smoke tests (24/24 passing)
 └── HANDOFF.md      read this for the full picture
 ```
 

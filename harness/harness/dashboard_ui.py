@@ -339,6 +339,10 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Recent realizer messages (last 10)</h2>
       <div class="log" id="diag-realizations"></div>
     </div>
+    <div class="panel">
+      <h2>Recent model calls (last 30)</h2>
+      <div class="log" id="diag-model-calls"></div>
+    </div>
   </div>
 </div>
 
@@ -435,6 +439,18 @@ function renderDiagnostics(d) {
       <div style="margin-top:3px;color:var(--text);">"${escapeHTML((r.message || '').slice(0,180))}"</div>
     </div>`
   ).join('') || '<div style="color:#7c7c86">no realizer calls yet</div>';
+
+  const modelCallsEl = document.getElementById('diag-model-calls');
+  if (modelCallsEl) {
+    modelCallsEl.innerHTML = (d.recent_model_calls || []).map(r =>
+      `<div class="row">
+        <span class="ts">${(r.ts || '').slice(0,19)}</span>
+        ${r.purpose || '?'} ${r.model || '?'}
+        <span class="reasons">status=${r.status || '?'} http=${r.http_status || '—'}
+          ${r.latency_ms || 0}ms vision=${r.vision_used ? '✓' : '✗'} image=${r.image_bytes || 0}B</span>
+      </div>`
+    ).join('') || '<div style="color:#7c7c86">no model calls yet</div>';
+  }
 }
 
 function populateSettings(c, p) {
@@ -583,6 +599,8 @@ def _aggregate(window_sec: int = 86400) -> dict:
         if sig == "considered" and ua == "timed_out":
             n_considered_no_click += 1
 
+    model_calls = tail_jsonl("model_calls.jsonl", n=30)
+
     # Recent realizer calls from traces — only those that produced a message
     recent_realizations = []
     for t in reversed(traces):
@@ -624,6 +642,7 @@ def _aggregate(window_sec: int = 86400) -> dict:
         "recent_decisions": decisions[-30:][::-1],
         "recent_outcomes": outcomes[-15:][::-1],
         "recent_realizations": recent_realizations,
+        "recent_model_calls": model_calls[::-1],
     }
 
 

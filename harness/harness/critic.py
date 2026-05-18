@@ -8,6 +8,7 @@ from typing import Optional
 
 import aiohttp
 
+from . import model_audit
 from . import privacy
 from .schemas import CandidateEvent, CriticResult
 
@@ -77,12 +78,13 @@ async def llm_check(message: str, event: CandidateEvent, config: dict) -> Option
         headers["x-api-key"] = api_key
 
     from .realizer import chat_completions_url
+    endpoint = chat_completions_url(base_url)
     t0 = time.monotonic()
     try:
         timeout = aiohttp.ClientTimeout(total=8)
         async with aiohttp.ClientSession(timeout=timeout) as s:
             async with s.post(
-                chat_completions_url(base_url),
+                endpoint,
                 headers=headers,
                 json={
                     "model": model,
@@ -94,16 +96,71 @@ async def llm_check(message: str, event: CandidateEvent, config: dict) -> Option
                     "max_tokens": 80,
                 },
             ) as r:
+                latency_ms = int((time.monotonic() - t0) * 1000)
                 if r.status != 200:
+                    model_audit.record_model_call(
+                        purpose="critic",
+                        base_url=base_url,
+                        endpoint=endpoint,
+                        model=model,
+                        candidate_id=event.candidate_id,
+                        prompt_version=CRITIC_VERSION,
+                        status="http_error",
+                        http_status=r.status,
+                        latency_ms=latency_ms,
+                        error=(await r.text())[:200],
+                        extra={
+                            "message_chars": len(message),
+                            "prompt_hash": model_audit.text_hash(system_prompt),
+                            "payload_hash": model_audit.text_hash(user_payload),
+                        },
+                    )
                     return None
                 data = await r.json()
-    except Exception:
+    except Exception as e:
+        model_audit.record_model_call(
+            purpose="critic",
+            base_url=base_url,
+            endpoint=endpoint,
+            model=model,
+            candidate_id=event.candidate_id,
+            prompt_version=CRITIC_VERSION,
+            status="exception",
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            error=f"{type(e).__name__}: {e}",
+            extra={
+                "message_chars": len(message),
+                "prompt_hash": model_audit.text_hash(system_prompt),
+                "payload_hash": model_audit.text_hash(user_payload),
+            },
+        )
         return None
 
     text = (
         ((data.get("choices") or [{}])[0].get("message", {}) or {}).get("content") or ""
     ).strip().lower()
     latency_ms = int((time.monotonic() - t0) * 1000)
+    usage = data.get("usage", {}) or {}
+
+    model_audit.record_model_call(
+        purpose="critic",
+        base_url=base_url,
+        endpoint=endpoint,
+        model=model,
+        candidate_id=event.candidate_id,
+        prompt_version=CRITIC_VERSION,
+        status="ok",
+        http_status=200,
+        latency_ms=latency_ms,
+        tokens_in=int(usage.get("prompt_tokens", 0)),
+        tokens_out=int(usage.get("completion_tokens", 0)),
+        extra={
+            "message_chars": len(message),
+            "response_chars": len(text),
+            "prompt_hash": model_audit.text_hash(system_prompt),
+            "payload_hash": model_audit.text_hash(user_payload),
+        },
+    )
 
     if text.startswith("pass") or text == "ok":
         return CriticResult(version=CRITIC_VERSION, pass_=True, reasons=[], flags=[], latency_ms=latency_ms)

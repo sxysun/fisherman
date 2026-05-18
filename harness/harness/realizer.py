@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional
 import aiohttp
 
 from . import image_redaction
+from . import model_audit
 from . import privacy
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, MemorySnapshot, Realization, ToolCall
@@ -297,7 +298,7 @@ async def realize(
 
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            for _ in range(max_tool_calls + 1):
+            for call_index in range(max_tool_calls + 1):
                 body = {
                     "model": model,
                     "messages": messages,
@@ -308,23 +309,78 @@ async def realize(
                     body["tools"] = tools
                     body["tool_choice"] = "auto"
 
+                endpoint = chat_completions_url(base_url)
+                call_started = time.monotonic()
                 async with session.post(
-                    chat_completions_url(base_url),
+                    endpoint,
                     headers=headers,
                     json=body,
                 ) as resp:
+                    latency_ms = int((time.monotonic() - call_started) * 1000)
                     if resp.status != 200:
                         error = f"http_{resp.status}: {(await resp.text())[:200]}"
+                        model_audit.record_model_call(
+                            purpose="realizer",
+                            base_url=base_url,
+                            endpoint=endpoint,
+                            model=model,
+                            candidate_id=event.candidate_id,
+                            prompt_version=prompt_version,
+                            call_index=call_index,
+                            status="http_error",
+                            http_status=resp.status,
+                            latency_ms=latency_ms,
+                            vision_used=image_b64 is not None,
+                            image_bytes=image_bytes_n,
+                            privacy_flags=privacy_flags,
+                            error=error,
+                            extra={
+                                "intent": intent,
+                                "message_count": len(messages),
+                                "tool_specs": len(tools),
+                                "prompt_hash": model_audit.text_hash(system_prompt),
+                                "brief_hash": model_audit.text_hash(user_text),
+                            },
+                        )
                         break
                     data = await resp.json()
 
                 usage = data.get("usage", {}) or {}
-                tokens_in += int(usage.get("prompt_tokens", 0))
-                tokens_out += int(usage.get("completion_tokens", 0))
+                call_tokens_in = int(usage.get("prompt_tokens", 0))
+                call_tokens_out = int(usage.get("completion_tokens", 0))
+                tokens_in += call_tokens_in
+                tokens_out += call_tokens_out
 
                 choice = (data.get("choices") or [{}])[0]
                 msg = choice.get("message", {}) or {}
                 requested_tool_calls = msg.get("tool_calls") or []
+
+                model_audit.record_model_call(
+                    purpose="realizer",
+                    base_url=base_url,
+                    endpoint=endpoint,
+                    model=model,
+                    candidate_id=event.candidate_id,
+                    prompt_version=prompt_version,
+                    call_index=call_index,
+                    status="ok",
+                    http_status=200,
+                    latency_ms=latency_ms,
+                    tokens_in=call_tokens_in,
+                    tokens_out=call_tokens_out,
+                    vision_used=image_b64 is not None,
+                    image_bytes=image_bytes_n,
+                    privacy_flags=privacy_flags,
+                    extra={
+                        "intent": intent,
+                        "message_count": len(messages),
+                        "tool_specs": len(tools),
+                        "requested_tool_calls": len(requested_tool_calls),
+                        "response_chars": len(str(msg.get("content") or "")),
+                        "prompt_hash": model_audit.text_hash(system_prompt),
+                        "brief_hash": model_audit.text_hash(user_text),
+                    },
+                )
 
                 # Surface any "reasoning" or "thoughts" fields the provider
                 # exposes (some servers include them; hermes-agent does its
@@ -385,6 +441,27 @@ async def realize(
 
     except Exception as e:
         error = f"exception: {type(e).__name__}: {e}"
+        model_audit.record_model_call(
+            purpose="realizer",
+            base_url=base_url,
+            endpoint=chat_completions_url(base_url),
+            model=model,
+            candidate_id=event.candidate_id,
+            prompt_version=prompt_version,
+            status="exception",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            vision_used=image_b64 is not None,
+            image_bytes=image_bytes_n,
+            privacy_flags=privacy_flags,
+            error=error,
+            extra={
+                "intent": intent,
+                "prompt_hash": model_audit.text_hash(system_prompt),
+                "brief_hash": model_audit.text_hash(user_text),
+            },
+        )
 
     return Realization(
         model=model,

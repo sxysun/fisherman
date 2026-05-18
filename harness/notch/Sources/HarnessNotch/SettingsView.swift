@@ -435,6 +435,17 @@ struct DiagnosticsTab: View {
                     .cornerRadius(6)
                 }
             }
+            SectionTitle("Recent model calls (30)")
+            DiagList(rows: model.recentModelCalls.map { r in
+                let ts = String(((r["ts"] as? String) ?? "").prefix(19))
+                let purpose = (r["purpose"] as? String) ?? "?"
+                let modelName = (r["model"] as? String) ?? "?"
+                let status = (r["status"] as? String) ?? "?"
+                let http = r["http_status"] as? Int
+                let latency = (r["latency_ms"] as? Int) ?? 0
+                let imageBytes = (r["image_bytes"] as? Int) ?? 0
+                return "\(ts)  \(purpose)  \(modelName)  status=\(status) http=\(http.map(String.init) ?? "—") \(latency)ms image=\(imageBytes)B"
+            })
         }
     }
 }

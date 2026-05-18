@@ -81,6 +81,7 @@ harness/
 │   ├── reward.py                 signal-derived reward (replaces ad-hoc weights)
 │   ├── privacy.py                local OCR secret detection + text redaction
 │   ├── image_redaction.py        local Apple Vision box masking for screenshots
+│   ├── model_audit.py            privacy-safe model-call audit ledger
 │   ├── schemas.py                ALL dataclasses
 │   ├── config.py                 TOML config + default
 │   ├── label_ui.py               rewind-style labeling web UI
@@ -119,7 +120,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           23 tests; pytest passes
+└── tests/test_smoke.py           24 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -219,6 +220,13 @@ User flow once it's running:
    - Realizer/tool/critic OCR snippets are redacted before network calls
    - Sensitive frames are masked locally using Apple Vision text boxes before
      screenshot model calls; if masking fails, image attachment is suppressed
+
+✅ Model-call audit ledger
+   - `~/.harness/model_calls.jsonl` records realizer, scene VLM, and LLM critic
+     calls with purpose, endpoint, model, status, latency, token counts, image
+     bytes, privacy flags, and hashes/counts only
+   - Raw prompts, screenshots, OCR text, API keys, and response text are not
+     written to the audit ledger
 ```
 
 ---
@@ -377,7 +385,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 23/23
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 24/24
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

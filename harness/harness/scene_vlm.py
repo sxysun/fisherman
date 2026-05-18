@@ -25,6 +25,7 @@ from typing import Optional
 
 import aiohttp
 
+from . import model_audit
 from . import privacy
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, SceneTag
@@ -101,18 +102,18 @@ def _parse_json(text: str) -> Optional[dict]:
         return None
 
 
-async def _fetch_image_b64(fc: FishermanClient) -> Optional[str]:
+async def _fetch_image_b64(fc: FishermanClient) -> tuple[Optional[str], int]:
     frames = await fc.list_frames(count=1)
     if not frames:
-        return None
+        return None, 0
     try:
         ts_ms = int(float(frames[0].get("ts", 0)) * 1000)
     except (TypeError, ValueError):
-        return None
+        return None, 0
     img = await fc.get_frame_image(ts_ms)
     if not img:
-        return None
-    return base64.b64encode(img).decode("ascii")
+        return None, 0
+    return base64.b64encode(img).decode("ascii"), len(img)
 
 
 async def maybe_tag(
@@ -154,7 +155,7 @@ async def maybe_tag(
         return None
     api_key = config.get("api_key") or os.environ.get(config.get("api_key_env", ""), "")
 
-    img_b64 = await _fetch_image_b64(fc)
+    img_b64, image_bytes_n = await _fetch_image_b64(fc)
     if not img_b64:
         return None
 
@@ -183,19 +184,79 @@ async def maybe_tag(
 
     timeout_sec = float(config.get("timeout_sec", 12))
     from .realizer import chat_completions_url
+    endpoint = chat_completions_url(base_url)
+    started = time.monotonic()
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec)) as s:
-            async with s.post(chat_completions_url(base_url), headers=headers, json=body) as r:
+            async with s.post(endpoint, headers=headers, json=body) as r:
+                latency_ms = int((time.monotonic() - started) * 1000)
                 if r.status != 200:
+                    model_audit.record_model_call(
+                        purpose="scene_vlm",
+                        base_url=base_url,
+                        endpoint=endpoint,
+                        model=model,
+                        candidate_id=event.candidate_id,
+                        prompt_version="scene_tagger_v1",
+                        status="http_error",
+                        http_status=r.status,
+                        latency_ms=latency_ms,
+                        vision_used=True,
+                        image_bytes=image_bytes_n,
+                        error=(await r.text())[:200],
+                        extra={
+                            "signal_hash": sig[1],
+                            "prompt_hash": model_audit.text_hash(SYSTEM_PROMPT),
+                        },
+                    )
                     return None
                 data = await r.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    except Exception as e:
+        model_audit.record_model_call(
+            purpose="scene_vlm",
+            base_url=base_url,
+            endpoint=endpoint,
+            model=model,
+            candidate_id=event.candidate_id,
+            prompt_version="scene_tagger_v1",
+            status="exception",
+            latency_ms=int((time.monotonic() - started) * 1000),
+            vision_used=True,
+            image_bytes=image_bytes_n,
+            error=f"{type(e).__name__}: {e}",
+            extra={
+                "signal_hash": sig[1],
+                "prompt_hash": model_audit.text_hash(SYSTEM_PROMPT),
+            },
+        )
         return None
 
+    usage = data.get("usage", {}) or {}
     raw_text = (
         ((data.get("choices") or [{}])[0].get("message", {}) or {}).get("content") or ""
     )
     parsed = _parse_json(raw_text)
+    model_audit.record_model_call(
+        purpose="scene_vlm",
+        base_url=base_url,
+        endpoint=endpoint,
+        model=model,
+        candidate_id=event.candidate_id,
+        prompt_version="scene_tagger_v1",
+        status="ok" if parsed else "parse_error",
+        http_status=200,
+        latency_ms=int((time.monotonic() - started) * 1000),
+        tokens_in=int(usage.get("prompt_tokens", 0)),
+        tokens_out=int(usage.get("completion_tokens", 0)),
+        vision_used=True,
+        image_bytes=image_bytes_n,
+        extra={
+            "signal_hash": sig[1],
+            "prompt_hash": model_audit.text_hash(SYSTEM_PROMPT),
+            "response_chars": len(raw_text),
+            "schema_valid": bool(parsed),
+        },
+    )
     if not parsed:
         return None
 

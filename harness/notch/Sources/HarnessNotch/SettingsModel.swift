@@ -53,6 +53,7 @@ final class SettingsModel: ObservableObject {
     @Published var recentDecisions: [[String: Any]] = []
     @Published var recentOutcomes: [[String: Any]] = []
     @Published var recentRealizations: [[String: Any]] = []
+    @Published var recentModelCalls: [[String: Any]] = []
 
     // Dirty tracking
     @Published var dirty: Bool = false
@@ -119,6 +120,7 @@ final class SettingsModel: ObservableObject {
             self.recentDecisions = (data["recent_decisions"].list).compactMap { $0 as? [String: Any] }
             self.recentOutcomes = (data["recent_outcomes"].list).compactMap { $0 as? [String: Any] }
             self.recentRealizations = (data["recent_realizations"].list).compactMap { $0 as? [String: Any] }
+            self.recentModelCalls = (data["recent_model_calls"].list).compactMap { $0 as? [String: Any] }
         }
         self.statusLine = "daemon ok · \(data?["n_candidates"].int ?? 0) candidates / \(data?["n_decisions"].int ?? 0) decisions today"
         self.dirty = false
@@ -147,6 +149,7 @@ final class SettingsModel: ObservableObject {
                         self.recentDecisions = (data["recent_decisions"].list).compactMap { $0 as? [String: Any] }
                         self.recentOutcomes = (data["recent_outcomes"].list).compactMap { $0 as? [String: Any] }
                         self.recentRealizations = (data["recent_realizations"].list).compactMap { $0 as? [String: Any] }
+                        self.recentModelCalls = (data["recent_model_calls"].list).compactMap { $0 as? [String: Any] }
                     }
                 }
             }
