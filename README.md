@@ -31,6 +31,12 @@ store by default.
 
 ## Install
 
+For the easiest macOS install, download the latest `Fisherman-*.dmg` from
+GitHub Releases, open it, drag `Fisherman.app` to Applications, and launch it.
+The app prepares `~/.fisherman` on first launch and starts in Local Only mode.
+
+The source installer remains available for development and shell-first installs:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
 ```

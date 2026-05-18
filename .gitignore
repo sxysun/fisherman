@@ -19,3 +19,4 @@ website/dist/
 .run/
 .DS_Store
 .gstack/
+.claude/

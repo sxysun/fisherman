@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         // DynamicNotch.
         terminateOlderInstances()
 
+        // DMG builds embed the Python source in the app bundle. On first
+        // launch, copy it into ~/.fisherman and prepare the venv before the
+        // config manager tries to read or create ~/.fisherman/.env.
+        BundledBootstrap.ensureInstall()
+
         configManager = ConfigManager()
         configManager.load()
 
