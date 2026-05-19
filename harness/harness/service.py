@@ -76,7 +76,6 @@ def load(path: Path | None = None) -> subprocess.CompletedProcess[str]:
     _launchctl(["bootout", _gui_domain(), str(target)], check=False)
     result = _launchctl(["bootstrap", _gui_domain(), str(target)], check=True)
     _launchctl(["enable", f"{_gui_domain()}/{LABEL}"], check=False)
-    _launchctl(["kickstart", "-k", f"{_gui_domain()}/{LABEL}"], check=False)
     return result
 
 
