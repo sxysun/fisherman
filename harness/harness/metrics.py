@@ -35,7 +35,9 @@ def compute(window: str = "24h") -> dict[str, Any]:
     all_decisions = _read_payloads("decisions", "decisions.jsonl")
     decisions = [r for r in all_decisions if r.get("ts", "") >= since]
     outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
-    labels = _read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
+    labels = latest_label_rows(
+        _read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
+    )
 
     decisions_by_id = {d.get("decision_id"): d for d in all_decisions if d.get("decision_id")}
     decisions_by_candidate = {
@@ -165,6 +167,23 @@ def _label_quality(joined_labels: list[tuple[dict, dict | None]]) -> dict[str, A
         "false_interruptions_labeled": false_interruptions,
         "missed_help_labeled": missed_help,
     }
+
+
+def latest_label_rows(rows: list[dict]) -> list[dict]:
+    """Return one current retro label per decision/candidate.
+
+    The implicit examples panel can promote/correct an example later. Keeping
+    metrics on the latest row avoids double-counting append-only corrections.
+    """
+    keyed: dict[str, dict] = {}
+    unkeyed: list[dict] = []
+    for row in sorted(rows, key=lambda r: r.get("ts") or ""):
+        key = row.get("decision_id") or row.get("candidate_id")
+        if not key:
+            unkeyed.append(row)
+            continue
+        keyed[str(key)] = row
+    return [*unkeyed, *keyed.values()]
 
 
 def _ratio(num: float, den: float) -> float | None:

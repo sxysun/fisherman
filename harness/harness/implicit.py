@@ -179,6 +179,7 @@ def _example_row(
         "message": realization.get("message"),
         "vision_used": realization.get("vision_used"),
         "privacy_flags": realization.get("privacy_flags") or [],
+        "privacy_provenance": realization.get("privacy_provenance") or {},
     }
     return row
 

@@ -167,6 +167,39 @@ def _serialize_state(
     return "\n".join(lines)
 
 
+def _privacy_provenance(
+    *,
+    event: CandidateEvent,
+    include_vision: bool,
+    image_attached: bool,
+    image_bytes: int,
+    privacy_flags: list[str],
+    config: dict,
+) -> dict[str, Any]:
+    scan = privacy.scan_text(event.screen.ocr_snippet or "")
+    screenshot_action = "not_requested"
+    if include_vision:
+        screenshot_action = "attached" if image_attached else "unavailable"
+        if any(flag.startswith("image_redacted:") for flag in privacy_flags):
+            screenshot_action = "redacted_and_attached" if image_attached else "redaction_attempted"
+        if "image_suppressed_sensitive_ocr" in privacy_flags:
+            screenshot_action = "suppressed_sensitive_ocr"
+        elif "model_endpoint_blocked" in privacy_flags:
+            screenshot_action = "blocked_untrusted_endpoint"
+    return {
+        "version": "privacy_provenance_v1",
+        "include_vision_requested": include_vision,
+        "vision_attached": image_attached,
+        "image_bytes": image_bytes,
+        "text_ocr_redacted": scan.sensitive,
+        "sensitive_reasons": scan.reasons,
+        "screenshot_action": screenshot_action,
+        "flags": privacy_flags,
+        "skip_vision_on_sensitive_ocr": bool(config.get("skip_vision_on_sensitive_ocr", True)),
+        "redact_sensitive_screenshots": bool(config.get("redact_sensitive_screenshots", True)),
+    }
+
+
 async def _fetch_latest_frame_b64(
     fc: FishermanClient,
     event: CandidateEvent,
@@ -284,6 +317,14 @@ async def realize(
             vision_used=False,
             image_bytes=0,
             privacy_flags=["model_endpoint_blocked"],
+            privacy_provenance=_privacy_provenance(
+                event=event,
+                include_vision=include_vision,
+                image_attached=False,
+                image_bytes=0,
+                privacy_flags=["model_endpoint_blocked"],
+                config=config,
+            ),
             error=f"{trust_check.reason}: {trust_check.host_port}",
         )
 
@@ -297,6 +338,14 @@ async def realize(
             skip_on_sensitive_ocr=bool(config.get("skip_vision_on_sensitive_ocr", True)),
             redact_sensitive_screenshots=bool(config.get("redact_sensitive_screenshots", True)),
         )
+    provenance = _privacy_provenance(
+        event=event,
+        include_vision=include_vision,
+        image_attached=image_b64 is not None,
+        image_bytes=image_bytes_n,
+        privacy_flags=privacy_flags,
+        config=config,
+    )
 
     # Hermes accepts both a string `content` and an array of content blocks.
     # When vision is on AND an image was successfully fetched, send blocks.
@@ -511,5 +560,6 @@ async def realize(
         vision_used=image_b64 is not None,
         image_bytes=image_bytes_n,
         privacy_flags=privacy_flags,
+        privacy_provenance=provenance,
         error=error,
     )

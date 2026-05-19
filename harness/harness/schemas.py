@@ -113,6 +113,7 @@ class Realization:
     vision_used: bool = False
     image_bytes: int = 0
     privacy_flags: list[str] = field(default_factory=list)
+    privacy_provenance: dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
 
     def to_dict(self) -> dict:

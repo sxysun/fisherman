@@ -11,6 +11,8 @@ final class SettingsModel: ObservableObject {
     @Published var implicitData: JSON?
     @Published var implicitExamples: [[String: Any]] = []
     @Published var implicitWindow: String = "7d"
+    @Published var labData: JSON?
+    @Published var labWindow: String = "7d"
     // Policy state from /status
     @Published var snoozedUntil: String?
 
@@ -120,10 +122,12 @@ final class SettingsModel: ObservableObject {
         async let p = HarnessAPI.fetchPolicyState()
         async let m = HarnessAPI.fetchMetrics()
         async let i = HarnessAPI.fetchImplicit(window: implicitWindow, limit: 80)
-        let (data, config, policy, metrics, implicit) = await (d, c, p, m, i)
+        async let lab = HarnessAPI.fetchLab(window: labWindow)
+        let (data, config, policy, metrics, implicit, labData) = await (d, c, p, m, i, lab)
         self.data = data
         self.metrics = metrics
         applyImplicit(implicit)
+        self.labData = labData
         self.rawConfig = config
         if let p = policy {
             self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
@@ -151,6 +155,46 @@ final class SettingsModel: ObservableObject {
     func refreshImplicit() async {
         let implicit = await HarnessAPI.fetchImplicit(window: implicitWindow, limit: 80)
         applyImplicit(implicit)
+    }
+
+    func refreshLab() async {
+        self.labData = await HarnessAPI.fetchLab(window: labWindow)
+    }
+
+    func promoteImplicit(decisionID: String, label: String, implicitLabel: String, implicitDirection: String) async {
+        let ok = await HarnessAPI.promoteImplicit(
+            decisionID: decisionID,
+            label: label,
+            implicitLabel: implicitLabel,
+            implicitDirection: implicitDirection
+        )
+        statusLine = ok ? "promoted implicit example · \(label)" : "promote failed"
+        if ok {
+            async let m = HarnessAPI.fetchMetrics()
+            async let lab = HarnessAPI.fetchLab(window: labWindow)
+            let (metrics, labData) = await (m, lab)
+            self.metrics = metrics
+            self.labData = labData
+        }
+    }
+
+    func runTrainer() async {
+        let result = await HarnessAPI.runTrainer(window: "30d")
+        labData = await HarnessAPI.fetchLab(window: labWindow)
+        let canary = result?["canary_policy"]
+        statusLine = "trainer \(canary?["status"].string ?? "done") · \(canary?["variant"].string ?? "n/a")"
+    }
+
+    func activateCanary() async {
+        let result = await HarnessAPI.activateCanary()
+        labData = await HarnessAPI.fetchLab(window: labWindow)
+        statusLine = result?["ok"].bool == true ? "canary active" : "canary activation failed"
+    }
+
+    func rollbackCanary() async {
+        let result = await HarnessAPI.rollbackCanary()
+        labData = await HarnessAPI.fetchLab(window: labWindow)
+        statusLine = result?["ok"].bool == true ? "canary rolled back" : "rollback failed"
     }
 
     func startPolling() {

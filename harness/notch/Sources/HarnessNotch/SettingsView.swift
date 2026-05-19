@@ -16,6 +16,7 @@ struct SettingsRoot: View {
                     case .today:       TodayTab(model: model)
                     case .status:      StatusTab(model: model)
                     case .implicit:    ImplicitTab(model: model)
+                    case .lab:         LabTab(model: model)
                     case .gate:        GateTab(model: model)
                     case .realizer:    RealizerTab(model: model)
                     case .sceneReader: SceneReaderTab(model: model)
@@ -156,6 +157,7 @@ enum SettingsTab: String, CaseIterable {
     case today = "Today"
     case status = "Status"
     case implicit = "Implicit"
+    case lab = "Lab"
     case gate = "Behavior"
     case realizer = "Model"
     case sceneReader = "Scene Reader"
@@ -319,7 +321,7 @@ struct ImplicitTab: View {
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(Array(examples.enumerated()), id: \.offset) { _, example in
-                        ImplicitExampleRow(example: example)
+                        ImplicitExampleRow(model: model, example: example)
                     }
                 }
             }
@@ -344,6 +346,7 @@ struct ImplicitTab: View {
 }
 
 struct ImplicitExampleRow: View {
+    @ObservedObject var model: SettingsModel
     let example: [String: Any]
 
     var body: some View {
@@ -356,6 +359,11 @@ struct ImplicitExampleRow: View {
         let reward = number(outcome["reward_value"])
         let confidence = number(example["confidence"]) ?? 0
         let hover = hoverSummary(dict(outcome, "hover_ms_by_target"))
+        let provenance = dict(context, "privacy_provenance")
+        let flags = list(provenance, "flags")
+        let decisionID = str(example, "decision_id")
+        let implicitLabel = str(example, "label")
+        let implicitDirection = str(example, "direction")
 
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
@@ -411,6 +419,28 @@ struct ImplicitExampleRow: View {
             .font(.system(size: 10.5, design: .monospaced))
             .foregroundStyle(.tertiary)
             .lineLimit(1)
+
+            HStack(spacing: 10) {
+                Text("privacy \(str(provenance, "screenshot_action"))")
+                if !flags.isEmpty {
+                    Text(flags.joined(separator: ","))
+                }
+                Spacer()
+                Button("Help") {
+                    Task { await model.promoteImplicit(decisionID: decisionID, label: "would_help", implicitLabel: implicitLabel, implicitDirection: implicitDirection) }
+                }
+                .buttonStyle(.bordered)
+                Button("Annoy") {
+                    Task { await model.promoteImplicit(decisionID: decisionID, label: "would_annoy", implicitLabel: implicitLabel, implicitDirection: implicitDirection) }
+                }
+                .buttonStyle(.bordered)
+                Button("Can't tell") {
+                    Task { await model.promoteImplicit(decisionID: decisionID, label: "cant_tell", implicitLabel: implicitLabel, implicitDirection: implicitDirection) }
+                }
+                .buttonStyle(.bordered)
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.tertiary)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -463,6 +493,214 @@ struct ImplicitExampleRow: View {
         if value.count <= max { return value }
         return String(value.prefix(max - 1)) + "…"
     }
+}
+
+// MARK: - Lab tab
+
+struct LabTab: View {
+    @ObservedObject var model: SettingsModel
+    @State private var busy = false
+
+    private let windows = ["24h", "7d", "30d"]
+
+    var body: some View {
+        let trainer = model.labData?["trainer"]
+        let calibration = trainer?["calibration"]
+        let readiness = calibration?["readiness"]
+        let best = calibration?["best_variant"]
+        let canary = trainer?["canary_policy"]
+        let experiment = model.labData?["experiment"]
+
+        VStack(alignment: .leading, spacing: 14) {
+            SectionTitle("Policy lab")
+            HStack(spacing: 12) {
+                LabMetric(label: "Active", value: trainer?["active_policy"].string ?? "rule_v0")
+                LabMetric(label: "Canary", value: canary?["status"].string.isEmpty == false ? canary?["status"].string ?? "none" : "none")
+                LabMetric(label: "Best", value: best?["variant"].string.isEmpty == false ? best?["variant"].string ?? "n/a" : "n/a")
+                LabMetric(label: "Implicit n", value: String(format: "%.1f", readiness?["implicit_weighted_n"].double ?? 0))
+            }
+
+            HStack(spacing: 10) {
+                Picker("Window", selection: $model.labWindow) {
+                    ForEach(windows, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 160)
+                .onChange(of: model.labWindow) {
+                    Task { await model.refreshLab() }
+                }
+
+                Button(busy ? "Running…" : "Run trainer") {
+                    Task {
+                        busy = true
+                        await model.runTrainer()
+                        busy = false
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(busy)
+
+                Button("Activate canary") { Task { await model.activateCanary() } }
+                    .buttonStyle(.bordered)
+                    .disabled((canary?["status"].string ?? "") != "proposed")
+
+                Button("Rollback") { Task { await model.rollbackCanary() } }
+                    .buttonStyle(.bordered)
+                    .disabled((trainer?["active_policy"].string ?? "") != "canary")
+                Spacer()
+            }
+
+            SectionTitle("Calibration")
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(asDicts(calibration?["variants"].list).prefix(8).enumerated()), id: \.offset) { _, row in
+                    LabVariantRow(row: row)
+                }
+                if asDicts(calibration?["variants"].list).isEmpty {
+                    Text("(no calibration data)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            SectionTitle("Treatment vs holdout")
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(asDicts(experiment?["groups"].list).enumerated()), id: \.offset) { _, row in
+                    ExperimentGroupRow(row: row)
+                }
+                if asDicts(experiment?["groups"].list).isEmpty {
+                    Text("(no experiment data)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    private func asDicts(_ rows: [Any]?) -> [[String: Any]] {
+        (rows ?? []).compactMap { $0 as? [String: Any] }
+    }
+}
+
+struct LabMetric: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.system(size: 9.5, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(.tertiary)
+            Text(value)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .lineLimit(1)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(8)
+    }
+}
+
+struct LabVariantRow: View {
+    let row: [String: Any]
+
+    var body: some View {
+        let explicit = dict(row, "explicit")
+        let implicit = dict(row, "implicit")
+        HStack(spacing: 12) {
+            Text(str(row, "variant"))
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .frame(width: 160, alignment: .leading)
+            Text("score \(fmt(number(row["score"])))")
+            Text("guard \(bool(row["guardrail_pass"]) ? "pass" : "fail")")
+            Text("explicit n=\(int(explicit["n"])) agree=\(pct(explicit["agreement_rate"]))")
+            Text("implicit u=\(fmt(number(implicit["avg_utility"]))) ping=\(pct(implicit["ping_rate"]))")
+            Spacer()
+        }
+        .font(.system(size: 10.5, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .padding(9)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(6)
+    }
+
+    private func dict(_ row: [String: Any], _ key: String) -> [String: Any] {
+        row[key] as? [String: Any] ?? [:]
+    }
+}
+
+struct ExperimentGroupRow: View {
+    let row: [String: Any]
+
+    var body: some View {
+        let positive = dict(row, "positive_rate")
+        let negative = dict(row, "negative_rate")
+        let missed = dict(row, "missed_help_label_rate")
+        HStack(spacing: 12) {
+            Text(str(row, "assignment"))
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .frame(width: 120, alignment: .leading)
+            Text("n=\(int(row["n"])) pings=\(int(row["n_pings"])) outcomes=\(int(row["n_outcomes"]))")
+            Text("capture=\(pct(row["outcome_capture_rate"]))")
+            Text("+ \(pct(positive["rate"])) \(ci(positive["ci95"]))")
+            Text("- \(pct(negative["rate"])) \(ci(negative["ci95"]))")
+            Text("missed \(pct(missed["rate"])) \(ci(missed["ci95"]))")
+            Spacer()
+        }
+        .font(.system(size: 10.5, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .padding(9)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(6)
+    }
+
+    private func dict(_ row: [String: Any], _ key: String) -> [String: Any] {
+        row[key] as? [String: Any] ?? [:]
+    }
+
+    private func ci(_ value: Any?) -> String {
+        guard let arr = value as? [Any], arr.count == 2,
+              let lo = number(arr[0]), let hi = number(arr[1]) else { return "" }
+        return "[\(pct(lo))-\(pct(hi))]"
+    }
+}
+
+private func str(_ row: [String: Any], _ key: String) -> String {
+    let value = row[key]
+    if value == nil || value is NSNull { return "—" }
+    return String(describing: value!)
+}
+
+private func int(_ value: Any?) -> Int {
+    if let n = value as? NSNumber { return n.intValue }
+    if let i = value as? Int { return i }
+    return 0
+}
+
+private func bool(_ value: Any?) -> Bool {
+    if let b = value as? Bool { return b }
+    if let n = value as? NSNumber { return n.boolValue }
+    return false
+}
+
+private func number(_ value: Any?) -> Double? {
+    if value == nil || value is NSNull { return nil }
+    if let n = value as? NSNumber { return n.doubleValue }
+    if let d = value as? Double { return d }
+    if let i = value as? Int { return Double(i) }
+    return nil
+}
+
+private func pct(_ value: Any?) -> String {
+    guard let n = number(value) else { return "n/a" }
+    return String(format: "%.1f%%", n * 100.0)
+}
+
+private func fmt(_ value: Double?) -> String {
+    guard let value else { return "n/a" }
+    return String(format: "%.2f", value)
 }
 
 // MARK: - Gate tab
@@ -677,6 +915,13 @@ struct DiagnosticsTab: View {
                                 .foregroundStyle(.tertiary)
                             if (r["vision_used"] as? Bool) ?? false {
                                 Text("vision")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            let provenance = (r["privacy_provenance"] as? [String: Any]) ?? [:]
+                            let privacyAction = (provenance["screenshot_action"] as? String) ?? ""
+                            if !privacyAction.isEmpty {
+                                Text("privacy=\(privacyAction)")
                                     .font(.system(size: 10, design: .monospaced))
                                     .foregroundStyle(.tertiary)
                             }

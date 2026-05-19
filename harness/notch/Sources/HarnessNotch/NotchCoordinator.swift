@@ -24,6 +24,7 @@ final class NotchCoordinator {
     private var mouseMonitorGlobal: Any?
     private var mouseMonitorLocal: Any?
     private var lastWasNearPill = false
+    private var activeHoverTargets = Set<String>()
 
     init(baseURL: String) {
         self.client = HarnessClient(baseURLString: baseURL)
@@ -79,6 +80,7 @@ final class NotchCoordinator {
         currentDecisionID = pending.decisionID
         displayedAt = Date()
         events.removeAll(keepingCapacity: true)
+        activeHoverTargets.removeAll(keepingCapacity: true)
         lastWasNearPill = false
         state.current = pending
 
@@ -109,10 +111,12 @@ final class NotchCoordinator {
         stopMouseTracking()
 
         let latency = displayedAt.map { Int(Date().timeIntervalSince($0) * 1000) } ?? 0
+        closeOpenHovers(atMs: latency)
         displayedAt = nil
 
         let collected = events
         events.removeAll(keepingCapacity: true)
+        activeHoverTargets.removeAll(keepingCapacity: true)
         client.postOutcome(
             decisionID: did,
             action: action,
@@ -130,7 +134,24 @@ final class NotchCoordinator {
     private func recordEvent(kind: String, target: String? = nil) {
         guard let start = displayedAt else { return }
         let t_ms = Int(Date().timeIntervalSince(start) * 1000)
-        events.append(InteractionEvent(t_ms: t_ms, kind: kind, target: target))
+        recordEvent(kind: kind, target: target, tMs: t_ms)
+    }
+
+    private func recordEvent(kind: String, target: String? = nil, tMs: Int) {
+        if let target = target {
+            if kind == "hover_start" {
+                activeHoverTargets.insert(target)
+            } else if kind == "hover_end" {
+                activeHoverTargets.remove(target)
+            }
+        }
+        events.append(InteractionEvent(t_ms: tMs, kind: kind, target: target))
+    }
+
+    private func closeOpenHovers(atMs tMs: Int) {
+        for target in activeHoverTargets.sorted() {
+            recordEvent(kind: "hover_end", target: target, tMs: tMs)
+        }
     }
 
     private func startMouseTracking() {

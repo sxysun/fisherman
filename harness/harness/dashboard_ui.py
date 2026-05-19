@@ -621,6 +621,8 @@ def _aggregate(window_sec: int = 86400) -> dict:
             "message": r.get("message"),
             "latency_ms": r.get("latency_ms"),
             "vision_used": r.get("vision_used"),
+            "privacy_flags": r.get("privacy_flags") or [],
+            "privacy_provenance": r.get("privacy_provenance") or {},
             "provider_reasoning": provider_reasoning,
         })
         if len(recent_realizations) >= 10:
@@ -694,7 +696,7 @@ def _dump_toml(cfg: dict) -> str:
     """Minimal TOML dump for the harness config shape. Preserves nested tables."""
     lines: list[str] = []
     # Top-level tables in a stable order
-    section_order = ["daemon", "gate", "experiment", "scene", "scene_tagger", "memory",
+    section_order = ["daemon", "gate", "experiment", "trainer", "scene", "scene_tagger", "memory",
                      "realizer", "critic", "privacy", "push", "reward", "intents", "debug"]
     written: set[str] = set()
 

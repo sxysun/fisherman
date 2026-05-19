@@ -19,6 +19,7 @@ from . import realizer as realizer_mod
 from . import reward as reward_mod
 from . import scene as scene_mod
 from . import scene_vlm as scene_vlm_mod
+from . import trainer as trainer_mod
 from .candidate import synthesize
 from .fisherman_client import FishermanClient
 from .memory import SessionMemory
@@ -137,6 +138,7 @@ async def run_loop(config: dict) -> None:
     if not await fc.is_alive():
         log.warning("fisherman_unreachable_at_start", url=fisherman_url)
 
+    trainer_task = asyncio.create_task(_trainer_loop(config))
     try:
         while True:
             if push_channel == "notch_pill" and (notch_proc is None or notch_proc.poll() is not None):
@@ -151,8 +153,41 @@ async def run_loop(config: dict) -> None:
             )
             await asyncio.sleep(poll_sec)
     finally:
+        trainer_task.cancel()
+        try:
+            await trainer_task
+        except asyncio.CancelledError:
+            pass
         _stop_notch(notch_proc)
         await runner.cleanup()
+
+
+async def _trainer_loop(config: dict) -> None:
+    cfg = config.get("trainer") or {}
+    if not bool(cfg.get("enabled", True)):
+        return
+    interval_hours = float(cfg.get("interval_hours", 24))
+    window = str(cfg.get("window", "30d"))
+    min_implicit = int(cfg.get("min_implicit_usable", 20))
+    min_explicit = int(cfg.get("min_explicit_labels", 0))
+    initial_delay_sec = float(cfg.get("initial_delay_sec", 60))
+    await asyncio.sleep(max(0.0, initial_delay_sec))
+    while True:
+        try:
+            result = trainer_mod.run_trainer(
+                window=window,
+                min_implicit_usable=min_implicit,
+                min_explicit_labels=min_explicit,
+                write=True,
+            )
+            log.info(
+                "trainer_run",
+                status=(result.get("canary_policy") or {}).get("status"),
+                variant=(result.get("canary_policy") or {}).get("variant"),
+            )
+        except Exception as e:
+            log.warning("trainer_failed", error=str(e))
+        await asyncio.sleep(max(1.0, interval_hours * 3600.0))
 
 
 async def _tick(
@@ -205,6 +240,7 @@ async def _tick(
     policy_state = read_policy_state()
     daily_goal = (policy_state.get("daily_goal") or "").strip()
     sensitivity = policy_state.get("sensitivity") or "balanced"
+    policy_name, policy_overrides, policy_metadata = trainer_mod.active_policy_config(config, policy_state)
     gate_cfg = {
         "cooldown_min": config["gate"]["cooldown_min"],
         "negative_feedback_backoff_min": config["gate"].get("negative_feedback_backoff_min", 15),
@@ -214,14 +250,21 @@ async def _tick(
         "daily_goal": daily_goal,
         "sensitivity": sensitivity,
     }
+    gate_cfg.update(policy_overrides)
     decision = gate_mod.decide(
-        config["gate"]["active_policy"],
+        policy_name,
         event,
         mem_snap,
         recent_outcomes,
         gate_cfg,
     )
+    if policy_metadata.get("active_policy") == "canary":
+        decision.policy_version = f"{decision.policy_version}+canary"
     decision = experiments_mod.apply(decision, event, config.get("experiment", {}))
+    if policy_metadata.get("active_policy") == "canary":
+        exp = dict(decision.experiment or {})
+        exp["policy_canary"] = policy_metadata
+        decision.experiment = exp
     append_jsonl("decisions.jsonl", decision.to_dict() | {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
 
     trace = Trace.new(event, mem_snap, recent_outcomes)

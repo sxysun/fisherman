@@ -31,6 +31,7 @@ from harness import shadow_eval as shadow_eval_mod
 from harness import sql_store as sql_store_mod
 from harness import store as store_mod
 from harness import trust as trust_mod
+from harness import trainer as trainer_mod
 
 
 def test_imports():
@@ -58,6 +59,7 @@ def test_imports():
     assert experiments_mod
     assert service_mod
     assert trust_mod
+    assert trainer_mod
 
 
 def test_schema_roundtrip():
@@ -188,6 +190,7 @@ def test_trust_blocks_untrusted_model_endpoint_before_network(tmp_path):
         )
         assert result.error and "untrusted_model_endpoint" in result.error
         assert "model_endpoint_blocked" in result.privacy_flags
+        assert result.privacy_provenance["screenshot_action"] == "blocked_untrusted_endpoint"
         row = store_mod.tail_jsonl("model_calls.jsonl", n=1)[0]
         assert row["status"] == "blocked_untrusted_endpoint"
     finally:
@@ -833,6 +836,47 @@ def test_metrics_computes_label_quality_and_readiness(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_metrics_uses_latest_label_when_implicit_panel_corrects(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {
+                "decision_id": "pd_corrected",
+                "candidate_id": "cand_corrected",
+                "ts": "2026-05-19T12:00:00Z",
+                "action": "notch_ping",
+            },
+        )
+        store_mod.append_jsonl(
+            "retro_labels.jsonl",
+            {
+                "label_id": "implicit_panel_pd_corrected",
+                "decision_id": "pd_corrected",
+                "candidate_id": "cand_corrected",
+                "label": "would_annoy",
+                "ts": "2026-05-19T12:01:00Z",
+            },
+        )
+        store_mod.append_jsonl(
+            "retro_labels.jsonl",
+            {
+                "label_id": "implicit_panel_pd_corrected",
+                "decision_id": "pd_corrected",
+                "candidate_id": "cand_corrected",
+                "label": "would_help",
+                "ts": "2026-05-19T12:02:00Z",
+            },
+        )
+
+        report = metrics_mod.compute(window="365d")
+        assert report["labels"]["n"] == 1
+        assert report["labels"]["counts"] == {"would_help": 1}
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_implicit_outcomes_become_confidence_weighted_weak_labels():
     decision = {
         "decision_id": "pd_implicit",
@@ -940,6 +984,105 @@ def test_implicit_endpoint_returns_joined_examples(tmp_path):
         assert body["examples"][0]["context"]["message"] == "Return to the draft or close this tab."
         assert "ocr_snippet" not in json.dumps(body["examples"][0])
         assert "secret token" not in json.dumps(body["examples"][0])
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_implicit_promote_endpoint_appends_retro_label(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {
+                "decision_id": "pd_promote",
+                "candidate_id": "cand_promote",
+                "ts": "2026-05-19T12:00:00Z",
+                "action": "notch_ping",
+            },
+        )
+        req = make_mocked_request("POST", "/implicit/promote")
+        req._read_bytes = json.dumps({
+            "decision_id": "pd_promote",
+            "label": "would_annoy",
+            "implicit_label": "would_help",
+            "implicit_direction": "positive",
+        }).encode()
+        resp = asyncio.run(server_mod.post_implicit_promote(req))
+        body = json.loads(resp.text)
+        assert body["ok"] is True
+        rows = store_mod.tail_jsonl("retro_labels.jsonl")
+        assert rows[-1]["label_id"] == "implicit_panel_pd_promote"
+        assert rows[-1]["label"] == "would_annoy"
+        assert rows[-1]["source"] == "implicit_examples_panel"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_trainer_proposes_canary_from_implicit_signal(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        for i in range(3):
+            cid = f"cand_train_{i}"
+            did = f"pd_train_{i}"
+            store_mod.append_jsonl(
+                "candidates.jsonl",
+                {
+                    "candidate_id": cid,
+                    "ts": f"2026-05-19T12:0{i}:00Z",
+                    "screen": {
+                        "frontmost_app": "Chrome",
+                        "ocr_snippet": "TODO ship harness",
+                        "frame_age_sec": 5,
+                    },
+                    "scene": {
+                        "label": "coding_with_todo_in_view",
+                        "strength": "strong",
+                        "source": "rule",
+                    },
+                    "context": {},
+                    "user_pref": {},
+                },
+            )
+            store_mod.append_jsonl(
+                "decisions.jsonl",
+                {
+                    "decision_id": did,
+                    "candidate_id": cid,
+                    "ts": f"2026-05-19T12:0{i}:01Z",
+                    "action": "notch_ping",
+                    "reason_codes": ["coding_with_todo_in_view"],
+                },
+            )
+            store_mod.append_jsonl(
+                "outcomes.jsonl",
+                {
+                    "decision_id": did,
+                    "user_action": "clicked",
+                    "interaction_summary": {"intent_signal": "committed"},
+                    "ts": f"2026-05-19T12:0{i}:02Z",
+                    "reward": {"version": "v2", "value": 2.0},
+                },
+            )
+
+        result = trainer_mod.run_trainer(window="365d", min_implicit_usable=2)
+        canary = result["canary_policy"]
+        assert canary["status"] == "proposed"
+        assert canary["variant"]
+        state = store_mod.read_policy_state()
+        assert state["canary_policy"]["status"] == "proposed"
+
+        activated = trainer_mod.activate_canary()
+        assert activated["active_policy"] == "canary"
+        trainer_mod.run_trainer(window="365d", min_implicit_usable=2)
+        state = store_mod.read_policy_state()
+        assert state["canary_policy"]["status"] == "active"
+        assert state["next_canary_policy"]["status"] == "proposed"
+        rolled_back = trainer_mod.rollback_canary()
+        assert rolled_back["active_policy"] == "rule_v0"
     finally:
         store_mod.HARNESS_DIR = old_dir
 

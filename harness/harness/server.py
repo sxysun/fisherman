@@ -165,12 +165,20 @@ async def get_history(request: web.Request) -> web.Response:
 
 async def get_status(request: web.Request) -> web.Response:
     state = read_policy_state()
+    canary = state.get("canary_policy") or {}
+    canary_compact = {
+        key: canary.get(key)
+        for key in ("status", "variant", "overrides", "score", "created_at", "activated_at", "rolled_back_at")
+        if canary.get(key) is not None
+    }
     return web.json_response(
         {
             "active": True,
             "snoozed_until": state.get("snoozed_until"),
             "muted_intents": state.get("muted_intents", []),
             "active_policy": state.get("active_policy"),
+            "canary_policy": canary_compact,
+            "last_trainer_run": state.get("last_trainer_run") or {},
             "daily_goal": state.get("daily_goal", ""),
             "sensitivity": state.get("sensitivity", "balanced"),
             "goal_set_at": state.get("goal_set_at"),
@@ -237,6 +245,102 @@ async def get_implicit(request: web.Request) -> web.Response:
         "summary": implicit_mod.summarize(weak_labels),
         "examples": examples,
     })
+
+
+async def post_implicit_promote(request: web.Request) -> web.Response:
+    from . import metrics as metrics_mod
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected object"}, status=400)
+    decision_id = str(body.get("decision_id") or "").strip()
+    if not decision_id:
+        return web.json_response({"error": "missing decision_id"}, status=400)
+    label = str(body.get("label") or "").strip()
+    if label not in {"would_help", "would_annoy", "good_no_ping", "cant_tell"}:
+        return web.json_response({"error": "bad label"}, status=400)
+    try:
+        confidence = float(body.get("confidence", 1.0))
+    except (TypeError, ValueError):
+        confidence = 1.0
+    confidence = max(0.0, min(1.0, confidence))
+
+    decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl")
+    decision = next((row for row in reversed(decisions) if row.get("decision_id") == decision_id), None)
+    if decision is None:
+        return web.json_response({"error": "unknown decision_id"}, status=404)
+    candidate_id = decision.get("candidate_id")
+    row = {
+        "label_id": f"implicit_panel_{decision_id}",
+        "candidate_id": candidate_id,
+        "decision_id": decision_id,
+        "decision_action": decision.get("action"),
+        "label": label,
+        "confidence": confidence,
+        "source": "implicit_examples_panel",
+        "implicit_label": body.get("implicit_label"),
+        "implicit_direction": body.get("implicit_direction"),
+        "rubric_version": body.get("rubric_version") or "decision_moment_v2",
+        "notes": body.get("notes") or "",
+        "ts": _now_iso(),
+    }
+    append_jsonl("retro_labels.jsonl", row)
+    return web.json_response({"ok": True, "label": row})
+
+
+async def get_lab(request: web.Request) -> web.Response:
+    from . import trainer as trainer_mod
+
+    window = request.query.get("window", "7d")
+    return web.json_response(trainer_mod.lab_report(window=window))
+
+
+async def post_trainer_run(request: web.Request) -> web.Response:
+    from . import trainer as trainer_mod
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    window = str(body.get("window") or request.query.get("window") or "30d")
+    try:
+        min_implicit = int(body.get("min_implicit_usable") or 20)
+    except (TypeError, ValueError):
+        min_implicit = 20
+    try:
+        min_explicit = int(body.get("min_explicit_labels") or 0)
+    except (TypeError, ValueError):
+        min_explicit = 0
+    return web.json_response(trainer_mod.run_trainer(
+        window=window,
+        min_implicit_usable=min_implicit,
+        min_explicit_labels=min_explicit,
+        write=True,
+    ))
+
+
+async def post_trainer_activate(request: web.Request) -> web.Response:
+    from . import trainer as trainer_mod
+
+    result = trainer_mod.activate_canary()
+    status = 200 if result.get("ok") else 400
+    return web.json_response(result, status=status)
+
+
+async def post_trainer_rollback(request: web.Request) -> web.Response:
+    from . import trainer as trainer_mod
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = body.get("reason") if isinstance(body, dict) else None
+    return web.json_response(trainer_mod.rollback_canary(reason=str(reason or "manual")))
 
 
 async def post_goal(request: web.Request) -> web.Response:
@@ -343,6 +447,11 @@ def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app.router.add_get("/status", get_status)
     app.router.add_get("/metrics", get_metrics)
     app.router.add_get("/implicit", get_implicit)
+    app.router.add_post("/implicit/promote", post_implicit_promote)
+    app.router.add_get("/lab", get_lab)
+    app.router.add_post("/trainer/run", post_trainer_run)
+    app.router.add_post("/trainer/activate", post_trainer_activate)
+    app.router.add_post("/trainer/rollback", post_trainer_rollback)
     app.router.add_post("/snooze", post_snooze)
     app.router.add_post("/unsnooze", post_unsnooze)
     app.router.add_post("/goal", post_goal)

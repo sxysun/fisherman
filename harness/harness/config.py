@@ -37,6 +37,17 @@ explore_ping_rate = 0.0
 respect_hard_gates = true
 explore_eligible_reasons = ["no_clear_help"]
 
+[trainer]
+# Safe daily trainer: proposes a canary policy from implicit outcomes +
+# explicit retro labels. It never auto-activates; activate from settings after
+# reviewing the report.
+enabled = true
+window = "30d"
+interval_hours = 24
+initial_delay_sec = 60
+min_implicit_usable = 20
+min_explicit_labels = 0
+
 [scene]
 llm_fallback_enabled = false
 

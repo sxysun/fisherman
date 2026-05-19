@@ -548,6 +548,72 @@ def shadow(since: str, policy: str, full_dataset: bool, as_json: bool) -> None:
         )
 
 
+@main.command("lab")
+@click.option("--since", default="7d", help="Window: 24h, 7d, etc.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def lab(since: str, as_json: bool) -> None:
+    """Show policy-lab canary and treatment/holdout status."""
+    from . import trainer as trainer_mod
+
+    report = trainer_mod.lab_report(window=since)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    trainer = report["trainer"]
+    canary = trainer.get("canary_policy") or {}
+    experiment = report["experiment"]
+    click.echo(f"active_policy: {trainer.get('active_policy')}")
+    click.echo(
+        f"canary: {canary.get('status', 'none')} "
+        f"variant={canary.get('variant', 'n/a')} score={_fmt_num(canary.get('score'))}"
+    )
+    click.echo(f"experiment decisions: {experiment.get('n_decisions', 0)}")
+    for group in experiment.get("groups", []):
+        click.echo(
+            f"{group['assignment']:14s} n={group['n']:5d} pings={group['n_pings']:4d} "
+            f"capture={_fmt_pct(group.get('outcome_capture_rate'))} "
+            f"avg_reward={_fmt_num(group.get('avg_reward'))}"
+        )
+
+
+@main.command("train-policy")
+@click.option("--since", default="30d", help="Training window: 7d, 30d, etc.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def train_policy(since: str, as_json: bool) -> None:
+    """Run the safe trainer and propose a canary policy; never auto-activates."""
+    from . import trainer as trainer_mod
+
+    result = trainer_mod.run_trainer(window=since)
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    canary = result["canary_policy"]
+    click.echo(
+        f"{canary['status']}: {canary.get('variant') or 'n/a'} "
+        f"score={_fmt_num(canary.get('score'))} overrides={canary.get('overrides') or {}}"
+    )
+
+
+@main.command("activate-canary")
+def activate_canary() -> None:
+    """Activate the currently proposed canary policy."""
+    from . import trainer as trainer_mod
+
+    result = trainer_mod.activate_canary()
+    if not result.get("ok"):
+        raise click.ClickException(result.get("error") or "activation failed")
+    click.echo(f"active_policy: {result['active_policy']}")
+
+
+@main.command("rollback-canary")
+def rollback_canary() -> None:
+    """Rollback the active canary policy to the previous stable policy."""
+    from . import trainer as trainer_mod
+
+    result = trainer_mod.rollback_canary(reason="manual_cli")
+    click.echo(f"active_policy: {result['active_policy']}")
+
+
 @main.command()
 def stop() -> None:
     """Stop a running daemon (by port :7893) and its notch app."""

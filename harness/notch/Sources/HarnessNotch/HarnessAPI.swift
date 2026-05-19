@@ -45,6 +45,49 @@ enum HarnessAPI {
         return await getJSON(url: c.url!)
     }
 
+    static func fetchLab(window: String = "7d") async -> JSON? {
+        var c = URLComponents(url: baseURL().appendingPathComponent("lab"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "window", value: window)]
+        return await getJSON(url: c.url!)
+    }
+
+    static func promoteImplicit(decisionID: String, label: String, implicitLabel: String, implicitDirection: String) async -> Bool {
+        var req = URLRequest(url: baseURL().appendingPathComponent("implicit/promote"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "decision_id": decisionID,
+            "label": label,
+            "implicit_label": implicitLabel,
+            "implicit_direction": implicitDirection,
+            "confidence": 1.0,
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return await ok(req)
+    }
+
+    static func runTrainer(window: String = "30d") async -> JSON? {
+        var req = URLRequest(url: baseURL().appendingPathComponent("trainer/run"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["window": window])
+        return await postJSON(req)
+    }
+
+    static func activateCanary() async -> JSON? {
+        var req = URLRequest(url: baseURL().appendingPathComponent("trainer/activate"))
+        req.httpMethod = "POST"
+        return await postJSON(req)
+    }
+
+    static func rollbackCanary() async -> JSON? {
+        var req = URLRequest(url: baseURL().appendingPathComponent("trainer/rollback"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["reason": "manual_settings"])
+        return await postJSON(req)
+    }
+
     static func saveConfig(_ cfg: JSON) async -> Bool {
         var req = URLRequest(url: baseURL().appendingPathComponent("dashboard/config"))
         req.httpMethod = "POST"
@@ -91,6 +134,22 @@ enum HarnessAPI {
             let obj = try JSONSerialization.jsonObject(with: data)
             return JSON(any: obj)
         } catch { return nil }
+    }
+
+    private static func postJSON(_ req: URLRequest) async -> JSON? {
+        do {
+            let (data, resp) = try await session.data(for: req)
+            guard (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            let obj = try JSONSerialization.jsonObject(with: data)
+            return JSON(any: obj)
+        } catch { return nil }
+    }
+
+    private static func ok(_ req: URLRequest) async -> Bool {
+        do {
+            let (_, resp) = try await session.data(for: req)
+            return (resp as? HTTPURLResponse)?.statusCode == 200
+        } catch { return false }
     }
 }
 
