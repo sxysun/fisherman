@@ -432,6 +432,38 @@ def metrics(since: str, as_json: bool) -> None:
     )
 
 
+@main.command("shadow")
+@click.option("--since", default="24h", help="Window: 24h, 7d, etc.")
+@click.option("--policy", default="rule_v0", help="Policy module to replay.")
+@click.option("--full", "full_dataset", is_flag=True, default=False, help="Evaluate all candidates, not just labeled candidates.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def shadow(since: str, policy: str, full_dataset: bool, as_json: bool) -> None:
+    """Compare simple shadow policy variants against retro labels."""
+    from . import shadow_eval
+
+    report = shadow_eval.compare(policy=policy, since=since, labeled_only=not full_dataset)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+
+    click.echo(
+        f"policy: {report['policy']}  candidates: {report['n_candidates']}  "
+        f"labels: {report['n_labeled_candidates']}  best: {report['best_by_labeled_f1'] or 'n/a'}"
+    )
+    if report.get("labeled_only"):
+        click.echo("mode: labeled candidates only (use --full for full ping-rate replay)")
+    for row in report["variants"]:
+        labels = row["labels"]
+        click.echo(
+            f"{row['variant']:22s} "
+            f"pings={row['n_pings']:5d} rate={_fmt_pct(row['ping_rate']):>6s} "
+            f"agree={_fmt_pct(labels['agreement_rate']):>6s} "
+            f"false_int={_fmt_pct(labels['false_interruption_rate']):>6s} "
+            f"missed={_fmt_pct(labels['missed_help_rate']):>6s} "
+            f"f1={_fmt_num(labels['f1_labeled'])}"
+        )
+
+
 @main.command()
 def stop() -> None:
     """Stop a running daemon (by port :7893) and its notch app."""

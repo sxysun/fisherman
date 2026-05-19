@@ -191,7 +191,7 @@
     <p class="dek">A direct assessment of the proactive-presence harness as of May 19, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
-      <span class="pill">Smoke tests: 28/28 passing</span>
+      <span class="pill">Smoke tests: 30/30 passing</span>
       <span class="pill">Approx. source/docs: 55 files, 10k lines</span>
       <span class="pill">Generated: 2026-05-19</span>
     </div>
@@ -201,7 +201,7 @@
     <div class="card">
       <h2 style="margin-top:0;border-top:0;padding-top:0;">Executive Verdict</h2>
       <p><strong>The harness is architecturally coherent for a local research prototype.</strong> It has the right primitive loop: observe screen state, turn it into a candidate event, gate interventions, realize a goal-aware message, push it through a low-friction UI, capture outcomes, and replay policy decisions offline.</p>
-      <p><strong>It is not yet a frontier-lab-grade harness.</strong> The missing pieces are not mostly UI polish. They are counterfactual evaluation, privacy trust boundaries, experimentation discipline, migration/versioning discipline, and enough labeled data to tune or learn a policy. The first live metrics surface now exists, but it does not yet have enough labels behind it.</p>
+      <p><strong>It is not yet a frontier-lab-grade harness.</strong> The missing pieces are not mostly UI polish. They are randomized holdouts, privacy trust boundaries, experimentation discipline, migration/versioning discipline, and enough labeled data to tune or learn a policy. Live metrics and first-pass shadow comparison now exist, but they do not yet have enough labels behind them.</p>
       <p><strong>Best current use:</strong> dogfood on one machine with explicit Today goals, collect labels, and use the trace data to harden the policy. Do not treat current ping quality as validated.</p>
     </div>
     <div class="score">
@@ -290,8 +290,8 @@
     <tbody>
       <tr>
         <td>Evaluation data</td>
-        <td>Live traces, sparse retro labels, and a metrics endpoint/CLI now report ping rate, outcome capture, agreement, false-interruption rate, and missed-help rate.</td>
-        <td>Gold datasets, human labels, disagreement analysis, held-out evals, and stable policy acceptance criteria.</td>
+        <td>Live traces, sparse retro labels, a metrics endpoint/CLI, and <code>harness shadow</code> now report ping rate, outcome capture, agreement, false-interruption rate, missed-help rate, and simple shadow-policy comparisons.</td>
+        <td>Gold datasets, more human labels, disagreement analysis, randomized holdouts, and stable policy acceptance criteria.</td>
         <td class="status-bad">P0</td>
       </tr>
       <tr>
@@ -366,6 +366,8 @@
         <li>Fixed the retro labeler queue so review sessions are frozen and skip moves forward instead of chasing live latest candidates.</li>
         <li>Added live lab metrics for outcome capture, reward, label agreement, false interruptions, missed help, and data-readiness thresholds.</li>
         <li>Made pending notch delivery idempotent with leases, so a notch crash between poll and outcome does not silently drop a message.</li>
+        <li>Added <code>harness shadow</code> for labeled counterfactual comparison across rule_v0 variants.</li>
+        <li>Made rule_v0 negative-feedback replay use event time instead of wall-clock time.</li>
         <li>Improved replay to use live config, policy state, outcomes, and cooldown simulation.</li>
         <li>URL-encoded Fisherman query tool parameters.</li>
         <li>Switched session-memory timestamp parsing to UTC-safe parsing.</li>
@@ -380,7 +382,7 @@
   </div>
   <div class="card risk-high">
     <h3>P0: Metrics exist, but the sample is too small</h3>
-    <p>The harness now reports false-interruption rate, missed-help rate, agreement, outcome capture, and reward. The remaining problem is data volume and counterfactual validity: a frontier lab would not trust these rates until there are enough labels, held-out slices, and controlled shadow-policy comparisons.</p>
+    <p>The harness now reports false-interruption rate, missed-help rate, agreement, outcome capture, reward, and first-pass shadow-policy comparisons. The remaining problem is data volume and counterfactual validity: a frontier lab would not trust these rates until there are enough labels, held-out slices, and randomized exploration.</p>
   </div>
   <div class="card risk-med">
     <h3>P1: Storage has a typed sidecar, but not a migration contract</h3>
@@ -439,7 +441,7 @@
     <div class="card">
       <h3>Next engineering pass</h3>
       <ul>
-        <li>Add shadow-policy comparison and counterfactual confidence intervals.</li>
+        <li>Add randomized holdout/exploration buckets so counterfactual estimates are not only label-replay based.</li>
         <li>Add launchd install/start/stop for the harness daemon.</li>
         <li>Add live config reload after Settings saves.</li>
         <li>Migrate dashboard/eval read paths from JSONL scans to the SQLite sidecar.</li>

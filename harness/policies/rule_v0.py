@@ -49,8 +49,13 @@ def _snoozed_active(snoozed_until: str | None, event_ts_iso: str | None = None) 
     return event_ts < until_ts
 
 
-def _has_recent_negative_feedback(recent_outcomes: list[dict], backoff_min: float) -> bool:
-    cutoff = time.time() - backoff_min * 60
+def _has_recent_negative_feedback(
+    recent_outcomes: list[dict],
+    backoff_min: float,
+    event_ts_iso: str | None = None,
+) -> bool:
+    event_ts = _iso_to_unix(event_ts_iso) or time.time()
+    cutoff = event_ts - backoff_min * 60
     for outcome in recent_outcomes:
         action = outcome.get("user_action")
         summary = outcome.get("interaction_summary") or {}
@@ -126,7 +131,7 @@ def decide(
     # otherwise one stale dismissal can suppress every future organic ping.
     last_outcomes = recent_outcomes[-3:] if recent_outcomes else []
     backoff_min = float(config.get("negative_feedback_backoff_min", 15))
-    if _has_recent_negative_feedback(last_outcomes, backoff_min):
+    if _has_recent_negative_feedback(last_outcomes, backoff_min, event.ts):
         return _decision(cid, action="no_ping", reasons=["recent_negative_feedback"])
 
     # ── Signal collection (gather ALL applicable reason codes) ────────────

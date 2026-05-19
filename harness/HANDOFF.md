@@ -122,7 +122,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           28 tests; pytest passes
+└── tests/test_smoke.py           30 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -221,6 +221,13 @@ User flow once it's running:
      avg reward, retro-label agreement, false-interruption rate, missed-help
      rate, and readiness thresholds
    - `/metrics?window=24h` exposes the same JSON from the daemon
+
+✅ Shadow-policy comparison
+   - `harness shadow --since 24h` compares rule_v0 variants against retro labels
+   - Default mode evaluates labeled candidates only so it stays interactive
+   - Reports labeled precision/recall/F1, false-interruption rate, missed-help
+     rate, agreement, and Wilson 95% intervals in JSON mode
+   - `--full` replays the full candidate set when ping-rate comparison matters
 
 ✅ Outcome capture rich enough for RL
    - Per outcome: clicked/dismissed/snoozed/timed_out
@@ -414,7 +421,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 28/28
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 30/30
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

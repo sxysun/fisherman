@@ -23,6 +23,7 @@ from harness import scene as scene_mod
 from harness import scene_vlm as scene_vlm_mod
 from harness import schemas
 from harness import server as server_mod
+from harness import shadow_eval as shadow_eval_mod
 from harness import sql_store as sql_store_mod
 from harness import store as store_mod
 
@@ -45,6 +46,7 @@ def test_imports():
     assert model_audit_mod
     assert metrics_mod
     assert server_mod
+    assert shadow_eval_mod
     assert sql_store_mod
 
 
@@ -321,6 +323,39 @@ def test_rule_v0_soft_reject_hover_backoff_is_live_signal():
     blocked = rule_v0.decide(event, mem, soft_reject, cfg)
     assert blocked.action == "no_ping"
     assert "recent_negative_feedback" in blocked.reason_codes
+
+
+def test_rule_v0_negative_feedback_backoff_uses_event_time_for_replay():
+    from policies import rule_v0
+
+    event = schemas.CandidateEvent()
+    event.ts = "2026-05-19T12:10:00Z"
+    event.screen.frame_age_sec = 5.0
+    event.screen.ocr_snippet = "ship harness"
+    event.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
+    mem = schemas.MemorySnapshot.build(
+        recent_apps=["Chrome"],
+        recent_scenes=["reading_browser"],
+        recent_outcomes=[],
+        app_switches_last_15m=0,
+        minutes_on_current_app=95.0,
+    )
+    cfg = {
+        "cooldown_min": 5,
+        "negative_feedback_backoff_min": 15,
+        "quiet_hours_start": 3,
+        "quiet_hours_end": 4,
+        "sensitivity": "responsive",
+        "daily_goal": "ship harness",
+        "allowed_intents": [],
+    }
+    replay_recent = [{"user_action": "dismissed", "ts": "2026-05-19T12:00:00Z"}]
+    replay_stale = [{"user_action": "dismissed", "ts": "2026-05-19T11:00:00Z"}]
+
+    blocked = rule_v0.decide(event, mem, replay_recent, cfg)
+    assert blocked.action == "no_ping"
+    assert "recent_negative_feedback" in blocked.reason_codes
+    assert rule_v0.decide(event, mem, replay_stale, cfg).action == "notch_ping"
 
 
 def test_rule_v0_snooze_expires():
@@ -654,6 +689,56 @@ def test_metrics_computes_label_quality_and_readiness(tmp_path):
         assert report["data_readiness"]["needs_labels_for_personalization"] == 16
     finally:
         store_mod.HARNESS_DIR = old_dir
+
+
+def test_shadow_eval_compares_policy_variants_against_labels(tmp_path):
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "retro_labels.jsonl"
+    outcomes_path = tmp_path / "outcomes.jsonl"
+    candidates = [
+        {
+            "candidate_id": "cand_should_ping",
+            "ts": "2026-05-19T12:00:00Z",
+            "screen": {"frame_age_sec": 5, "ocr_snippet": "TODO ship harness"},
+            "scene": {"label": "coding_with_todo_in_view", "strength": "strong", "source": "rule"},
+            "context": {},
+            "user_pref": {},
+        },
+        {
+            "candidate_id": "cand_should_stay_quiet",
+            "ts": "2026-05-19T12:05:00Z",
+            "screen": {"frame_age_sec": 5, "ocr_snippet": ""},
+            "scene": {"label": "unknown", "strength": "unknown", "source": "unknown"},
+            "context": {},
+            "user_pref": {},
+        },
+    ]
+    labels = [
+        {"candidate_id": "cand_should_ping", "label": "would_help", "ts": "2026-05-19T12:10:00Z"},
+        {
+            "candidate_id": "cand_should_stay_quiet",
+            "label": "good_no_ping",
+            "ts": "2026-05-19T12:11:00Z",
+        },
+    ]
+    candidates_path.write_text("\n".join(json.dumps(row) for row in candidates) + "\n")
+    labels_path.write_text("\n".join(json.dumps(row) for row in labels) + "\n")
+    outcomes_path.write_text("")
+
+    report = shadow_eval_mod.compare(
+        since="365d",
+        dataset=str(candidates_path),
+        labels_path=str(labels_path),
+        outcomes_path=str(outcomes_path),
+        variants={"current": {}},
+    )
+    assert report["n_candidates"] == 2
+    assert report["best_by_labeled_f1"] == "current"
+    current = report["variants"][0]
+    assert current["labels"]["n"] == 2
+    assert current["labels"]["agreement_rate"] == 1.0
+    assert current["labels"]["tp_should_ping_and_pinged"] == 1
+    assert current["labels"]["tn_should_stay_quiet_and_silent"] == 1
 
 
 def test_model_audit_sanitizes_url_and_writes_recent_rows(tmp_path):

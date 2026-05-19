@@ -76,7 +76,7 @@ harness/
 ├── prompts/        Realizer + critic prompts
 ├── notch/          Swift app (HarnessNotch.app)
 ├── eval/           replay.py, score.py (offline policy analysis)
-├── tests/          smoke tests (28/28 passing)
+├── tests/          smoke tests (30/30 passing)
 └── HANDOFF.md      read this for the full picture
 ```
 
@@ -97,6 +97,7 @@ harness dashboard                           open web dashboard (settings duplica
 harness metrics [--since 24h --json]        live outcome + retro-label metrics
 harness storage-backfill [--reset]          mirror JSONL history into harness.db
 harness collect --since 24h                 freeze candidates to datasets/dogfood/
+harness shadow --since 24h [--full]         compare policy variants against labels
 harness replay --policy rule_v0 --since 7d  shadow policy on frozen data
 harness score --predictions reports/...     replay scoring + reward_v2
 ```
