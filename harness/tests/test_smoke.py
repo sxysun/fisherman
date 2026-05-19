@@ -21,6 +21,7 @@ from harness import scene as scene_mod
 from harness import scene_vlm as scene_vlm_mod
 from harness import schemas
 from harness import server as server_mod
+from harness import sql_store as sql_store_mod
 from harness import store as store_mod
 
 
@@ -40,6 +41,7 @@ def test_imports():
     assert image_redaction_mod
     assert model_audit_mod
     assert server_mod
+    assert sql_store_mod
 
 
 def test_schema_roundtrip():
@@ -382,6 +384,88 @@ def test_store_attaches_outcome_to_trace(tmp_path):
         rows = store_mod.tail_jsonl("traces.jsonl")
         assert rows[0]["outcome"] == outcome
         assert rows[0]["reward"] == reward
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        candidate = {
+            "candidate_id": "cand_sql",
+            "ts": "2026-05-19T12:00:00Z",
+            "screen": {"frontmost_app": "Chrome", "sensitive_scene": False},
+            "scene": {"label": "reading_browser", "source": "rule"},
+        }
+        decision = {
+            "decision_id": "pd_sql",
+            "candidate_id": "cand_sql",
+            "ts": "2026-05-19T12:00:01Z",
+            "policy_version": "rule_v0",
+            "action": "notch_ping",
+            "intent": "goal_aware",
+            "reason_codes": ["reading_browser"],
+            "confidence": 0.7,
+        }
+        trace = {
+            "trace_id": "tr_sql",
+            "ts": "2026-05-19T12:00:02Z",
+            "state": {"candidate": candidate},
+            "action": decision,
+            "outcome": None,
+            "reward": None,
+        }
+        outcome = {
+            "decision_id": "pd_sql",
+            "user_action": "dismissed",
+            "latency_from_display_ms": 1200,
+            "interaction_summary": {"intent_signal": "rejection_considered"},
+            "ts": "2026-05-19T12:00:03Z",
+            "reward": {"version": "v2", "value": -0.8},
+        }
+        model_call = {
+            "model_call_id": "mc_sql",
+            "ts": "2026-05-19T12:00:04Z",
+            "purpose": "realizer",
+            "model": "demo",
+            "status": "ok",
+            "latency_ms": 123,
+            "tokens_in": 10,
+            "tokens_out": 3,
+            "vision_used": True,
+            "image_bytes": 42,
+        }
+        label = {
+            "candidate_id": "cand_sql",
+            "decision_id": "pd_sql",
+            "label": "bad",
+            "confidence": 0.9,
+            "ts": "2026-05-19T12:00:05Z",
+        }
+
+        store_mod.append_jsonl("candidates.jsonl", candidate)
+        store_mod.append_jsonl("decisions.jsonl", decision)
+        store_mod.append_jsonl("traces.jsonl", trace)
+        store_mod.append_jsonl("outcomes.jsonl", outcome)
+        store_mod.append_jsonl("model_calls.jsonl", model_call)
+        store_mod.append_jsonl("retro_labels.jsonl", label)
+
+        assert sql_store_mod.db_path().exists()
+        assert sql_store_mod.count_rows("event_log") == 6
+        assert sql_store_mod.count_rows("candidates") == 1
+        assert sql_store_mod.count_rows("decisions") == 1
+        assert sql_store_mod.count_rows("traces") == 1
+        assert sql_store_mod.count_rows("outcomes") == 1
+        assert sql_store_mod.count_rows("model_calls") == 1
+        assert sql_store_mod.count_rows("retro_labels") == 1
+
+        reward = {"version": "v2", "value": -0.8}
+        assert store_mod.attach_outcome_to_trace("pd_sql", outcome, reward)
+        trace_rows = sql_store_mod.recent_rows("traces", limit=1)
+        assert trace_rows[0]["outcome_action"] == "dismissed"
+        assert trace_rows[0]["reward_value"] == -0.8
+        assert '"user_action":"dismissed"' in trace_rows[0]["payload_json"]
     finally:
         store_mod.HARNESS_DIR = old_dir
 

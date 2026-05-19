@@ -35,7 +35,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a rule-based gate that returns `{action, reason_codes, why_now}`, and if ping is warranted, calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app picks it up via HTTP polling and renders a pill. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards in `~/.harness/traces.jsonl`.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a rule-based gate that returns `{action, reason_codes, why_now}`, and if ping is warranted, calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app picks it up via HTTP polling and renders a pill. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards. Runtime events are still written to JSONL for debuggability/export and are mirrored into `~/.harness/harness.db` for indexed SQLite queries.
 
 ## Configuration
 
@@ -76,7 +76,7 @@ harness/
 ├── prompts/        Realizer + critic prompts
 ├── notch/          Swift app (HarnessNotch.app)
 ├── eval/           replay.py, score.py (offline policy analysis)
-├── tests/          smoke tests (24/24 passing)
+├── tests/          smoke tests (25/25 passing)
 └── HANDOFF.md      read this for the full picture
 ```
 
@@ -94,6 +94,7 @@ harness snooze 30m | harness unsnooze
 harness mute INTENT | harness unmute INTENT [--all]
 harness label                               open retro labeler in browser
 harness dashboard                           open web dashboard (settings duplicates this)
+harness storage-backfill [--reset]          mirror JSONL history into harness.db
 harness collect --since 24h                 freeze candidates to datasets/dogfood/
 harness replay --policy rule_v0 --since 7d  shadow policy on frozen data
 harness score --predictions reports/...     metrics + reward_v2
@@ -102,6 +103,8 @@ harness score --predictions reports/...     metrics + reward_v2
 ## State storage
 
 Runtime state lives outside the repo at `~/.harness/`. See `HANDOFF.md` for the full layout.
+
+The canonical append path still writes JSONL files such as `candidates.jsonl`, `decisions.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, and `model_calls.jsonl`. Each append is also mirrored into `~/.harness/harness.db`, which keeps typed tables for candidates, decisions, traces, outcomes, model calls, labels, plus a generic `event_log`. Late outcome attachment updates both `traces.jsonl` and the typed SQLite trace row. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
 
 ## Tests
 

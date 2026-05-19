@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any, Iterator, Optional
 
 
 HARNESS_DIR = Path(os.path.expanduser("~/.harness"))
+log = logging.getLogger(__name__)
 
 
 def ensure_dirs() -> None:
@@ -28,6 +30,12 @@ def append_jsonl(filename: str, row: dict) -> None:
     p = HARNESS_DIR / filename
     with open(p, "a") as f:
         f.write(json.dumps(row, default=str) + "\n")
+    try:
+        from . import sql_store
+
+        sql_store.mirror_jsonl_row(filename, row)
+    except Exception as e:
+        log.warning("sql_mirror_failed filename=%s error=%s", filename, e)
 
 
 def attach_outcome_to_trace(decision_id: str, outcome: dict, reward: dict | None = None) -> bool:
@@ -70,6 +78,12 @@ def attach_outcome_to_trace(decision_id: str, outcome: dict, reward: dict | None
         for row in rows:
             f.write(json.dumps(row, default=str) + "\n")
     os.replace(tmp, p)
+    try:
+        from . import sql_store
+
+        sql_store.update_trace_outcome(decision_id, outcome, reward)
+    except Exception as e:
+        log.warning("sql_trace_update_failed decision_id=%s error=%s", decision_id, e)
     return True
 
 

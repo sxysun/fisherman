@@ -77,7 +77,8 @@ harness/
 │   │                              unless privacy preflight suppresses it
 │   ├── critic.py                 regex + LLM veto
 │   ├── push.py                   notch_pill or terminal_notifier backend
-│   ├── store.py                  jsonl append/tail
+│   ├── store.py                  jsonl append/tail + SQLite mirroring hook
+│   ├── sql_store.py              typed SQLite sidecar and JSONL backfill helpers
 │   ├── reward.py                 signal-derived reward (replaces ad-hoc weights)
 │   ├── privacy.py                local OCR secret detection + text redaction
 │   ├── image_redaction.py        local Apple Vision box masking for screenshots
@@ -120,7 +121,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           24 tests; pytest passes
+└── tests/test_smoke.py           25 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -135,6 +136,8 @@ State on disk (outside the repo):
 ├── outcomes.jsonl                user reactions + interaction_summary
 ├── traces.jsonl                  joined view per tick
 ├── retro_labels.jsonl            from the labeling UI
+├── model_calls.jsonl             privacy-safe model-call audit rows
+├── harness.db                    SQLite sidecar with typed query tables
 ├── memory/
 │   ├── session.jsonl
 │   └── snapshots/mem_<sha>.json  content-addressed
@@ -227,6 +230,14 @@ User flow once it's running:
      bytes, privacy flags, and hashes/counts only
    - Raw prompts, screenshots, OCR text, API keys, and response text are not
      written to the audit ledger
+
+✅ Typed event-store sidecar
+   - JSONL remains the compatibility/export path for local debugging
+   - Every JSONL append is mirrored into `~/.harness/harness.db`
+   - SQLite stores a generic `event_log` plus typed candidates, decisions,
+     traces, outcomes, model calls, and retro labels
+   - Late outcome attachment updates both `traces.jsonl` and the typed trace row
+   - `harness storage-backfill --reset` rebuilds the sidecar from existing JSONL
 ```
 
 ---
@@ -385,7 +396,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 24/24
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 25/25
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

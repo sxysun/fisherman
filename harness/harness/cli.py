@@ -69,6 +69,9 @@ def main() -> None:
 def install(force: bool, build_notch: bool) -> None:
     """Create ~/.harness/, write default config, init empty state, build notch app."""
     ensure_dirs()
+    from . import sql_store
+
+    sql_store.ensure_db()
     cfg_path = config_mod.write_default(force=force)
     state = read_policy_state()
     if "active_policy" not in state:
@@ -79,6 +82,7 @@ def install(force: bool, build_notch: bool) -> None:
     write_policy_state(state)
     click.echo(f"config: {cfg_path}{'  (kept existing — pass --force to overwrite)' if (cfg_path.exists() and not force) else ''}")
     click.echo(f"state:  {HARNESS_DIR}")
+    click.echo(f"store:  {sql_store.db_path()}")
     if build_notch:
         click.echo("")
         _build_notch()
@@ -149,6 +153,28 @@ def status() -> None:
         click.echo(f"last outcome:  {o.get('user_action')} for {o.get('decision_id')}")
     else:
         click.echo("last outcome:  (none)")
+
+
+@main.command("storage-backfill")
+@click.option("--reset", is_flag=True, default=False, help="Clear SQLite tables before replaying JSONL.")
+def storage_backfill(reset: bool) -> None:
+    """Mirror existing JSONL logs into the SQLite sidecar."""
+    from . import sql_store
+
+    filenames = [
+        "candidates.jsonl",
+        "decisions.jsonl",
+        "traces.jsonl",
+        "outcomes.jsonl",
+        "model_calls.jsonl",
+        "retro_labels.jsonl",
+        "memory/session.jsonl",
+    ]
+    counts = sql_store.backfill_jsonl_files(filenames, reset=reset)
+    click.echo(f"database: {sql_store.db_path()}")
+    for filename, n_rows in counts.items():
+        click.echo(f"{filename:20s} {n_rows:6d}")
+    click.echo(f"{'event_log':20s} {sql_store.count_rows('event_log'):6d}")
 
 
 @main.command()
