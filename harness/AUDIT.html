@@ -191,7 +191,7 @@
     <p class="dek">A direct assessment of the proactive-presence harness as of May 19, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
-      <span class="pill">Smoke tests: 30/30 passing</span>
+      <span class="pill">Smoke tests: passing</span>
       <span class="pill">Approx. source/docs: 55 files, 10k lines</span>
       <span class="pill">Generated: 2026-05-19</span>
     </div>
@@ -201,14 +201,14 @@
     <div class="card">
       <h2 style="margin-top:0;border-top:0;padding-top:0;">Executive Verdict</h2>
       <p><strong>The harness is architecturally coherent for a local research prototype.</strong> It has the right primitive loop: observe screen state, turn it into a candidate event, gate interventions, realize a goal-aware message, push it through a low-friction UI, capture outcomes, and replay policy decisions offline.</p>
-      <p><strong>It is not yet a frontier-lab-grade harness.</strong> The missing pieces are not mostly UI polish. They are randomized holdouts, privacy trust boundaries, experimentation discipline, migration/versioning discipline, and enough labeled data to tune or learn a policy. Live metrics and first-pass shadow comparison now exist, but they do not yet have enough labels behind them.</p>
+      <p><strong>It is now a serious local dogfood harness, but not yet a validated policy.</strong> The engineering gaps called out in the first audit now have concrete implementations: deterministic holdouts, endpoint trust boundaries, native metrics, launchd packaging, notch respawn, and SQLite-backed read paths. The remaining gap is evidence: enough labels, outcomes, and frozen evaluation slices to justify policy changes.</p>
       <p><strong>Best current use:</strong> dogfood on one machine with explicit Today goals, collect labels, and use the trace data to harden the policy. Do not treat current ping quality as validated.</p>
     </div>
     <div class="score">
-      <div class="num">6/10</div>
+      <div class="num">7/10</div>
       <div class="label">research-harness maturity</div>
       <div style="height:12px"></div>
-      <div class="label">Dogfood: yes<br>Production: no<br>Lab-grade eval: not yet</div>
+      <div class="label">Dogfood: yes<br>Validated policy: no<br>Lab-grade eval: data-gated</div>
     </div>
   </section>
 
@@ -290,26 +290,26 @@
     <tbody>
       <tr>
         <td>Evaluation data</td>
-        <td>Live traces, sparse retro labels, a metrics endpoint/CLI, and <code>harness shadow</code> now report ping rate, outcome capture, agreement, false-interruption rate, missed-help rate, and simple shadow-policy comparisons.</td>
-        <td>Gold datasets, more human labels, disagreement analysis, randomized holdouts, and stable policy acceptance criteria.</td>
+        <td>Live traces, sparse retro labels, native metrics, a metrics endpoint/CLI, deterministic holdouts, and <code>harness shadow</code> now report ping rate, outcome capture, agreement, false-interruption rate, missed-help rate, and simple shadow-policy comparisons.</td>
+        <td>Gold datasets, more human labels, disagreement analysis, and stable policy acceptance criteria.</td>
         <td class="status-bad">P0</td>
       </tr>
       <tr>
         <td>Counterfactual policy eval</td>
-        <td>Replay can rerun the gate over candidates, but it does not model realizer quality, user mood, delayed outcomes, or randomized holdout.</td>
-        <td>Shadow policies, exploration buckets, calibrated propensities, IPS/doubly robust estimates where appropriate.</td>
+        <td>Replay can rerun the gate over candidates and live decisions now carry holdout/exploration assignment metadata, but replay still does not model realizer quality, user mood, or delayed outcomes.</td>
+        <td>Calibrated propensities, IPS/doubly robust estimates where appropriate, and policy promotion criteria.</td>
         <td class="status-bad">P0</td>
       </tr>
       <tr>
         <td>Privacy before network</td>
-        <td>Local OCR preflight redacts secret-like text. Sensitive screenshots are locally masked using Apple Vision text boxes before realizer model calls; if masking fails, the image is suppressed.</td>
-        <td>Token-level masking beyond whole text-line boxes, per-domain allow/deny policy, and explicit endpoint trust boundaries.</td>
+        <td>Local OCR preflight redacts secret-like text. Sensitive screenshots are locally masked using Apple Vision text boxes before model calls; if masking fails, the image is suppressed. An endpoint allowlist blocks untrusted model hosts before network calls.</td>
+        <td>Token-level masking beyond whole text-line boxes and per-domain allow/deny policy.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>
         <td>Persistent storage</td>
-        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, outcomes, labels, and model calls. A CLI backfill can rebuild the sidecar from JSONL. Pending notch delivery is leased and completed on outcome.</td>
-        <td>Formal migrations, read-path migration, retention/compaction, and automated recovery/backfill validation.</td>
+        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, outcomes, labels, and model calls. Dashboard, metrics, replay, score, and shadow prefer SQLite payload rows. A CLI backfill can rebuild the sidecar from JSONL. Pending notch delivery is leased and completed on outcome.</td>
+        <td>Formal migrations, retention/compaction, and automated recovery/backfill validation.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>
@@ -382,11 +382,11 @@
   </div>
   <div class="card risk-high">
     <h3>P0: Metrics exist, but the sample is too small</h3>
-    <p>The harness now reports false-interruption rate, missed-help rate, agreement, outcome capture, reward, and first-pass shadow-policy comparisons. The remaining problem is data volume and counterfactual validity: a frontier lab would not trust these rates until there are enough labels, held-out slices, and randomized exploration.</p>
+    <p>The harness now reports false-interruption rate, missed-help rate, agreement, outcome capture, reward, first-pass shadow-policy comparisons, and deterministic holdouts. The remaining problem is data volume: a frontier lab would not trust these rates until there are enough labels and held-out slices.</p>
   </div>
   <div class="card risk-med">
     <h3>P1: Storage has a typed sidecar, but not a migration contract</h3>
-    <p>The harness now mirrors JSONL into SQLite, which is enough for indexed local queries and audits. It still needs explicit migrations, backfill/recovery checks, retention policy, and a gradual read-path migration before storage can be treated as lab-grade infrastructure.</p>
+    <p>The harness now mirrors JSONL into SQLite and dashboard/metrics/replay/score/shadow prefer SQLite payload rows. It still needs explicit migrations, backfill/recovery checks, and retention policy before storage can be treated as long-lived lab infrastructure.</p>
   </div>
   <div class="card risk-med">
     <h3>P1: Replay is still not the real system</h3>
@@ -404,7 +404,7 @@
     <tbody>
       <tr>
         <td>Dogfood-ready</td>
-        <td>Daemon starts via launchd, survives app restarts, no hardcoded secrets, no update-check leakage, and 20-30 retro labels collected.</td>
+        <td>Daemon starts via launchd, survives notch restarts, no hardcoded secrets, no update-check leakage, and the labeler clearly shows how many retro labels remain before personalization.</td>
       </tr>
       <tr>
         <td>Policy-eval-ready</td>
@@ -412,7 +412,7 @@
       </tr>
       <tr>
         <td>Privacy-ready</td>
-        <td>OCR preflight, line-box masking, and model-call audit logs exist. Remaining bar: token-level masking, explicit per-provider config, and sensitive-domain suppression.</td>
+        <td>OCR preflight, line-box masking, endpoint allowlist, and model-call audit logs exist. Remaining bar: token-level masking, explicit per-provider policies, and sensitive-domain suppression.</td>
       </tr>
       <tr>
         <td>Personalization-ready</td>
@@ -441,11 +441,10 @@
     <div class="card">
       <h3>Next engineering pass</h3>
       <ul>
-        <li>Add randomized holdout/exploration buckets so counterfactual estimates are not only label-replay based.</li>
-        <li>Add launchd install/start/stop for the harness daemon.</li>
         <li>Add live config reload after Settings saves.</li>
-        <li>Migrate dashboard/eval read paths from JSONL scans to the SQLite sidecar.</li>
-        <li>Add token-level OCR boxes, sensitive-domain suppression, and per-provider trust boundaries.</li>
+        <li>Add explicit SQLite schema migrations and retention policy.</li>
+        <li>Add token-level OCR boxes and sensitive-domain suppression.</li>
+        <li>Add confidence-weighted few-shot examples once there are enough labels.</li>
       </ul>
     </div>
     <div class="card">
@@ -453,8 +452,8 @@
       <ul>
         <li>Freeze daily datasets.</li>
         <li>Add confidence-weighted label review and annotator disagreement handling.</li>
-        <li>Promote the metrics endpoint into the native Diagnostics view.</li>
-        <li>Introduce randomized holdout or at least randomized shadow-policy scoring.</li>
+        <li>Analyze holdout assignments against retro labels and outcomes.</li>
+        <li>Define promotion criteria for changing holdout/exploration rates.</li>
       </ul>
     </div>
     <div class="card">

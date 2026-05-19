@@ -16,6 +16,7 @@ import structlog
 from . import config as config_mod
 from . import critic as critic_mod
 from . import daemon as daemon_mod
+from . import service as service_mod
 from . import push as push_mod
 from . import realizer as realizer_mod
 from .candidate import synthesize
@@ -134,6 +135,43 @@ def start(foreground: bool) -> None:
         click.echo("\nstopped.")
 
 
+@main.command("install-launchd")
+@click.option("--load/--no-load", "load_service", default=True, help="Load/restart the launchd job after writing the plist.")
+def install_launchd(load_service: bool) -> None:
+    """Install a launchd job so the harness daemon survives restarts."""
+    path = service_mod.write_plist(repo_dir=HARNESS_REPO)
+    click.echo(f"plist: {path}")
+    if load_service:
+        try:
+            service_mod.load(path)
+            click.echo(f"loaded: {service_mod.LABEL}")
+        except subprocess.CalledProcessError as e:
+            raise click.ClickException((e.stderr or e.stdout or str(e)).strip())
+
+
+@main.command("uninstall-launchd")
+def uninstall_launchd() -> None:
+    """Unload and remove the harness launchd job."""
+    result = service_mod.unload(remove=True)
+    if result.returncode == 0:
+        click.echo(f"unloaded: {service_mod.LABEL}")
+    else:
+        msg = (result.stderr or result.stdout or "").strip()
+        click.echo(f"launchctl bootout returned {result.returncode}: {msg}")
+    click.echo(f"removed: {service_mod.plist_path()}")
+
+
+@main.command("launchd-status")
+def launchd_status() -> None:
+    """Print launchd status for the harness daemon job."""
+    result = service_mod.status()
+    if result.stdout:
+        click.echo(result.stdout.rstrip())
+    if result.stderr:
+        click.echo(result.stderr.rstrip(), err=True)
+    raise SystemExit(result.returncode)
+
+
 @main.command()
 def status() -> None:
     """Show daemon state, last decision, snooze/mute settings."""
@@ -235,7 +273,11 @@ def test(intent: str, push: bool, message: Optional[str], app: Optional[str]) ->
         click.echo("calling realizer...")
 
         r = await realizer_mod.realize(
-            intent=intent, event=event, memory=mem, fisherman=fc, config=cfg["realizer"]
+            intent=intent,
+            event=event,
+            memory=mem,
+            fisherman=fc,
+            config=dict(cfg["realizer"]) | {"privacy": cfg.get("privacy", {})},
         )
         click.echo(f"  latency:  {r.latency_ms} ms")
         click.echo(f"  tokens:   in={r.tokens_in} out={r.tokens_out}")
@@ -258,7 +300,9 @@ def test(intent: str, push: bool, message: Optional[str], app: Optional[str]) ->
 
         click.echo("")
         click.echo("running critic...")
-        crit = await critic_mod.check(r.message, event, cfg.get("critic", {}))
+        critic_cfg = dict(cfg.get("critic", {}))
+        critic_cfg["privacy"] = cfg.get("privacy", {})
+        crit = await critic_mod.check(r.message, event, critic_cfg)
         verdict = "PASS" if crit.pass_ else "BLOCK"
         click.echo(f"  {verdict}")
         if crit.flags:

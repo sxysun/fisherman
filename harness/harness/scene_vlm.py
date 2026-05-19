@@ -27,6 +27,7 @@ import aiohttp
 
 from . import model_audit
 from . import privacy
+from . import trust
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, SceneTag
 
@@ -155,6 +156,29 @@ async def maybe_tag(
         return None
     api_key = config.get("api_key") or os.environ.get(config.get("api_key_env", ""), "")
 
+    from .realizer import chat_completions_url
+    endpoint = chat_completions_url(base_url)
+    trust_check = trust.check_model_endpoint(base_url, config.get("privacy"))
+    if not trust_check.allowed:
+        model_audit.record_model_call(
+            purpose="scene_vlm",
+            base_url=base_url,
+            endpoint=endpoint,
+            model=model,
+            candidate_id=event.candidate_id,
+            prompt_version="scene_tagger_v1",
+            status="blocked_untrusted_endpoint",
+            vision_used=False,
+            image_bytes=0,
+            error=trust_check.reason,
+            extra={
+                "signal_hash": sig[1],
+                "prompt_hash": model_audit.text_hash(SYSTEM_PROMPT),
+                "trust": trust_check.to_dict(),
+            },
+        )
+        return None
+
     img_b64, image_bytes_n = await _fetch_image_b64(fc)
     if not img_b64:
         return None
@@ -183,8 +207,6 @@ async def maybe_tag(
     }
 
     timeout_sec = float(config.get("timeout_sec", 12))
-    from .realizer import chat_completions_url
-    endpoint = chat_completions_url(base_url)
     started = time.monotonic()
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec)) as s:

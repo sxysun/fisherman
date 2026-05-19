@@ -7,6 +7,7 @@ import Foundation
 final class SettingsModel: ObservableObject {
     // Live state from /dashboard/data
     @Published var data: JSON?
+    @Published var metrics: JSON?
     // Policy state from /status
     @Published var snoozedUntil: String?
 
@@ -18,6 +19,10 @@ final class SettingsModel: ObservableObject {
     @Published var negativeFeedbackBackoffMin: Double = 15
     @Published var quietStart: Int = 22
     @Published var quietEnd: Int = 8
+    @Published var experimentEnabled: Bool = true
+    @Published var experimentSalt: String = "local_v1"
+    @Published var holdoutRate: Double = 0.02
+    @Published var explorePingRate: Double = 0.0
 
     @Published var realizerBaseURL: String = ""
     @Published var realizerModel: String = ""
@@ -27,6 +32,8 @@ final class SettingsModel: ObservableObject {
     @Published var includeVision: Bool = true
     @Published var skipVisionOnSensitiveOCR: Bool = true
     @Published var redactSensitiveScreenshots: Bool = true
+    @Published var blockUntrustedModelHosts: Bool = true
+    @Published var allowedModelHostsText: String = "3.82.134.133:8642, openrouter.ai, localhost, 127.0.0.1, ::1"
 
     @Published var rewardWelcomed: Double = 3.0
     @Published var rewardAnnoying: Double = -5.0
@@ -73,6 +80,10 @@ final class SettingsModel: ObservableObject {
             $negativeFeedbackBackoffMin.map { _ in () }.eraseToAnyPublisher(),
             $quietStart.map { _ in () }.eraseToAnyPublisher(),
             $quietEnd.map { _ in () }.eraseToAnyPublisher(),
+            $experimentEnabled.map { _ in () }.eraseToAnyPublisher(),
+            $experimentSalt.map { _ in () }.eraseToAnyPublisher(),
+            $holdoutRate.map { _ in () }.eraseToAnyPublisher(),
+            $explorePingRate.map { _ in () }.eraseToAnyPublisher(),
             $realizerBaseURL.map { _ in () }.eraseToAnyPublisher(),
             $realizerModel.map { _ in () }.eraseToAnyPublisher(),
             $realizerApiKey.map { _ in () }.eraseToAnyPublisher(),
@@ -81,6 +92,8 @@ final class SettingsModel: ObservableObject {
             $includeVision.map { _ in () }.eraseToAnyPublisher(),
             $skipVisionOnSensitiveOCR.map { _ in () }.eraseToAnyPublisher(),
             $redactSensitiveScreenshots.map { _ in () }.eraseToAnyPublisher(),
+            $blockUntrustedModelHosts.map { _ in () }.eraseToAnyPublisher(),
+            $allowedModelHostsText.map { _ in () }.eraseToAnyPublisher(),
             $rewardWelcomed.map { _ in () }.eraseToAnyPublisher(),
             $rewardAnnoying.map { _ in () }.eraseToAnyPublisher(),
             $rewardPrivacy.map { _ in () }.eraseToAnyPublisher(),
@@ -102,8 +115,10 @@ final class SettingsModel: ObservableObject {
         async let d = HarnessAPI.fetchData()
         async let c = HarnessAPI.fetchConfig()
         async let p = HarnessAPI.fetchPolicyState()
-        let (data, config, policy) = await (d, c, p)
+        async let m = HarnessAPI.fetchMetrics()
+        let (data, config, policy, metrics) = await (d, c, p, m)
         self.data = data
+        self.metrics = metrics
         self.rawConfig = config
         if let p = policy {
             self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
@@ -122,7 +137,8 @@ final class SettingsModel: ObservableObject {
             self.recentRealizations = (data["recent_realizations"].list).compactMap { $0 as? [String: Any] }
             self.recentModelCalls = (data["recent_model_calls"].list).compactMap { $0 as? [String: Any] }
         }
-        self.statusLine = "daemon ok · \(data?["n_candidates"].int ?? 0) candidates / \(data?["n_decisions"].int ?? 0) decisions today"
+        let labelCount = metrics?["labels"]["n"].int ?? 0
+        self.statusLine = "daemon ok · \(data?["n_candidates"].int ?? 0) candidates / \(data?["n_decisions"].int ?? 0) decisions · \(labelCount) labels"
         self.dirty = false
     }
 
@@ -135,9 +151,11 @@ final class SettingsModel: ObservableObject {
                 // Refresh non-editable data only, don't clobber user edits.
                 let d = await HarnessAPI.fetchData()
                 let p = await HarnessAPI.fetchPolicyState()
+                let m = await HarnessAPI.fetchMetrics()
                 await MainActor.run {
                     guard let self = self else { return }
                     self.data = d
+                    self.metrics = m
                     if let p = p {
                         self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
                         self.intentsMuted = Set(p["muted_intents"].list.compactMap { $0 as? String })
@@ -151,6 +169,8 @@ final class SettingsModel: ObservableObject {
                         self.recentRealizations = (data["recent_realizations"].list).compactMap { $0 as? [String: Any] }
                         self.recentModelCalls = (data["recent_model_calls"].list).compactMap { $0 as? [String: Any] }
                     }
+                    let labelCount = m?["labels"]["n"].int ?? 0
+                    self.statusLine = "daemon ok · \(d?["n_candidates"].int ?? 0) candidates / \(d?["n_decisions"].int ?? 0) decisions · \(labelCount) labels"
                 }
             }
         }
@@ -171,6 +191,12 @@ final class SettingsModel: ObservableObject {
         quietStart = c["gate"]["quiet_hours_start"].int
         quietEnd = c["gate"]["quiet_hours_end"].int
 
+        let exp = c["experiment"]
+        experimentEnabled = exp["enabled"].raw is NSNull ? true : exp["enabled"].bool
+        experimentSalt = exp["salt"].string.isEmpty ? "local_v1" : exp["salt"].string
+        holdoutRate = exp["holdout_rate"].raw is NSNull ? 0.02 : exp["holdout_rate"].double
+        explorePingRate = exp["explore_ping_rate"].raw is NSNull ? 0.0 : exp["explore_ping_rate"].double
+
         realizerBaseURL = c["realizer"]["base_url"].string
         realizerModel = c["realizer"]["model"].string
         realizerApiKey = c["realizer"]["api_key"].string
@@ -183,6 +209,15 @@ final class SettingsModel: ObservableObject {
         redactSensitiveScreenshots = c["realizer"]["redact_sensitive_screenshots"].raw is NSNull
             ? true
             : c["realizer"]["redact_sensitive_screenshots"].bool
+
+        let privacy = c["privacy"]
+        blockUntrustedModelHosts = privacy["block_untrusted_model_hosts"].raw is NSNull
+            ? true
+            : privacy["block_untrusted_model_hosts"].bool
+        let allowed = privacy["allowed_model_hosts"].list.compactMap { $0 as? String }
+        if !allowed.isEmpty {
+            allowedModelHostsText = allowed.joined(separator: ", ")
+        }
 
         rewardWelcomed = c["reward"]["weights"]["welcomed"].double
         rewardAnnoying = c["reward"]["weights"]["annoying"].double
@@ -215,6 +250,15 @@ final class SettingsModel: ObservableObject {
         c["gate"]["quiet_hours_start"] = JSON(any: quietStart)
         c["gate"]["quiet_hours_end"] = JSON(any: quietEnd)
 
+        var expBlock = c["experiment"].dict
+        expBlock["enabled"] = experimentEnabled
+        expBlock["salt"] = experimentSalt.isEmpty ? "local_v1" : experimentSalt
+        expBlock["holdout_rate"] = holdoutRate
+        expBlock["explore_ping_rate"] = explorePingRate
+        expBlock["respect_hard_gates"] = (expBlock["respect_hard_gates"] as? Bool) ?? true
+        expBlock["explore_eligible_reasons"] = (expBlock["explore_eligible_reasons"] as? [String]) ?? ["no_clear_help"]
+        c["experiment"] = JSON(any: expBlock)
+
         c["realizer"]["base_url"] = JSON(any: realizerBaseURL)
         c["realizer"]["model"] = JSON(any: realizerModel)
         c["realizer"]["api_key"] = JSON(any: realizerApiKey)
@@ -223,6 +267,15 @@ final class SettingsModel: ObservableObject {
         c["realizer"]["include_vision"] = JSON(any: includeVision)
         c["realizer"]["skip_vision_on_sensitive_ocr"] = JSON(any: skipVisionOnSensitiveOCR)
         c["realizer"]["redact_sensitive_screenshots"] = JSON(any: redactSensitiveScreenshots)
+
+        var privacyBlock = c["privacy"].dict
+        privacyBlock["block_untrusted_model_hosts"] = blockUntrustedModelHosts
+        privacyBlock["allow_local_model_hosts"] = (privacyBlock["allow_local_model_hosts"] as? Bool) ?? true
+        privacyBlock["allowed_model_hosts"] = allowedModelHostsText
+            .split { $0 == "," || $0 == "\n" || $0 == " " || $0 == "\t" }
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        c["privacy"] = JSON(any: privacyBlock)
 
         var rewardBlock = c["reward"].dict
         var weights = (rewardBlock["weights"] as? [String: Any]) ?? [:]

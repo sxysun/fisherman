@@ -221,6 +221,9 @@ User flow once it's running:
      avg reward, retro-label agreement, false-interruption rate, missed-help
      rate, and readiness thresholds
    - `/metrics?window=24h` exposes the same JSON from the daemon
+   - Native Settings -> Status now shows the live lab counters and label
+     readiness, so the user can tell whether the harness is learning or only
+     collecting sparse anecdotes
 
 ✅ Shadow-policy comparison
    - `harness shadow --since 24h` compares rule_v0 variants against retro labels
@@ -228,6 +231,15 @@ User flow once it's running:
    - Reports labeled precision/recall/F1, false-interruption rate, missed-help
      rate, agreement, and Wilson 95% intervals in JSON mode
    - `--full` replays the full candidate set when ping-rate comparison matters
+
+✅ Deterministic experiment assignment
+   - `[experiment]` config is merged into old local configs automatically
+   - 2% default holdout suppresses a small fraction of would-ping decisions
+     and logs `counterfactual_action="notch_ping"`
+   - Exploration pings are implemented and logged but default to 0 because
+     random interruptions should be explicitly opted into
+   - Settings -> Behavior exposes enabled, salt, holdout rate, and exploration
+     rate
 
 ✅ Outcome capture rich enough for RL
    - Per outcome: clicked/dismissed/snoozed/timed_out
@@ -240,6 +252,12 @@ User flow once it's running:
    - Realizer/tool/critic OCR snippets are redacted before network calls
    - Sensitive frames are masked locally using Apple Vision text boxes before
      screenshot model calls; if masking fails, image attachment is suppressed
+
+✅ Model endpoint trust boundary
+   - `[privacy]` config has an allowlist for model hosts
+   - Realizer, scene VLM, and LLM critic block untrusted endpoints before
+     fetching screenshots or making network calls
+   - Settings -> Model exposes the block toggle and allowed-host list
 
 ✅ Model-call audit ledger
    - `~/.harness/model_calls.jsonl` records realizer, scene VLM, and LLM critic
@@ -255,6 +273,8 @@ User flow once it's running:
      traces, outcomes, model calls, and retro labels
    - Late outcome attachment updates both `traces.jsonl` and the typed trace row
    - `harness storage-backfill --reset` rebuilds the sidecar from existing JSONL
+   - Dashboard, metrics, replay, score, and shadow comparison prefer typed
+     SQLite payload rows and fall back to JSONL when the sidecar is absent
 
 ✅ Idempotent pending delivery
    - `/pending` now leases the oldest pending payload instead of deleting it
@@ -262,6 +282,12 @@ User flow once it's running:
    - `/outcome` removes the pending payload only after feedback is recorded
    - If HarnessNotch crashes between poll and outcome, the lease expires and
      the message can be claimed again
+
+✅ Launchd + notch restartability
+   - `harness install-launchd` writes and loads
+     `~/Library/LaunchAgents/com.fisherman.harness.plist`
+   - `harness launchd-status` and `harness uninstall-launchd` are available
+   - The daemon relaunches HarnessNotch if the notch subprocess exits
 ```
 
 ---
@@ -357,8 +383,9 @@ User flow once it's running:
 10. **Inspector mode in the notch.** Cmd-click the pill while expanded
     to see history of last 10 decisions with reason_codes. Useful debugging.
 
-11. **Auto-restart on crash.** Daemon doesn't currently relaunch the
-    notch app if it crashes. Add a heartbeat / respawn.
+11. **Config hot reload.** The remaining operational papercut is restart
+    after Save. Launchd handles process restart, but the daemon still reads
+    TOML only at boot.
 
 ---
 
@@ -412,8 +439,8 @@ These don't have answers yet — the next agent (or the user) should resolve the
    more, or rule_v0's thresholds are still too tight.
 
 4. **Should the notch app and the daemon be split as separate launchd jobs?**
-   Right now the daemon spawns the notch as a subprocess. If the daemon
-   crashes, the notch goes too. Independence might be more robust.
+   The daemon now respawns the notch subprocess, which is good enough for
+   dogfood. A separate notch job could still be cleaner if the UI grows.
 
 ---
 
@@ -421,7 +448,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 30/30
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

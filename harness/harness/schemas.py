@@ -83,6 +83,7 @@ class ProactiveDecision:
     reason_codes: list[str] = field(default_factory=list)
     confidence: float = 1.0
     propensity: float = 1.0
+    experiment: Optional[dict[str, Any]] = None
     # Free-text rationale the realizer can read. Synthesized from reason_codes
     # by the policy. Optional for backward compat with older traces.
     why_now: Optional[str] = None

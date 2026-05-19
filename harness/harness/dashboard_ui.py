@@ -12,17 +12,17 @@ Visual aesthetic matches the labeling UI (dark, monospace meta, amber accent).
 
 from __future__ import annotations
 
-import json
 import os
 import time
-from collections import Counter, defaultdict
-from pathlib import Path
+from collections import Counter
 from typing import Any
 
 import tomllib
 from aiohttp import web
 
-from .store import HARNESS_DIR, iter_jsonl, read_policy_state, tail_jsonl, write_policy_state
+from . import config as config_mod
+from . import sql_store
+from .store import HARNESS_DIR, iter_jsonl
 
 
 CONFIG_PATH = HARNESS_DIR / "config.toml"
@@ -556,14 +556,14 @@ setInterval(refresh, 5000);
 
 
 def _aggregate(window_sec: int = 86400) -> dict:
-    """Read jsonl files and compute distributions over the last window."""
+    """Read typed event payloads and compute distributions over the last window."""
     now = time.time()
     since_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - window_sec))
 
-    candidates = [r for r in iter_jsonl("candidates.jsonl") if r.get("ts", "") >= since_iso]
-    decisions = [r for r in iter_jsonl("decisions.jsonl") if r.get("ts", "") >= since_iso]
-    outcomes = [r for r in iter_jsonl("outcomes.jsonl") if r.get("ts", "") >= since_iso]
-    traces = list(iter_jsonl("traces.jsonl"))[-50:]  # most-recent-50 regardless of window
+    candidates = _read_payloads("candidates", "candidates.jsonl", since_iso=since_iso)
+    decisions = _read_payloads("decisions", "decisions.jsonl", since_iso=since_iso)
+    outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since_iso)
+    traces = list(reversed(_read_payloads("traces", "traces.jsonl", limit=50, newest_first=True)))
 
     dist_actions: Counter = Counter()
     dist_intents: Counter = Counter()
@@ -599,7 +599,7 @@ def _aggregate(window_sec: int = 86400) -> dict:
         if sig == "considered" and ua == "timed_out":
             n_considered_no_click += 1
 
-    model_calls = tail_jsonl("model_calls.jsonl", n=30)
+    model_calls = _read_payloads("model_calls", "model_calls.jsonl", limit=30, newest_first=True)
 
     # Recent realizer calls from traces — only those that produced a message
     recent_realizations = []
@@ -642,8 +642,37 @@ def _aggregate(window_sec: int = 86400) -> dict:
         "recent_decisions": decisions[-30:][::-1],
         "recent_outcomes": outcomes[-15:][::-1],
         "recent_realizations": recent_realizations,
-        "recent_model_calls": model_calls[::-1],
+        "recent_model_calls": model_calls,
     }
+
+
+def _read_payloads(
+    table: str,
+    filename: str,
+    *,
+    since_iso: str | None = None,
+    limit: int | None = None,
+    newest_first: bool = False,
+) -> list[dict]:
+    try:
+        db_exists = sql_store.db_path().exists()
+        table_has_rows = db_exists and sql_store.count_rows(table) > 0
+        if table_has_rows:
+            return sql_store.payload_rows(
+                table,
+                since_iso=since_iso,
+                limit=limit,
+                newest_first=newest_first,
+            )
+    except Exception:
+        pass
+
+    rows = [r for r in iter_jsonl(filename) if since_iso is None or r.get("ts", "") >= since_iso]
+    if limit is not None:
+        rows = rows[-limit:]
+    if newest_first:
+        rows = list(reversed(rows))
+    return rows
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -652,9 +681,8 @@ def _aggregate(window_sec: int = 86400) -> dict:
 
 def _load_config_dict() -> dict:
     if not CONFIG_PATH.exists():
-        return {}
-    with open(CONFIG_PATH, "rb") as f:
-        return tomllib.load(f)
+        return tomllib.loads(config_mod.DEFAULT_CONFIG_TOML)
+    return config_mod.load()
 
 
 def _toml_quote(s: str) -> str:
@@ -666,8 +694,8 @@ def _dump_toml(cfg: dict) -> str:
     """Minimal TOML dump for the harness config shape. Preserves nested tables."""
     lines: list[str] = []
     # Top-level tables in a stable order
-    section_order = ["daemon", "gate", "scene", "scene_tagger", "memory", "realizer", "critic",
-                     "push", "reward", "intents", "debug"]
+    section_order = ["daemon", "gate", "experiment", "scene", "scene_tagger", "memory",
+                     "realizer", "critic", "privacy", "push", "reward", "intents", "debug"]
     written: set[str] = set()
 
     def _val(v: Any) -> str:

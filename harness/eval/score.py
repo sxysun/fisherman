@@ -60,6 +60,19 @@ def _load_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def _load_live_payloads(table: str, path: Path, filename: str) -> list[dict] | None:
+    if path.expanduser() != Path(os.path.expanduser(f"~/.harness/{filename}")):
+        return None
+    try:
+        from harness import sql_store
+
+        if not sql_store.db_path().exists() or sql_store.count_rows(table) <= 0:
+            return None
+        return sql_store.payload_rows(table)
+    except Exception:
+        return None
+
+
 def _load_predictions(path: Path) -> dict:
     with open(path) as f:
         return json.load(f)
@@ -230,8 +243,14 @@ def main() -> int:
     args = parser.parse_args()
 
     preds = _load_predictions(Path(args.predictions))
-    outcomes = _load_jsonl(Path(args.outcomes))
-    retro = _load_jsonl(Path(args.retro))
+    outcomes_path = Path(args.outcomes)
+    retro_path = Path(args.retro)
+    outcomes = _load_live_payloads("outcomes", outcomes_path, "outcomes.jsonl")
+    if outcomes is None:
+        outcomes = _load_jsonl(outcomes_path)
+    retro = _load_live_payloads("retro_labels", retro_path, "retro_labels.jsonl")
+    if retro is None:
+        retro = _load_jsonl(retro_path)
 
     report = score(preds, outcomes, retro)
     serialized = json.dumps(report, indent=2)

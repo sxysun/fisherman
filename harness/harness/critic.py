@@ -10,6 +10,7 @@ import aiohttp
 
 from . import model_audit
 from . import privacy
+from . import trust
 from .schemas import CandidateEvent, CriticResult
 
 
@@ -60,6 +61,26 @@ async def llm_check(message: str, event: CandidateEvent, config: dict) -> Option
         return None
     api_key = config.get("api_key") or os.environ.get(config.get("api_key_env", ""), "")
 
+    from .realizer import chat_completions_url
+    endpoint = chat_completions_url(base_url)
+    trust_check = trust.check_model_endpoint(base_url, config.get("privacy"))
+    if not trust_check.allowed:
+        model_audit.record_model_call(
+            purpose="critic",
+            base_url=base_url,
+            endpoint=endpoint,
+            model=model,
+            candidate_id=event.candidate_id,
+            prompt_version=CRITIC_VERSION,
+            status="blocked_untrusted_endpoint",
+            error=trust_check.reason,
+            extra={
+                "message_chars": len(message),
+                "trust": trust_check.to_dict(),
+            },
+        )
+        return None
+
     prompt_path = PROMPTS_DIR / "critic" / "productivity_v1.md"
     if not prompt_path.exists():
         return None
@@ -77,8 +98,6 @@ async def llm_check(message: str, event: CandidateEvent, config: dict) -> Option
         headers["Authorization"] = f"Bearer {api_key}"
         headers["x-api-key"] = api_key
 
-    from .realizer import chat_completions_url
-    endpoint = chat_completions_url(base_url)
     t0 = time.monotonic()
     try:
         timeout = aiohttp.ClientTimeout(total=8)

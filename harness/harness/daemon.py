@@ -12,6 +12,7 @@ import structlog
 from aiohttp import web
 
 from . import critic as critic_mod
+from . import experiments as experiments_mod
 from . import gate as gate_mod
 from . import push as push_mod
 from . import realizer as realizer_mod
@@ -138,6 +139,10 @@ async def run_loop(config: dict) -> None:
 
     try:
         while True:
+            if push_channel == "notch_pill" and (notch_proc is None or notch_proc.poll() is not None):
+                if notch_proc is not None:
+                    log.warning("notch_exited", returncode=notch_proc.returncode)
+                notch_proc = _launch_notch(harness_port)
             await _tick(
                 config=config,
                 fc=fc,
@@ -174,7 +179,8 @@ async def _tick(
 
     # Optional VLM scene-tagger pass. Cheap heuristics inside maybe_tag()
     # decide whether to actually fire the LLM call (cooldown + diff-gating).
-    vlm_cfg = (config.get("scene_tagger") or {}).get("llm") or {}
+    vlm_cfg = dict((config.get("scene_tagger") or {}).get("llm") or {})
+    vlm_cfg["privacy"] = config.get("privacy", {})
     if vlm_cfg.get("enabled"):
         try:
             vlm_result = await scene_vlm_mod.maybe_tag(event, fc, vlm_cfg)
@@ -215,6 +221,7 @@ async def _tick(
         recent_outcomes,
         gate_cfg,
     )
+    decision = experiments_mod.apply(decision, event, config.get("experiment", {}))
     append_jsonl("decisions.jsonl", decision.to_dict() | {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
 
     trace = Trace.new(event, mem_snap, recent_outcomes)
@@ -232,7 +239,7 @@ async def _tick(
         event=event,
         memory=mem_snap,
         fisherman=fc,
-        config=config["realizer"],
+        config=dict(config["realizer"]) | {"privacy": config.get("privacy", {})},
         daily_goal=daily_goal,
         why_now=(getattr(decision, "why_now", None) or ", ".join(decision.reason_codes)),
     )
@@ -244,9 +251,9 @@ async def _tick(
         append_jsonl("traces.jsonl", trace.to_dict())
         return
 
-    critic_result = await critic_mod.check(
-        realization.message, event, config.get("critic", {})
-    )
+    critic_cfg = dict(config.get("critic", {}))
+    critic_cfg["privacy"] = config.get("privacy", {})
+    critic_result = await critic_mod.check(realization.message, event, critic_cfg)
     trace.critic = critic_result.to_dict()
 
     if not critic_result.pass_:

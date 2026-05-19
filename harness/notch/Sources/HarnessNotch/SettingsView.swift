@@ -212,6 +212,19 @@ struct StatusTab: View {
                 Stat(label: "Outcomes",        value: "\(model.data?["n_outcomes"].int ?? 0)")
                 Stat(label: "Considered",      value: "\(model.data?["n_considered_no_click"].int ?? 0)")
             }
+            SectionTitle("Lab metrics")
+            HStack(spacing: 12) {
+                Stat(label: "Ping rate",        value: pct(model.metrics?["ping_rate"]))
+                Stat(label: "Outcome capture",  value: pct(model.metrics?["outcomes"]["capture_rate_for_pings"]))
+                Stat(label: "Agreement",        value: pct(model.metrics?["labels"]["agreement_rate"]))
+                Stat(label: "Labels",           value: "\(model.metrics?["labels"]["n"].int ?? 0)")
+            }
+            HStack(spacing: 12) {
+                Stat(label: "False interrupts", value: pct(model.metrics?["labels"]["false_interruption_rate_labeled"]))
+                Stat(label: "Missed help",      value: pct(model.metrics?["labels"]["missed_help_rate_labeled"]))
+                Stat(label: "Need personal",    value: "\(model.metrics?["data_readiness"]["needs_labels_for_personalization"].int ?? 20)")
+                Stat(label: "Need learned",     value: "\(model.metrics?["data_readiness"]["needs_labels_for_learned_gate"].int ?? 500)")
+            }
             SectionTitle("Top scenes (24h)")
             BarList(data: dictAsKVs(model.data?["dist_scenes"].dict))
             SectionTitle("Top apps (24h)")
@@ -226,6 +239,11 @@ struct StatusTab: View {
     private func dictAsKVs(_ d: [String: Any]?) -> [(String, Int)] {
         let pairs = (d ?? [:]).map { ($0.key, ($0.value as? Int) ?? 0) }
         return pairs.sorted { $0.1 > $1.1 }.prefix(8).map { $0 }
+    }
+
+    private func pct(_ value: JSON?) -> String {
+        guard let value, !value.isNull else { return "n/a" }
+        return String(format: "%.1f%%", value.double * 100.0)
     }
 }
 
@@ -251,6 +269,19 @@ struct GateTab: View {
             }
             FormRow("Quiet hours end",     hint: "24h, wraps midnight") {
                 TextField("", value: $model.quietEnd, formatter: intFormatter).textFieldStyle(.roundedBorder)
+            }
+            SectionTitle("Experimentation")
+            FormRow("Enabled", hint: "logs deterministic assignments") {
+                Toggle("", isOn: $model.experimentEnabled).labelsHidden()
+            }
+            FormRow("Holdout rate", hint: "fraction of would-pings held silent") {
+                TextField("", value: $model.holdoutRate, formatter: doubleFormatter).textFieldStyle(.roundedBorder)
+            }
+            FormRow("Explore ping rate", hint: "0 by default; opt-in random pings") {
+                TextField("", value: $model.explorePingRate, formatter: doubleFormatter).textFieldStyle(.roundedBorder)
+            }
+            FormRow("Experiment salt", hint: "changes assignment buckets") {
+                TextField("", text: $model.experimentSalt).textFieldStyle(.roundedBorder)
             }
             SectionTitle("Snooze")
             HStack(spacing: 8) {
@@ -347,6 +378,13 @@ struct RealizerTab: View {
             FormRow("Fail closed on sensitive OCR", hint: "skip image if local masking cannot prove it worked") {
                 Toggle("", isOn: $model.skipVisionOnSensitiveOCR).labelsHidden()
             }
+            SectionTitle("Trust boundary")
+            FormRow("Block unknown hosts", hint: "before any model prompt or image leaves") {
+                Toggle("", isOn: $model.blockUntrustedModelHosts).labelsHidden()
+            }
+            FormRow("Allowed hosts", hint: "comma or space separated") {
+                TextField("", text: $model.allowedModelHostsText).textFieldStyle(.roundedBorder)
+            }
         }
     }
 }
@@ -394,8 +432,10 @@ struct DiagnosticsTab: View {
                 let action = (d["action"] as? String) ?? "?"
                 let intent = (d["intent"] as? String) ?? "—"
                 let reasons = (d["reason_codes"] as? [String]) ?? []
+                let exp = (d["experiment"] as? [String: Any]) ?? [:]
+                let assignment = (exp["assignment"] as? String).map { " exp=\($0)" } ?? ""
                 let ts = String(((d["ts"] as? String) ?? "").prefix(19))
-                return "\(ts)  \(action.padding(toLength: 10, withPad: " ", startingAt: 0))  intent=\(intent)  [\(reasons.joined(separator: ", "))]"
+                return "\(ts)  \(action.padding(toLength: 10, withPad: " ", startingAt: 0))  intent=\(intent)\(assignment)  [\(reasons.joined(separator: ", "))]"
             })
             SectionTitle("Recent outcomes (15)")
             DiagList(rows: model.recentOutcomes.map { o in

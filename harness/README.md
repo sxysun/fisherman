@@ -21,6 +21,8 @@ cd notch && ./build.sh && cd ..
 
 # Run
 .venv/bin/harness start --foreground
+# Optional: install as a restartable LaunchAgent
+.venv/bin/harness install-launchd
 
 # Click the 🐟 in the menu bar → Open Settings → Today
 # Write what you're trying to do today. Set sensitivity.
@@ -35,7 +37,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a rule-based gate that returns `{action, reason_codes, why_now}`, and if ping is warranted, calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app picks it up via HTTP polling and renders a pill. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards. Runtime events are still written to JSONL for debuggability/export and are mirrored into `~/.harness/harness.db` for indexed SQLite queries.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a rule-based gate that returns `{action, reason_codes, why_now}`, then applies deterministic experiment assignment. Low-rate holdouts are logged for counterfactual measurement; exploration pings are available but default to 0. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app picks it up via HTTP polling and renders a pill. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, and shadow comparison prefer SQLite read paths when available.
 
 ## Configuration
 
@@ -52,6 +54,11 @@ active_policy = "rule_v0"
 cooldown_min = 5
 negative_feedback_backoff_min = 15
 
+[experiment]
+enabled = true
+holdout_rate = 0.02                      # safe counterfactuals
+explore_ping_rate = 0.0                   # opt-in random pings
+
 [realizer]
 base_url = "http://3.82.134.133:8642"    # OpenAI-compatible
 model = "hermes-agent"
@@ -59,6 +66,10 @@ api_key = ""                             # set in Settings → Model or HARNESS_
 include_vision = true                     # send screenshot
 skip_vision_on_sensitive_ocr = true       # do not attach image if OCR looks secret-like
 redact_sensitive_screenshots = true       # first try local OCR box masking
+
+[privacy]
+block_untrusted_model_hosts = true
+allowed_model_hosts = ["3.82.134.133:8642", "openrouter.ai", "localhost", "127.0.0.1", "::1"]
 
 [scene_tagger.llm]                        # per-candidate VLM
 enabled = true
@@ -76,7 +87,7 @@ harness/
 ├── prompts/        Realizer + critic prompts
 ├── notch/          Swift app (HarnessNotch.app)
 ├── eval/           replay.py, score.py (offline policy analysis)
-├── tests/          smoke tests (30/30 passing)
+├── tests/          smoke tests
 └── HANDOFF.md      read this for the full picture
 ```
 
@@ -86,6 +97,9 @@ harness/
 harness install [--force] [--build-notch]   create ~/.harness/, build notch
 harness build-notch                         rebuild notch only
 harness start [--foreground]                start the daemon
+harness install-launchd [--load]            install/restart LaunchAgent
+harness launchd-status                      show LaunchAgent status
+harness uninstall-launchd                   unload/remove LaunchAgent
 harness stop                                stop daemon + notch
 harness status                              one-line state
 harness inspect [--since 1h --action no_ping --intent X]
@@ -106,7 +120,7 @@ harness score --predictions reports/...     replay scoring + reward_v2
 
 Runtime state lives outside the repo at `~/.harness/`. See `HANDOFF.md` for the full layout.
 
-The canonical append path still writes JSONL files such as `candidates.jsonl`, `decisions.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, and `model_calls.jsonl`. Each append is also mirrored into `~/.harness/harness.db`, which keeps typed tables for candidates, decisions, traces, outcomes, model calls, labels, plus a generic `event_log`. Late outcome attachment updates both `traces.jsonl` and the typed SQLite trace row. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
+The canonical append path still writes JSONL files such as `candidates.jsonl`, `decisions.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, and `model_calls.jsonl`. Each append is also mirrored into `~/.harness/harness.db`, which keeps typed tables for candidates, decisions, traces, outcomes, model calls, labels, plus a generic `event_log`. Late outcome attachment updates both `traces.jsonl` and the typed SQLite trace row. Dashboard, metrics, replay, score, and shadow comparison read from SQLite when the sidecar is present and fall back to JSONL for old installs. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
 
 ## Tests
 
@@ -114,4 +128,4 @@ The canonical append path still writes JSONL files such as `candidates.jsonl`, `
 .venv/bin/python -m pytest tests/test_smoke.py
 ```
 
-12 tests; covers schemas, store, scene tagger, VLM overlay, gate, critic, reward.
+The smoke suite covers schemas, config default merging, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay, gate, experiments, launchd plist generation, labeler queueing, metrics, shadow eval, critic, and reward.

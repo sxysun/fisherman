@@ -285,6 +285,53 @@ def recent_rows(table: str, limit: int = 50, base_dir: Path | None = None) -> li
     return [dict(row) for row in rows]
 
 
+def payload_rows(
+    table: str,
+    *,
+    since_iso: str | None = None,
+    limit: int | None = None,
+    newest_first: bool = False,
+    base_dir: Path | None = None,
+) -> list[dict]:
+    """Return decoded payload_json rows from a typed table.
+
+    This is the read-path bridge from the JSONL-compatible append log to the
+    indexed SQLite sidecar. It intentionally returns original payloads rather
+    than typed SQLite projections so dashboard/eval code can migrate without
+    changing data semantics.
+    """
+    _require_known_table(table)
+    if table == "event_log":
+        order = "id"
+    else:
+        order = "COALESCE(ts, '')"
+    direction = "DESC" if newest_first else "ASC"
+    where = ""
+    params: list[Any] = []
+    if since_iso is not None:
+        where = "WHERE COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = " LIMIT ?"
+        params.append(max(1, min(int(limit), 5000)))
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"SELECT payload_json FROM {table} {where} ORDER BY {order} {direction}{limit_sql}",
+            params,
+        ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
+
+
 def backfill_jsonl_files(
     filenames: Iterable[str],
     *,

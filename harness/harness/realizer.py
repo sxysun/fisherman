@@ -12,6 +12,7 @@ import aiohttp
 from . import image_redaction
 from . import model_audit
 from . import privacy
+from . import trust
 from .fisherman_client import FishermanClient
 from .schemas import CandidateEvent, MemorySnapshot, Realization, ToolCall
 
@@ -250,6 +251,41 @@ async def realize(
 
     system_prompt, prompt_version = _load_prompt(intent)
     user_text = _serialize_state(event, memory, daily_goal=daily_goal, why_now=why_now)
+
+    trust_check = trust.check_model_endpoint(base_url, config.get("privacy"))
+    if not trust_check.allowed:
+        endpoint = chat_completions_url(base_url)
+        model_audit.record_model_call(
+            purpose="realizer",
+            base_url=base_url,
+            endpoint=endpoint,
+            model=model,
+            candidate_id=event.candidate_id,
+            prompt_version=prompt_version,
+            status="blocked_untrusted_endpoint",
+            vision_used=False,
+            privacy_flags=["model_endpoint_blocked"],
+            error=trust_check.reason,
+            extra={
+                "intent": intent,
+                "trust": trust_check.to_dict(),
+                "prompt_hash": model_audit.text_hash(system_prompt),
+                "brief_hash": model_audit.text_hash(user_text),
+            },
+        )
+        return Realization(
+            model=model,
+            base_url=base_url,
+            prompt_version=prompt_version,
+            message="",
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=0,
+            vision_used=False,
+            image_bytes=0,
+            privacy_flags=["model_endpoint_blocked"],
+            error=f"{trust_check.reason}: {trust_check.host_port}",
+        )
 
     image_b64: Optional[str] = None
     image_bytes_n = 0

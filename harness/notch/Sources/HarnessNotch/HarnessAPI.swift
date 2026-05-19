@@ -29,6 +29,12 @@ enum HarnessAPI {
         await getJSON(url: baseURL().appendingPathComponent("status"))
     }
 
+    static func fetchMetrics(window: String = "24h") async -> JSON? {
+        var c = URLComponents(url: baseURL().appendingPathComponent("metrics"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [URLQueryItem(name: "window", value: window)]
+        return await getJSON(url: c.url!)
+    }
+
     static func saveConfig(_ cfg: JSON) async -> Bool {
         var req = URLRequest(url: baseURL().appendingPathComponent("dashboard/config"))
         req.httpMethod = "POST"
@@ -94,6 +100,7 @@ struct JSON {
     var int: Int { (raw as? Int) ?? Int(raw as? Double ?? 0) }
     var double: Double { (raw as? Double) ?? Double(raw as? Int ?? 0) }
     var bool: Bool { raw as? Bool ?? false }
+    var isNull: Bool { raw is NSNull }
 
     subscript(key: String) -> JSON {
         get {

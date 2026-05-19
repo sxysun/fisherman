@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
@@ -85,6 +86,20 @@ def _load_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def _load_live_payloads(table: str, path: Path, filename: str, since_iso: Optional[str] = None) -> list[dict] | None:
+    """Use the SQLite sidecar for default live logs when available."""
+    if path.expanduser() != Path(os.path.expanduser(f"~/.harness/{filename}")):
+        return None
+    try:
+        from harness import sql_store
+
+        if not sql_store.db_path().exists() or sql_store.count_rows(table) <= 0:
+            return None
+        return sql_store.payload_rows(table, since_iso=since_iso)
+    except Exception:
+        return None
+
+
 def _iso_to_unix(ts: str | None) -> Optional[float]:
     if not ts:
         return None
@@ -146,34 +161,42 @@ def _to_event(row: dict):
     return event
 
 
-def _memory_for(history: list[Any]):
+def _trim_window(events: deque[tuple[Any, float]], cutoff_ts: float) -> None:
+    while events:
+        if events[0][1] >= cutoff_ts:
+            break
+        events.popleft()
+
+
+def _memory_for_windows(
+    recent_2h: list[tuple[Any, float]],
+    recent_15m: list[tuple[Any, float]],
+    now_ts: float | None,
+):
     from harness.schemas import MemorySnapshot
 
-    if not history:
+    if not recent_2h:
         return MemorySnapshot.build([], [], [], 0, 0.0)
-
-    now_ts = _iso_to_unix(history[-1].ts) or time.time()
-    recent_2h = [e for e in history if (_iso_to_unix(e.ts) or 0) >= now_ts - 2 * 60 * 60]
-    recent_15m = [e for e in history if (_iso_to_unix(e.ts) or 0) >= now_ts - 15 * 60]
 
     switches = 0
     prev = None
-    for e in recent_15m:
-        app = e.screen.frontmost_app
+    for event, _ in recent_15m:
+        app = event.screen.frontmost_app
         if prev is not None and app != prev:
             switches += 1
         prev = app
 
-    current_app = history[-1].screen.frontmost_app
-    start_ts = now_ts
-    for e in reversed(recent_2h):
-        if e.screen.frontmost_app != current_app:
+    current_app = recent_2h[-1][0].screen.frontmost_app
+    start_ts = now_ts or recent_2h[-1][1]
+    for event, event_ts in reversed(recent_2h):
+        if event.screen.frontmost_app != current_app:
             break
-        start_ts = _iso_to_unix(e.ts) or start_ts
+        start_ts = event_ts
 
+    now_ts = now_ts or start_ts
     return MemorySnapshot.build(
-        recent_apps=[e.screen.frontmost_app or "" for e in recent_2h[-30:]],
-        recent_scenes=[e.scene.label for e in recent_2h[-30:]],
+        recent_apps=[event.screen.frontmost_app or "" for event, _ in recent_2h[-30:]],
+        recent_scenes=[event.scene.label for event, _ in recent_2h[-30:]],
         recent_outcomes=[],
         app_switches_last_15m=switches,
         minutes_on_current_app=max(0.0, (now_ts - start_ts) / 60.0),
@@ -258,15 +281,22 @@ def main() -> int:
 
     decide = _load_policy(args.policy)
     since_iso = _parse_since(args.since)
-    dataset = _load_dataset(Path(args.dataset), since_iso)
+    dataset_path = Path(args.dataset)
+    dataset = _load_live_payloads("candidates", dataset_path, "candidates.jsonl", since_iso)
+    if dataset is None:
+        dataset = _load_dataset(dataset_path, since_iso)
 
-    outcomes = _load_jsonl(Path(args.outcomes))
+    outcomes_path = Path(args.outcomes)
+    outcomes = _load_live_payloads("outcomes", outcomes_path, "outcomes.jsonl")
+    if outcomes is None:
+        outcomes = _load_jsonl(outcomes_path)
     cfg = _live_gate_config()
     if args.config_overrides:
         cfg.update(json.loads(args.config_overrides))
 
     predictions: list[dict] = []
-    history: list[Any] = []
+    recent_2h: deque[tuple[Any, float]] = deque()
+    recent_15m: deque[tuple[Any, float]] = deque()
     simulated_last_push_ts: Optional[float] = None
     for row in dataset:
         event = _to_event(row)
@@ -277,8 +307,12 @@ def main() -> int:
                 if simulated_last_push_ts is None
                 else max(0.0, (event_ts - simulated_last_push_ts) / 60.0)
             )
-        history.append(event)
-        mem = _memory_for(history)
+            _trim_window(recent_2h, event_ts - 2 * 60 * 60)
+            _trim_window(recent_15m, event_ts - 15 * 60)
+        event_ts_for_window = event_ts if event_ts is not None else time.time()
+        recent_2h.append((event, event_ts_for_window))
+        recent_15m.append((event, event_ts_for_window))
+        mem = _memory_for_windows(list(recent_2h), list(recent_15m), event_ts)
         recent_outcomes = _recent_outcomes_for(outcomes, event.ts)
         decision = decide(event, mem, recent_outcomes, cfg)
         if decision.action == "notch_ping" and event_ts is not None:

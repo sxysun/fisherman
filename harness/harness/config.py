@@ -25,6 +25,18 @@ quiet_hours_start = 22
 quiet_hours_end = 8
 frequency = "medium"
 
+[experiment]
+# Deterministic live assignment for counterfactual measurement. Holdout is
+# safe: a small fraction of would-ping decisions are intentionally silent and
+# logged with counterfactual_action="notch_ping". Exploration pings are
+# supported but default to 0 because random interruptions should be explicit.
+enabled = true
+salt = "local_v1"
+holdout_rate = 0.02
+explore_ping_rate = 0.0
+respect_hard_gates = true
+explore_eligible_reasons = ["no_clear_help"]
+
 [scene]
 llm_fallback_enabled = false
 
@@ -78,6 +90,20 @@ redact_sensitive_screenshots = true
 query_fisherman_history = false
 get_recent_screen_ocr = false
 
+[privacy]
+# Endpoint allowlist for any model call that could receive OCR, prompt state,
+# or a screenshot. Redaction protects sensitive content inside an allowed call;
+# this check blocks accidental model traffic to unknown hosts.
+block_untrusted_model_hosts = true
+allow_local_model_hosts = true
+allowed_model_hosts = [
+  "3.82.134.133:8642",
+  "openrouter.ai",
+  "localhost",
+  "127.0.0.1",
+  "::1",
+]
+
 [critic]
 # Critic is a single-shot LLM pass. Reuses the realizer endpoint by default.
 enabled = false
@@ -117,8 +143,10 @@ def load() -> dict[str, Any]:
         raise FileNotFoundError(
             f"config not found at {CONFIG_PATH}. Run `harness install` first."
         )
+    defaults = tomllib.loads(DEFAULT_CONFIG_TOML)
     with open(CONFIG_PATH, "rb") as f:
-        return tomllib.load(f)
+        user_config = tomllib.load(f)
+    return _deep_merge(defaults, user_config)
 
 
 def write_default(force: bool = False) -> Path:
@@ -127,3 +155,13 @@ def write_default(force: bool = False) -> Path:
         return CONFIG_PATH
     CONFIG_PATH.write_text(DEFAULT_CONFIG_TOML)
     return CONFIG_PATH
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out

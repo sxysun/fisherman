@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from eval import replay as replay_mod
+from . import sql_store
 
 
 DEFAULT_VARIANTS = {
@@ -34,9 +35,18 @@ def compare(
     labels_file = Path(labels_path or os.path.expanduser("~/.harness/retro_labels.jsonl"))
 
     since_iso = replay_mod._parse_since(since)
-    rows = replay_mod._load_dataset(dataset_path, since_iso)
-    outcomes = replay_mod._load_jsonl(outcomes_file)
-    labels = _latest_labels(replay_mod._load_jsonl(labels_file))
+    if dataset is None and _table_has_rows("candidates"):
+        rows = sql_store.payload_rows("candidates", since_iso=since_iso)
+    else:
+        rows = replay_mod._load_dataset(dataset_path, since_iso)
+    if outcomes_path is None and _table_has_rows("outcomes"):
+        outcomes = sql_store.payload_rows("outcomes")
+    else:
+        outcomes = replay_mod._load_jsonl(outcomes_file)
+    if labels_path is None and _table_has_rows("retro_labels"):
+        labels = _latest_labels(sql_store.payload_rows("retro_labels"))
+    else:
+        labels = _latest_labels(replay_mod._load_jsonl(labels_file))
     if labeled_only:
         labeled_candidates = set(labels)
         rows = [row for row in rows if row.get("candidate_id") in labeled_candidates]
@@ -224,6 +234,13 @@ def _should_ping(label: str | None) -> bool | None:
     if label in ("would_annoy", "good_no_ping"):
         return False
     return None
+
+
+def _table_has_rows(table: str) -> bool:
+    try:
+        return sql_store.db_path().exists() and sql_store.count_rows(table) > 0
+    except Exception:
+        return False
 
 
 def _ratio(num: float, den: float) -> float | None:

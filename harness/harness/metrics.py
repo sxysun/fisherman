@@ -5,6 +5,7 @@ from collections import Counter
 from typing import Any, Optional
 
 from . import reward as reward_mod
+from . import sql_store
 from .store import iter_jsonl
 
 
@@ -29,11 +30,11 @@ def since_iso(window: str = "24h", now: Optional[float] = None) -> str:
 def compute(window: str = "24h") -> dict[str, Any]:
     since = since_iso(window)
 
-    candidates = [r for r in iter_jsonl("candidates.jsonl") if r.get("ts", "") >= since]
-    all_decisions = list(iter_jsonl("decisions.jsonl"))
+    candidates = _read_payloads("candidates", "candidates.jsonl", since_iso=since)
+    all_decisions = _read_payloads("decisions", "decisions.jsonl")
     decisions = [r for r in all_decisions if r.get("ts", "") >= since]
-    outcomes = [r for r in iter_jsonl("outcomes.jsonl") if r.get("ts", "") >= since]
-    labels = [r for r in iter_jsonl("retro_labels.jsonl") if r.get("ts", "") >= since]
+    outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
+    labels = _read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
 
     decisions_by_id = {d.get("decision_id"): d for d in all_decisions if d.get("decision_id")}
     decisions_by_candidate = {
@@ -162,3 +163,33 @@ def _ratio(num: float, den: float) -> float | None:
     if not den:
         return None
     return num / den
+
+
+def _read_payloads(
+    table: str,
+    filename: str,
+    *,
+    since_iso: str | None = None,
+    limit: int | None = None,
+    newest_first: bool = False,
+) -> list[dict]:
+    """Prefer the SQLite query plane, fall back to JSONL for old installs."""
+    try:
+        db_exists = sql_store.db_path().exists()
+        table_has_rows = db_exists and sql_store.count_rows(table) > 0
+        if table_has_rows:
+            return sql_store.payload_rows(
+                table,
+                since_iso=since_iso,
+                limit=limit,
+                newest_first=newest_first,
+            )
+    except Exception:
+        pass
+
+    rows = [r for r in iter_jsonl(filename) if since_iso is None or r.get("ts", "") >= since_iso]
+    if limit is not None:
+        rows = rows[-limit:]
+    if newest_first:
+        rows = list(reversed(rows))
+    return rows

@@ -8,8 +8,10 @@ import json
 import time
 
 from harness import candidate as candidate_mod
+from harness import config as config_mod
 from harness import critic as critic_mod
 from harness import fisherman_client as fc_mod
+from harness import experiments as experiments_mod
 from harness import gate as gate_mod
 from harness import image_redaction as image_redaction_mod
 from harness import label_ui as label_ui_mod
@@ -21,16 +23,19 @@ from harness import push as push_mod
 from harness import realizer as realizer_mod
 from harness import scene as scene_mod
 from harness import scene_vlm as scene_vlm_mod
+from harness import service as service_mod
 from harness import schemas
 from harness import server as server_mod
 from harness import shadow_eval as shadow_eval_mod
 from harness import sql_store as sql_store_mod
 from harness import store as store_mod
+from harness import trust as trust_mod
 
 
 def test_imports():
     # all top-level modules import cleanly
     assert schemas
+    assert config_mod
     assert store_mod
     assert fc_mod
     assert candidate_mod
@@ -48,6 +53,9 @@ def test_imports():
     assert server_mod
     assert shadow_eval_mod
     assert sql_store_mod
+    assert experiments_mod
+    assert service_mod
+    assert trust_mod
 
 
 def test_schema_roundtrip():
@@ -57,6 +65,23 @@ def test_schema_roundtrip():
     serialized = json.dumps(event.to_dict(), default=str)
     assert "Cursor" in serialized
     assert "candidate_id" in serialized
+
+
+def test_config_load_merges_new_defaults(tmp_path):
+    old_path = config_mod.CONFIG_PATH
+    config_mod.CONFIG_PATH = tmp_path / "config.toml"
+    try:
+        config_mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        config_mod.CONFIG_PATH.write_text(
+            "[realizer]\napi_key = \"local-key\"\nbase_url = \"http://localhost:9000\"\n"
+        )
+        cfg = config_mod.load()
+        assert cfg["realizer"]["api_key"] == "local-key"
+        assert cfg["realizer"]["base_url"] == "http://localhost:9000"
+        assert cfg["experiment"]["enabled"] is True
+        assert cfg["privacy"]["block_untrusted_model_hosts"] is True
+    finally:
+        config_mod.CONFIG_PATH = old_path
 
 
 def test_scene_tag_codes_for_todo():
@@ -123,6 +148,48 @@ def test_realizer_redacts_ocr_and_skips_sensitive_image():
     assert image_b64 is None
     assert image_bytes == 0
     assert flags
+
+
+def test_trust_blocks_untrusted_model_endpoint_before_network(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+
+    class ShouldNotFetchFisherman:
+        async def list_frames(self, count=1):
+            raise AssertionError("blocked endpoint should not fetch screenshots")
+
+    try:
+        check = trust_mod.check_model_endpoint(
+            "https://evil.example/v1",
+            {"block_untrusted_model_hosts": True, "allowed_model_hosts": ["openrouter.ai"]},
+        )
+        assert not check.allowed
+        event = schemas.CandidateEvent()
+        event.screen.ocr_snippet = "ship harness"
+        mem = schemas.MemorySnapshot.build([], [], [], 0, 0)
+        result = asyncio.run(
+            realizer_mod.realize(
+                intent="goal_aware",
+                event=event,
+                memory=mem,
+                fisherman=ShouldNotFetchFisherman(),
+                config={
+                    "base_url": "https://evil.example/v1",
+                    "model": "demo",
+                    "include_vision": True,
+                    "privacy": {
+                        "block_untrusted_model_hosts": True,
+                        "allowed_model_hosts": ["openrouter.ai"],
+                    },
+                },
+            )
+        )
+        assert result.error and "untrusted_model_endpoint" in result.error
+        assert "model_endpoint_blocked" in result.privacy_flags
+        row = store_mod.tail_jsonl("model_calls.jsonl", n=1)[0]
+        assert row["status"] == "blocked_untrusted_endpoint"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
 
 
 def test_image_redaction_masks_sensitive_ocr_box():
@@ -253,6 +320,53 @@ def test_rule_v0_pings_on_high_switch():
     # Goal-aware: intent is "goal_aware", reasons carry the why_now content
     assert d.intent == "goal_aware"
     assert "rapid_context_switching" in d.reason_codes
+
+
+def test_experiment_holdout_suppresses_ping_with_counterfactual():
+    decision = schemas.ProactiveDecision(
+        decision_id="pd_exp",
+        candidate_id="cand_exp",
+        policy_version="rule_v0",
+        action="notch_ping",
+        intent="goal_aware",
+        reason_codes=["goal_aligned_help"],
+    )
+    event = schemas.CandidateEvent(candidate_id="cand_exp")
+    assigned = experiments_mod.apply(
+        decision,
+        event,
+        {"enabled": True, "salt": "test", "holdout_rate": 1.0, "explore_ping_rate": 0.0},
+    )
+    assert assigned.action == "no_ping"
+    assert assigned.intent is None
+    assert "experiment_holdout" in assigned.reason_codes
+    assert assigned.experiment["assignment"] == "holdout"
+    assert assigned.experiment["counterfactual_action"] == "notch_ping"
+
+
+def test_experiment_exploration_respects_hard_gates():
+    event = schemas.CandidateEvent(candidate_id="cand_exp")
+    hard = schemas.ProactiveDecision(
+        decision_id="pd_hard",
+        candidate_id="cand_exp",
+        policy_version="rule_v0",
+        action="no_ping",
+        reason_codes=["sensitive_scene"],
+    )
+    cfg = {"enabled": True, "salt": "test", "explore_ping_rate": 1.0}
+    assert experiments_mod.apply(hard, event, cfg).action == "no_ping"
+
+    soft = schemas.ProactiveDecision(
+        decision_id="pd_soft",
+        candidate_id="cand_exp",
+        policy_version="rule_v0",
+        action="no_ping",
+        reason_codes=["no_clear_help"],
+    )
+    explored = experiments_mod.apply(soft, event, cfg)
+    assert explored.action == "notch_ping"
+    assert explored.intent == "goal_aware"
+    assert explored.experiment["assignment"] == "explore_ping"
 
 
 def test_rule_v0_negative_feedback_backoff_is_time_bounded():
@@ -461,6 +575,25 @@ def test_pending_claim_lease_and_completion(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_launchd_plist_points_at_harness_module(tmp_path):
+    plist = service_mod.build_plist(
+        python_executable="/tmp/venv/bin/python",
+        repo_dir=tmp_path / "harness",
+        harness_dir=tmp_path / ".harness",
+    )
+    assert plist["Label"] == "com.fisherman.harness"
+    assert plist["KeepAlive"] is True
+    assert plist["RunAtLoad"] is True
+    assert plist["ProgramArguments"] == [
+        "/tmp/venv/bin/python",
+        "-m",
+        "harness.cli",
+        "start",
+        "--foreground",
+    ]
+    assert plist["WorkingDirectory"].endswith("harness")
+
+
 def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path
@@ -539,6 +672,11 @@ def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
         assert trace_rows[0]["outcome_action"] == "dismissed"
         assert trace_rows[0]["reward_value"] == -0.8
         assert '"user_action":"dismissed"' in trace_rows[0]["payload_json"]
+        payloads = sql_store_mod.payload_rows(
+            "decisions",
+            since_iso="2026-05-19T12:00:00Z",
+        )
+        assert payloads[0]["decision_id"] == "pd_sql"
     finally:
         store_mod.HARNESS_DIR = old_dir
 
