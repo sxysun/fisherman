@@ -102,6 +102,96 @@ def summarize(weak_labels: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def example_rows(
+    weak_labels: list[dict[str, Any]],
+    *,
+    decisions_by_id: dict[str, dict] | None = None,
+    outcomes_by_decision_id: dict[str, dict] | None = None,
+    traces_by_decision_id: dict[str, dict] | None = None,
+    direction: str = "all",
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Join weak labels to compact decision/outcome/trace context.
+
+    The examples surface enough context for inspection without copying raw OCR
+    or screenshots into the settings UI.
+    """
+    decisions_by_id = decisions_by_id or {}
+    outcomes_by_decision_id = outcomes_by_decision_id or {}
+    traces_by_decision_id = traces_by_decision_id or {}
+    filtered = [
+        row for row in weak_labels
+        if _matches_direction(row, direction)
+    ]
+    filtered.sort(key=lambda row: row.get("ts") or "", reverse=True)
+    return [
+        _example_row(row, decisions_by_id, outcomes_by_decision_id, traces_by_decision_id)
+        for row in filtered[: max(0, limit)]
+    ]
+
+
+def _example_row(
+    weak_label: dict[str, Any],
+    decisions_by_id: dict[str, dict],
+    outcomes_by_decision_id: dict[str, dict],
+    traces_by_decision_id: dict[str, dict],
+) -> dict[str, Any]:
+    decision_id = weak_label.get("decision_id") or ""
+    decision = decisions_by_id.get(decision_id) or {}
+    outcome = outcomes_by_decision_id.get(decision_id) or {}
+    trace = traces_by_decision_id.get(decision_id) or {}
+    action = trace.get("action") or {}
+    state = trace.get("state") or {}
+    candidate = state.get("candidate") or {}
+    screen = candidate.get("screen") or {}
+    scene = candidate.get("scene") or {}
+    realization = trace.get("realization") or {}
+
+    row = dict(weak_label)
+    row["decision"] = {
+        "ts": decision.get("ts"),
+        "action": decision.get("action"),
+        "intent": decision.get("intent"),
+        "policy_version": decision.get("policy_version"),
+        "confidence": decision.get("confidence"),
+        "reason_codes": decision.get("reason_codes") or [],
+        "experiment": decision.get("experiment") or {},
+    }
+    summary = outcome.get("interaction_summary") or {}
+    reward = outcome.get("reward") or {}
+    row["outcome"] = {
+        "ts": outcome.get("ts"),
+        "user_action": outcome.get("user_action"),
+        "latency_from_display_ms": outcome.get("latency_from_display_ms"),
+        "explicit_feedback": outcome.get("explicit_feedback"),
+        "intent_signal": summary.get("intent_signal"),
+        "considered_targets": summary.get("considered_targets") or [],
+        "hover_ms_by_target": summary.get("total_hover_ms_by_target") or {},
+        "n_approaches": summary.get("n_approaches"),
+        "reward_value": reward.get("value"),
+        "reward_version": reward.get("version"),
+    }
+    row["context"] = {
+        "app": screen.get("frontmost_app"),
+        "scene": scene.get("label"),
+        "scene_source": scene.get("source"),
+        "why_now": action.get("why_now") or decision.get("why_now"),
+        "message": realization.get("message"),
+        "vision_used": realization.get("vision_used"),
+        "privacy_flags": realization.get("privacy_flags") or [],
+    }
+    return row
+
+
+def _matches_direction(row: dict[str, Any], direction: str) -> bool:
+    if direction in ("", "all", None):
+        return True
+    actual = row.get("direction")
+    if direction == "negative":
+        return actual in ("negative", "weak_negative")
+    return actual == direction
+
+
 def _ratio(num: float, den: float) -> float | None:
     if not den:
         return None

@@ -875,6 +875,75 @@ def test_implicit_outcomes_become_confidence_weighted_weak_labels():
     assert summary["negative"] == 1
 
 
+def test_implicit_endpoint_returns_joined_examples(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        decision = {
+            "decision_id": "pd_endpoint",
+            "candidate_id": "cand_endpoint",
+            "ts": ts,
+            "policy_version": "rule_v0",
+            "action": "notch_ping",
+            "intent": "goal_aware",
+            "reason_codes": ["reading_browser", "goal_aligned_help"],
+        }
+        outcome = {
+            "decision_id": "pd_endpoint",
+            "user_action": "timed_out",
+            "latency_from_display_ms": 8000,
+            "interaction_summary": {
+                "intent_signal": "rejection_considered",
+                "considered_targets": ["dismiss"],
+                "total_hover_ms_by_target": {"dismiss": 620},
+            },
+            "ts": ts,
+            "reward": {"version": "v2", "value": -0.8},
+        }
+        trace = {
+            "trace_id": "tr_endpoint",
+            "ts": ts,
+            "state": {
+                "candidate": {
+                    "screen": {
+                        "frontmost_app": "Chrome",
+                        "ocr_snippet": "secret token should not surface",
+                    },
+                    "scene": {"label": "reading_browser", "source": "rule"},
+                }
+            },
+            "action": {
+                **decision,
+                "why_now": "stalled on reading",
+            },
+            "realization": {
+                "message": "Return to the draft or close this tab.",
+                "vision_used": True,
+            },
+        }
+        store_mod.append_jsonl("decisions.jsonl", decision)
+        store_mod.append_jsonl("outcomes.jsonl", outcome)
+        store_mod.append_jsonl("traces.jsonl", trace)
+
+        req = make_mocked_request(
+            "GET",
+            "/implicit?window=365d&limit=5&direction=negative",
+        )
+        resp = asyncio.run(server_mod.get_implicit(req))
+        body = json.loads(resp.text)
+        assert body["summary"]["usable"] == 1
+        assert body["examples"][0]["label"] == "would_annoy"
+        assert body["examples"][0]["outcome"]["hover_ms_by_target"]["dismiss"] == 620
+        assert body["examples"][0]["context"]["message"] == "Return to the draft or close this tab."
+        assert "ocr_snippet" not in json.dumps(body["examples"][0])
+        assert "secret token" not in json.dumps(body["examples"][0])
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_shadow_eval_compares_policy_variants_against_labels(tmp_path):
     candidates_path = tmp_path / "candidates.jsonl"
     labels_path = tmp_path / "retro_labels.jsonl"

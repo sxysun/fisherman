@@ -187,6 +187,58 @@ async def get_metrics(request: web.Request) -> web.Response:
     return web.json_response(metrics_mod.compute(window=window))
 
 
+async def get_implicit(request: web.Request) -> web.Response:
+    from . import implicit as implicit_mod
+    from . import metrics as metrics_mod
+
+    window = request.query.get("window", "7d")
+    direction = request.query.get("direction", "all")
+    try:
+        limit = int(request.query.get("limit", "50"))
+    except ValueError:
+        limit = 50
+    limit = max(1, min(limit, 200))
+
+    since = metrics_mod.since_iso(window)
+    all_decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl")
+    outcomes = metrics_mod._read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
+    traces = metrics_mod._read_payloads("traces", "traces.jsonl", since_iso=since)
+
+    decisions_by_id = {
+        row.get("decision_id"): row
+        for row in all_decisions
+        if row.get("decision_id")
+    }
+    outcomes_by_decision_id = {
+        row.get("decision_id"): row
+        for row in outcomes
+        if row.get("decision_id")
+    }
+    traces_by_decision_id = {}
+    for trace in traces:
+        decision_id = (trace.get("action") or {}).get("decision_id")
+        if decision_id:
+            traces_by_decision_id[decision_id] = trace
+
+    weak_labels = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
+    examples = implicit_mod.example_rows(
+        weak_labels,
+        decisions_by_id=decisions_by_id,
+        outcomes_by_decision_id=outcomes_by_decision_id,
+        traces_by_decision_id=traces_by_decision_id,
+        direction=direction,
+        limit=limit,
+    )
+    return web.json_response({
+        "window": window,
+        "since": since,
+        "limit": limit,
+        "direction": direction,
+        "summary": implicit_mod.summarize(weak_labels),
+        "examples": examples,
+    })
+
+
 async def post_goal(request: web.Request) -> web.Response:
     """Set the user's daily intention. Body: {"goal": str, "sensitivity": "gentle"|"balanced"|"responsive"}."""
     try:
@@ -290,6 +342,7 @@ def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app.router.add_get("/history", get_history)
     app.router.add_get("/status", get_status)
     app.router.add_get("/metrics", get_metrics)
+    app.router.add_get("/implicit", get_implicit)
     app.router.add_post("/snooze", post_snooze)
     app.router.add_post("/unsnooze", post_unsnooze)
     app.router.add_post("/goal", post_goal)

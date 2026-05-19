@@ -35,6 +35,16 @@ enum HarnessAPI {
         return await getJSON(url: c.url!)
     }
 
+    static func fetchImplicit(window: String = "7d", limit: Int = 80, direction: String = "all") async -> JSON? {
+        var c = URLComponents(url: baseURL().appendingPathComponent("implicit"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [
+            URLQueryItem(name: "window", value: window),
+            URLQueryItem(name: "limit", value: "\(limit)"),
+            URLQueryItem(name: "direction", value: direction),
+        ]
+        return await getJSON(url: c.url!)
+    }
+
     static func saveConfig(_ cfg: JSON) async -> Bool {
         var req = URLRequest(url: baseURL().appendingPathComponent("dashboard/config"))
         req.httpMethod = "POST"

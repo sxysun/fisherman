@@ -8,6 +8,9 @@ final class SettingsModel: ObservableObject {
     // Live state from /dashboard/data
     @Published var data: JSON?
     @Published var metrics: JSON?
+    @Published var implicitData: JSON?
+    @Published var implicitExamples: [[String: Any]] = []
+    @Published var implicitWindow: String = "7d"
     // Policy state from /status
     @Published var snoozedUntil: String?
 
@@ -116,9 +119,11 @@ final class SettingsModel: ObservableObject {
         async let c = HarnessAPI.fetchConfig()
         async let p = HarnessAPI.fetchPolicyState()
         async let m = HarnessAPI.fetchMetrics()
-        let (data, config, policy, metrics) = await (d, c, p, m)
+        async let i = HarnessAPI.fetchImplicit(window: implicitWindow, limit: 80)
+        let (data, config, policy, metrics, implicit) = await (d, c, p, m, i)
         self.data = data
         self.metrics = metrics
+        applyImplicit(implicit)
         self.rawConfig = config
         if let p = policy {
             self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
@@ -138,8 +143,14 @@ final class SettingsModel: ObservableObject {
             self.recentModelCalls = (data["recent_model_calls"].list).compactMap { $0 as? [String: Any] }
         }
         let labelCount = metrics?["labels"]["n"].int ?? 0
-        self.statusLine = "daemon ok · \(data?["n_candidates"].int ?? 0) candidates / \(data?["n_decisions"].int ?? 0) decisions · \(labelCount) labels"
+        let implicitUsable = implicit?["summary"]["usable"].int ?? 0
+        self.statusLine = "daemon ok · \(data?["n_candidates"].int ?? 0) candidates / \(data?["n_decisions"].int ?? 0) decisions · \(labelCount) labels · \(implicitUsable) implicit"
         self.dirty = false
+    }
+
+    func refreshImplicit() async {
+        let implicit = await HarnessAPI.fetchImplicit(window: implicitWindow, limit: 80)
+        applyImplicit(implicit)
     }
 
     func startPolling() {
@@ -149,13 +160,16 @@ final class SettingsModel: ObservableObject {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 if Task.isCancelled { break }
                 // Refresh non-editable data only, don't clobber user edits.
+                let window = await MainActor.run { self?.implicitWindow ?? "7d" }
                 let d = await HarnessAPI.fetchData()
                 let p = await HarnessAPI.fetchPolicyState()
                 let m = await HarnessAPI.fetchMetrics()
+                let i = await HarnessAPI.fetchImplicit(window: window, limit: 80)
                 await MainActor.run {
                     guard let self = self else { return }
                     self.data = d
                     self.metrics = m
+                    self.applyImplicit(i)
                     if let p = p {
                         self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
                         self.intentsMuted = Set(p["muted_intents"].list.compactMap { $0 as? String })
@@ -170,7 +184,8 @@ final class SettingsModel: ObservableObject {
                         self.recentModelCalls = (data["recent_model_calls"].list).compactMap { $0 as? [String: Any] }
                     }
                     let labelCount = m?["labels"]["n"].int ?? 0
-                    self.statusLine = "daemon ok · \(d?["n_candidates"].int ?? 0) candidates / \(d?["n_decisions"].int ?? 0) decisions · \(labelCount) labels"
+                    let implicitUsable = i?["summary"]["usable"].int ?? 0
+                    self.statusLine = "daemon ok · \(d?["n_candidates"].int ?? 0) candidates / \(d?["n_decisions"].int ?? 0) decisions · \(labelCount) labels · \(implicitUsable) implicit"
                 }
             }
         }
@@ -235,6 +250,11 @@ final class SettingsModel: ObservableObject {
 
         intentsEnabled = Set(c["intents"]["enabled"].list.compactMap { $0 as? String })
         dirty = false
+    }
+
+    private func applyImplicit(_ implicit: JSON?) {
+        self.implicitData = implicit
+        self.implicitExamples = (implicit?["examples"].list ?? []).compactMap { $0 as? [String: Any] }
     }
 
     func save() async {

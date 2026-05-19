@@ -15,6 +15,7 @@ struct SettingsRoot: View {
                     switch selectedTab {
                     case .today:       TodayTab(model: model)
                     case .status:      StatusTab(model: model)
+                    case .implicit:    ImplicitTab(model: model)
                     case .gate:        GateTab(model: model)
                     case .realizer:    RealizerTab(model: model)
                     case .sceneReader: SceneReaderTab(model: model)
@@ -154,6 +155,7 @@ struct TodayTab: View {
 enum SettingsTab: String, CaseIterable {
     case today = "Today"
     case status = "Status"
+    case implicit = "Implicit"
     case gate = "Behavior"
     case realizer = "Model"
     case sceneReader = "Scene Reader"
@@ -257,6 +259,209 @@ struct StatusTab: View {
     private func pct(_ value: JSON?) -> String {
         guard let value, !value.isNull else { return "n/a" }
         return String(format: "%.1f%%", value.double * 100.0)
+    }
+}
+
+// MARK: - Implicit signal tab
+
+struct ImplicitTab: View {
+    @ObservedObject var model: SettingsModel
+    @State private var selectedDirection = "all"
+
+    private let windows = ["24h", "7d", "30d"]
+    private let directions = ["all", "positive", "negative", "neutral", "ignored"]
+
+    var body: some View {
+        let summary = model.implicitData?["summary"]
+        let examples = filteredExamples
+
+        VStack(alignment: .leading, spacing: 14) {
+            SectionTitle("Outcome-derived labels")
+            HStack(spacing: 12) {
+                Stat(label: "Usable", value: "\(summary?["usable"].int ?? 0)")
+                Stat(label: "Weighted n", value: String(format: "%.1f", summary?["confidence_weighted_n"].double ?? 0))
+                Stat(label: "Positive", value: "\(summary?["positive"].int ?? 0)")
+                Stat(label: "Negative", value: "\(summary?["negative"].int ?? 0)")
+            }
+
+            HStack(spacing: 10) {
+                Picker("Window", selection: $model.implicitWindow) {
+                    ForEach(windows, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 160)
+                .onChange(of: model.implicitWindow) {
+                    Task { await model.refreshImplicit() }
+                }
+
+                Picker("Direction", selection: $selectedDirection) {
+                    ForEach(directions, id: \.self) { Text($0.capitalized).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 360)
+
+                Spacer()
+                Button("Refresh") { Task { await model.refreshImplicit() } }
+                    .buttonStyle(.bordered)
+            }
+
+            SectionTitle("Direction mix")
+            BarList(data: dictAsKVs(summary?["directions"].dict))
+
+            SectionTitle("Recent examples")
+            if examples.isEmpty {
+                Text("(no data)")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .padding(10)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(examples.enumerated()), id: \.offset) { _, example in
+                        ImplicitExampleRow(example: example)
+                    }
+                }
+            }
+        }
+    }
+
+    private var filteredExamples: [[String: Any]] {
+        model.implicitExamples.filter { row in
+            if selectedDirection == "all" { return true }
+            let direction = (row["direction"] as? String) ?? ""
+            if selectedDirection == "negative" {
+                return direction == "negative" || direction == "weak_negative"
+            }
+            return direction == selectedDirection
+        }
+    }
+
+    private func dictAsKVs(_ d: [String: Any]?) -> [(String, Int)] {
+        let pairs = (d ?? [:]).map { ($0.key, ($0.value as? Int) ?? 0) }
+        return pairs.sorted { $0.1 > $1.1 }.prefix(8).map { $0 }
+    }
+}
+
+struct ImplicitExampleRow: View {
+    let example: [String: Any]
+
+    var body: some View {
+        let decision = dict(example, "decision")
+        let outcome = dict(example, "outcome")
+        let context = dict(example, "context")
+        let reasons = list(decision, "reason_codes")
+        let targets = list(outcome, "considered_targets")
+        let message = str(context, "message")
+        let reward = number(outcome["reward_value"])
+        let confidence = number(example["confidence"]) ?? 0
+        let hover = hoverSummary(dict(outcome, "hover_ms_by_target"))
+
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(str(example, "label").uppercased())
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(directionColor)
+                Text(str(example, "direction"))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Text(String(format: "c=%.2f", confidence))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                if let reward {
+                    Text(String(format: "r=%.2f", reward))
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                Text(String(str(example, "ts").prefix(19)))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+
+            if !message.isEmpty {
+                Text("\"\(message)\"")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
+            }
+
+            HStack(spacing: 10) {
+                Text("app \(short(str(context, "app")))")
+                Text("scene \(short(str(context, "scene")))")
+                Text("decision \(str(decision, "action"))")
+                Text("user \(str(outcome, "user_action"))")
+                Text("signal \(str(outcome, "intent_signal"))")
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+
+            HStack(spacing: 10) {
+                if !targets.isEmpty {
+                    Text("targets \(targets.joined(separator: ","))")
+                }
+                if !hover.isEmpty {
+                    Text("hover \(hover)")
+                }
+                if !reasons.isEmpty {
+                    Text("reasons \(reasons.joined(separator: ","))")
+                }
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(6)
+    }
+
+    private var directionColor: Color {
+        switch str(example, "direction") {
+        case "positive": return .green
+        case "negative", "weak_negative": return .red
+        case "neutral": return .orange
+        default: return Color(nsColor: .secondaryLabelColor)
+        }
+    }
+
+    private func dict(_ row: [String: Any], _ key: String) -> [String: Any] {
+        row[key] as? [String: Any] ?? [:]
+    }
+
+    private func list(_ row: [String: Any], _ key: String) -> [String] {
+        if let values = row[key] as? [String] { return values }
+        return (row[key] as? [Any])?.compactMap { $0 as? String } ?? []
+    }
+
+    private func str(_ row: [String: Any], _ key: String) -> String {
+        let value = row[key]
+        if value == nil || value is NSNull { return "—" }
+        return String(describing: value!)
+    }
+
+    private func number(_ value: Any?) -> Double? {
+        if value == nil || value is NSNull { return nil }
+        if let n = value as? NSNumber { return n.doubleValue }
+        if let d = value as? Double { return d }
+        if let i = value as? Int { return Double(i) }
+        return nil
+    }
+
+    private func hoverSummary(_ row: [String: Any]) -> String {
+        row.compactMap { key, value in
+            guard let n = number(value) else { return nil }
+            return "\(key)=\(Int(n))ms"
+        }
+        .sorted()
+        .joined(separator: ",")
+    }
+
+    private func short(_ value: String, max: Int = 24) -> String {
+        if value.count <= max { return value }
+        return String(value.prefix(max - 1)) + "…"
     }
 }
 
