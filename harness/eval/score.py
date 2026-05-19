@@ -154,6 +154,11 @@ def score(
             if action == "notch_ping":
                 retro_would_annoy_pings += 1
                 annoying += conf  # weight retro labels by confidence
+            elif action == "no_ping":
+                # Back-compat with the original labeler copy: "would annoy"
+                # on a no_ping means a hypothetical ping would have annoyed,
+                # so the silence was correct.
+                retro_good_no_ping += 1
         elif label == "cant_tell":
             cant_tell += 1
 

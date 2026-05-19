@@ -2,7 +2,7 @@
 
 Endpoints:
   GET  /label                                 → HTML page (scrubber UI)
-  GET  /label/queue                           → next unlabeled decision (JSON)
+  GET  /label/queue                           → next unlabeled decision in a frozen session (JSON)
   GET  /label/timeline/<candidate_id>         → frames in window around decision
   GET  /label/frame/{ts_ms}                   → JPEG proxied from Fisherman
   POST /label/submit                          → append a row to retro_labels.jsonl
@@ -72,8 +72,11 @@ LABELING_HTML = """<!doctype html>
 
   /* ── Header ─────────────────────────────────────────────────────────── */
   header {
-    padding: 14px 24px;
-    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 12px 24px;
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) auto auto;
+    gap: 16px;
+    align-items: center;
     border-bottom: 1px solid var(--border);
   }
   header h1 {
@@ -81,12 +84,27 @@ LABELING_HTML = """<!doctype html>
     text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-2);
   }
   header .progress { color: var(--text-3); font: 11px ui-monospace; }
+  header .progress strong { color: var(--text-2); font-weight: 600; }
   header .keys { color: var(--text-3); font: 11px ui-monospace; }
   header .keys kbd {
     display: inline-block; padding: 1px 6px; margin: 0 2px;
     background: var(--panel-2); border: 1px solid var(--border-2);
     border-radius: 4px; font: 10px ui-monospace; color: var(--text-2);
   }
+  .queue-controls {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .queue-controls select, .queue-controls button {
+    height: 28px;
+    background: var(--panel);
+    border: 1px solid var(--border-2);
+    color: var(--text-2);
+    border-radius: 6px;
+    font: 11px ui-monospace;
+  }
+  .queue-controls select { padding: 0 8px; }
+  .queue-controls button { padding: 0 10px; cursor: pointer; }
+  .queue-controls button:hover { color: var(--text); border-color: var(--text-3); }
 
   /* ── Main ───────────────────────────────────────────────────────────── */
   main {
@@ -238,6 +256,22 @@ LABELING_HTML = """<!doctype html>
     text-transform: uppercase; letter-spacing: 0.08em;
     color: var(--text-3);
   }
+  .rubric {
+    border-color: rgba(208, 192, 143, 0.35);
+    background: linear-gradient(180deg, rgba(208, 192, 143, 0.08), var(--panel) 42%);
+  }
+  .rubric p {
+    margin: 0 0 8px;
+    color: var(--text-2);
+    font-size: 12px;
+  }
+  .rubric ol {
+    margin: 0;
+    padding-left: 18px;
+    color: var(--text-2);
+    font-size: 12px;
+  }
+  .rubric li { margin: 4px 0; }
   .meta-row {
     display: flex; justify-content: space-between; gap: 12px;
     padding: 4px 0;
@@ -355,18 +389,38 @@ let decisionIdx = 0;
 let confidence = 0.7;
 let playing = null;
 let labeledCount = 0;
+let sessionSkipped = new Set();
+let sessionCutoff = new Date().toISOString().replace(/[.][0-9]{3}Z$/, 'Z');
+let queueFilter = 'all';
+let queueOrder = 'newest';
+let lastQueue = null;
+let loading = false;
 
-async function loadNext() {
+async function loadNext(opts = {}) {
+  if (loading) return;
+  if (opts.skipCurrent && timeline) {
+    sessionSkipped.add(queueKey(timeline));
+  }
+  loading = true;
   setLoading();
-  const q = await fetch('/label/queue').then(r => r.json());
-  if (!q) { renderEmpty(); return; }
+  const params = new URLSearchParams({
+    before_ts: sessionCutoff,
+    order: queueOrder,
+    action: queueFilter,
+    exclude: Array.from(sessionSkipped).join(','),
+  });
+  const q = await fetch('/label/queue?' + params.toString()).then(r => r.json());
+  if (!q) { loading = false; timeline = null; renderEmpty(); return; }
+  lastQueue = q;
 
-  const t = await fetch(`/label/timeline/${q.candidate_id}`).then(r => r.json());
-  if (!t) { renderEmpty(); return; }
+  const timelineParams = new URLSearchParams({ decision_id: q.decision_id || '' });
+  const t = await fetch(`/label/timeline/${q.candidate_id}?${timelineParams.toString()}`).then(r => r.json());
+  if (!t || t.error) { loading = false; sessionSkipped.add(q.decision_id || q.candidate_id); loadNext(); return; }
   timeline = t;
   decisionIdx = (t.frames || []).findIndex(f => f.is_decision);
-  if (decisionIdx < 0) decisionIdx = Math.floor((t.frames.length - 1) / 2);
+  if (decisionIdx < 0) decisionIdx = Math.max(0, Math.floor(((t.frames || []).length - 1) / 2));
   activeIdx = decisionIdx;
+  loading = false;
   render();
   preloadAll();
 }
@@ -379,7 +433,9 @@ function renderEmpty() {
   document.getElementById('app').innerHTML = `
     <div class="empty">
       <h1>queue empty</h1>
-      <div>no unlabeled decisions left. labeled this session: ${labeledCount}</div>
+      <div>no unlabeled decisions in this frozen review session. labeled this session: ${labeledCount}</div>
+      <div>session cutoff: ${sessionCutoff} · skipped this session: ${sessionSkipped.size}</div>
+      <button class="label-btn" style="max-width:240px;text-align:center;display:block;" onclick="resetSession()">start fresh session</button>
     </div>`;
 }
 
@@ -392,16 +448,32 @@ function render() {
   const action = dec.action || '?';
   const intent = dec.intent || '—';
   const reasons = (dec.reason_codes || []).join(', ') || '—';
-  const remaining = (t.progress && t.progress.remaining) || 0;
+  const qProgress = (lastQueue && lastQueue.progress) || {};
+  const remaining = qProgress.remaining ?? ((t.progress && t.progress.remaining) || 0);
 
   document.getElementById('app').innerHTML = `
     <header>
-      <h1>retro label · ${t.candidate_id || ''}</h1>
-      <div class="progress">${labeledCount} labeled · ${remaining} remaining</div>
+      <div>
+        <h1>retro label · ${shortID(dec.decision_id || t.candidate_id || '')}</h1>
+        <div class="progress"><strong>${labeledCount}</strong> labeled · <strong>${sessionSkipped.size}</strong> skipped · <strong>${remaining}</strong> left in session</div>
+      </div>
+      <div class="queue-controls">
+        <select onchange="queueFilter = this.value; sessionSkipped.clear(); loadNext()" title="Decision type">
+          <option value="all" ${queueFilter === 'all' ? 'selected' : ''}>all decisions</option>
+          <option value="notch_ping" ${queueFilter === 'notch_ping' ? 'selected' : ''}>pings only</option>
+          <option value="no_ping" ${queueFilter === 'no_ping' ? 'selected' : ''}>silences only</option>
+        </select>
+        <select onchange="queueOrder = this.value; sessionSkipped.clear(); loadNext()" title="Queue order">
+          <option value="newest" ${queueOrder === 'newest' ? 'selected' : ''}>newest first</option>
+          <option value="oldest" ${queueOrder === 'oldest' ? 'selected' : ''}>oldest first</option>
+        </select>
+        <button onclick="loadNext({skipCurrent:true})" title="Skip this decision in the current session">skip</button>
+        <button onclick="resetSession()" title="Use current time as a new frozen cutoff">reset</button>
+      </div>
       <div class="keys">
         <kbd>←</kbd><kbd>→</kbd> scrub
         <kbd>space</kbd> play
-        <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> label
+        <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> label
         <kbd>s</kbd> skip
       </div>
     </header>
@@ -434,6 +506,15 @@ function render() {
         </div>
       </section>
       <aside>
+        <div class="meta-card rubric">
+          <h2>labeling rule</h2>
+          <p>Judge the yellow decision moment, not what is on screen now. Ask: would an interruption from Hermes have been useful right then?</p>
+          <ol>
+            <li><strong>Should ping</strong>: Hermes should interrupt here, or this ping was useful.</li>
+            <li><strong>Should stay quiet</strong>: silence was correct, or this ping was unwanted.</li>
+            <li><strong>Can't tell</strong>: the frame does not contain enough context.</li>
+          </ol>
+        </div>
         <div class="meta-card">
           <h2>decision</h2>
           <div class="meta-row"><span class="k">action</span><span class="v"><span class="badge ${action}">${action}</span></span></div>
@@ -460,34 +541,7 @@ function render() {
     </main>
     <footer>
       <div class="label-row">
-        <button class="label-btn help"  onclick="submit('would_help')">
-          <span class="lbl-body">
-            <span class="lbl-title">✓ Would have helped</span>
-            <span class="lbl-hint">a ping here would be welcome</span>
-          </span>
-          <span class="lbl-key">1</span>
-        </button>
-        <button class="label-btn annoy" onclick="submit('would_annoy')">
-          <span class="lbl-body">
-            <span class="lbl-title">✕ Would have annoyed</span>
-            <span class="lbl-hint">unwelcome interruption</span>
-          </span>
-          <span class="lbl-key">2</span>
-        </button>
-        <button class="label-btn good"  onclick="submit('good_no_ping')">
-          <span class="lbl-body">
-            <span class="lbl-title">· Good silence</span>
-            <span class="lbl-hint">no ping was right</span>
-          </span>
-          <span class="lbl-key">3</span>
-        </button>
-        <button class="label-btn cant"  onclick="submit('cant_tell')">
-          <span class="lbl-body">
-            <span class="lbl-title">? Can't tell</span>
-            <span class="lbl-hint">not enough context</span>
-          </span>
-          <span class="lbl-key">4</span>
-        </button>
+        ${labelButtons(action)}
       </div>
       <div class="extras">
         <div class="conf">
@@ -506,13 +560,51 @@ function render() {
   });
 }
 
+function labelButtons(action) {
+  const pingTitle = action === 'notch_ping' ? 'Good ping' : 'Should have pinged';
+  const pingHint = action === 'notch_ping' ? 'useful interruption' : 'missed useful interruption';
+  const quietLabel = action === 'notch_ping' ? 'would_annoy' : 'good_no_ping';
+  const quietTitle = action === 'notch_ping' ? 'Should stay quiet' : 'Good silence';
+  const quietHint = action === 'notch_ping' ? 'this ping was unwanted' : 'no ping was correct';
+  const quietClass = action === 'notch_ping' ? 'annoy' : 'good';
+  return `
+    <button class="label-btn help" onclick="submit('would_help')">
+      <span class="lbl-body">
+        <span class="lbl-title">${pingTitle}</span>
+        <span class="lbl-hint">${pingHint}</span>
+      </span>
+      <span class="lbl-key">1</span>
+    </button>
+    <button class="label-btn ${quietClass}" onclick="submit('${quietLabel}')">
+      <span class="lbl-body">
+        <span class="lbl-title">${quietTitle}</span>
+        <span class="lbl-hint">${quietHint}</span>
+      </span>
+      <span class="lbl-key">2</span>
+    </button>
+    <button class="label-btn cant" onclick="submit('cant_tell')">
+      <span class="lbl-body">
+        <span class="lbl-title">Can't tell</span>
+        <span class="lbl-hint">not enough context</span>
+      </span>
+      <span class="lbl-key">3</span>
+    </button>
+    <button class="label-btn cant" onclick="loadNext({skipCurrent:true})">
+      <span class="lbl-body">
+        <span class="lbl-title">Skip</span>
+        <span class="lbl-hint">do not label this example</span>
+      </span>
+      <span class="lbl-key">S</span>
+    </button>`;
+}
+
 function pctForIdx(idx) {
   if (!timeline || !timeline.frames || timeline.frames.length < 2) return 50;
   return (idx / (timeline.frames.length - 1)) * 100;
 }
 
 function setIdx(i) {
-  if (!timeline) return;
+  if (!timeline || !timeline.frames || timeline.frames.length === 0) return;
   const n = timeline.frames.length;
   activeIdx = Math.max(0, Math.min(n - 1, i));
   // partial re-render: update stage + cursor + thumb active class
@@ -615,20 +707,43 @@ async function submit(label) {
   if (playing) { clearInterval(playing); playing = null; }
   const dec = timeline.decision || {};
   const notes = document.getElementById('notes')?.value || '';
-  await fetch('/label/submit', {
+  const res = await fetch('/label/submit', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({
       candidate_id: timeline.candidate_id,
       decision_id: dec.decision_id,
+      decision_action: dec.action,
       label,
       confidence,
       notes,
       labeled_at_offset_sec: (timeline.frames[activeIdx] || {}).offset_sec,
+      queue_session_cutoff: sessionCutoff,
+      rubric_version: 'decision_moment_v2',
     }),
   });
+  if (!res.ok) return;
   labeledCount += 1;
+  sessionSkipped.add(queueKey(timeline));
   loadNext();
+}
+
+function queueKey(t) {
+  const dec = (t && t.decision) || {};
+  return dec.decision_id || (t && t.candidate_id) || '';
+}
+
+function resetSession() {
+  sessionCutoff = new Date().toISOString().replace(/[.][0-9]{3}Z$/, 'Z');
+  sessionSkipped.clear();
+  timeline = null;
+  lastQueue = null;
+  loadNext();
+}
+
+function shortID(s) {
+  s = String(s || '');
+  return s.length > 18 ? s.slice(0, 18) : s;
 }
 
 function escapeHTML(s) {
@@ -642,10 +757,12 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowLeft') { setIdx(activeIdx - 1); e.preventDefault(); }
   else if (e.key === ' ') { togglePlay(); e.preventDefault(); }
   else if (e.key === '1') submit('would_help');
-  else if (e.key === '2') submit('would_annoy');
-  else if (e.key === '3') submit('good_no_ping');
-  else if (e.key === '4') submit('cant_tell');
-  else if (e.key === 's' || e.key === 'S') loadNext();
+  else if (e.key === '2') {
+    const action = ((timeline || {}).decision || {}).action;
+    submit(action === 'notch_ping' ? 'would_annoy' : 'good_no_ping');
+  }
+  else if (e.key === '3') submit('cant_tell');
+  else if (e.key === 's' || e.key === 'S') loadNext({skipCurrent:true});
 });
 
 loadNext();
@@ -671,17 +788,48 @@ def _unix_to_iso(u: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(u))
 
 
-def _already_labeled() -> set[str]:
-    out: set[str] = set()
+def _already_labeled() -> tuple[set[str], set[str]]:
+    decision_ids: set[str] = set()
+    candidate_ids: set[str] = set()
     for row in iter_jsonl("retro_labels.jsonl"):
+        did = row.get("decision_id")
+        if did:
+            decision_ids.add(did)
         cid = row.get("candidate_id")
         if cid:
-            out.add(cid)
-    return out
+            candidate_ids.add(cid)
+    return decision_ids, candidate_ids
 
 
-def _count_unlabeled(rows: list[dict], labeled: set[str]) -> int:
-    return sum(1 for r in rows if r.get("candidate_id") and r["candidate_id"] not in labeled)
+def _is_labeled(row: dict, labeled: tuple[set[str], set[str]]) -> bool:
+    decision_ids, candidate_ids = labeled
+    did = row.get("decision_id")
+    cid = row.get("candidate_id")
+    return bool((did and did in decision_ids) or (cid and cid in candidate_ids))
+
+
+def _labeled_count(labeled: tuple[set[str], set[str]]) -> int:
+    # Modern labels carry both ids; older smoke/local rows may only have a
+    # candidate id. max() avoids double-counting modern labels.
+    return max(len(labeled[0]), len(labeled[1]))
+
+
+def _count_unlabeled(
+    rows: list[dict],
+    labeled: tuple[set[str], set[str]],
+    *,
+    action: str = "all",
+    before_ts: str | None = None,
+    exclude: set[str] | None = None,
+) -> int:
+    return len(_eligible_decisions(
+        rows,
+        labeled,
+        action=action,
+        before_ts=before_ts,
+        exclude=exclude or set(),
+        order="newest",
+    ))
 
 
 def _read_memory_snapshot(snapshot_id: Optional[str]) -> Optional[dict]:
@@ -701,13 +849,52 @@ def _candidates_index() -> dict[str, dict]:
     return {r.get("candidate_id"): r for r in tail_jsonl("candidates.jsonl", n=None) if r.get("candidate_id")}
 
 
-def _trace_for(candidate_id: str) -> Optional[dict]:
+def _trace_for(candidate_id: str, decision_id: Optional[str] = None) -> Optional[dict]:
     for row in iter_jsonl("traces.jsonl"):
+        action = row.get("action") or {}
+        if decision_id and action.get("decision_id") != decision_id:
+            continue
         state = row.get("state") or {}
         cand = state.get("candidate") or {}
         if cand.get("candidate_id") == candidate_id:
             return row
     return None
+
+
+def _eligible_decisions(
+    decisions: list[dict],
+    labeled: tuple[set[str], set[str]],
+    *,
+    action: str = "all",
+    before_ts: str | None = None,
+    exclude: set[str] | None = None,
+    order: str = "newest",
+) -> list[dict]:
+    exclude = exclude or set()
+    out: list[dict] = []
+    for d in decisions:
+        did = d.get("decision_id")
+        cid = d.get("candidate_id")
+        if not cid:
+            continue
+        if action in ("no_ping", "notch_ping") and d.get("action") != action:
+            continue
+        if before_ts and d.get("ts", "") > before_ts:
+            continue
+        if (did and did in exclude) or cid in exclude:
+            continue
+        if _is_labeled(d, labeled):
+            continue
+        out.append(d)
+    reverse = order != "oldest"
+    out.sort(key=lambda r: (r.get("ts", ""), r.get("decision_id", "")), reverse=reverse)
+    return out
+
+
+def _parse_exclude(raw: str | None) -> set[str]:
+    if not raw:
+        return set()
+    return {part.strip() for part in raw.split(",") if part.strip()}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -719,17 +906,34 @@ async def get_label_page(_: web.Request) -> web.Response:
 
 
 async def get_label_queue(request: web.Request) -> web.Response:
-    only_action = request.query.get("action")
+    action = request.query.get("action") or "all"
+    order = request.query.get("order") or "newest"
+    before_ts = request.query.get("before_ts") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    exclude = _parse_exclude(request.query.get("exclude"))
     labeled = _already_labeled()
     decisions = tail_jsonl("decisions.jsonl", n=None)
-    for action_pref in ([only_action] if only_action else ["no_ping", "notch_ping"]):
-        for d in reversed(decisions):
-            if d.get("action") != action_pref:
-                continue
-            cid = d.get("candidate_id")
-            if not cid or cid in labeled:
-                continue
-            return web.json_response({"candidate_id": cid, "decision_id": d.get("decision_id")})
+    eligible = _eligible_decisions(
+        decisions,
+        labeled,
+        action=action,
+        before_ts=before_ts,
+        exclude=exclude,
+        order=order,
+    )
+    if eligible:
+        d = eligible[0]
+        return web.json_response({
+            "candidate_id": d.get("candidate_id"),
+            "decision_id": d.get("decision_id"),
+            "session_cutoff": before_ts,
+            "order": order,
+            "action": action,
+            "progress": {
+                "remaining": len(eligible),
+                "labeled": _labeled_count(labeled),
+                "skipped": len(exclude),
+            },
+        })
     return web.json_response(None)
 
 
@@ -739,8 +943,16 @@ async def get_label_timeline(request: web.Request) -> web.Response:
     if not candidate_id:
         return web.json_response({"error": "missing candidate_id"}, status=400)
 
+    decision_id = request.query.get("decision_id")
     decisions = tail_jsonl("decisions.jsonl", n=None)
-    decision = next((d for d in reversed(decisions) if d.get("candidate_id") == candidate_id), None)
+    decision = next(
+        (
+            d for d in reversed(decisions)
+            if d.get("candidate_id") == candidate_id
+            and (not decision_id or d.get("decision_id") == decision_id)
+        ),
+        None,
+    )
     if not decision:
         return web.json_response({"error": "decision not found"}, status=404)
 
@@ -832,7 +1044,7 @@ async def get_label_timeline(request: web.Request) -> web.Response:
         fr["is_decision"] = fr["ts_ms"] == anchor_ts_ms
 
     # Pull memory snapshot from local trace, if any
-    trace = _trace_for(candidate_id)
+    trace = _trace_for(candidate_id, decision.get("decision_id"))
     mem_snap_id = ((trace or {}).get("state") or {}).get("memory_snapshot_id")
     memory = _read_memory_snapshot(mem_snap_id)
 
@@ -851,7 +1063,7 @@ async def get_label_timeline(request: web.Request) -> web.Response:
         "scene": candidate.get("scene") or {},
         "memory": memory,
         "frames": timeline_frames,
-        "progress": {"labeled": len(labeled), "remaining": remaining},
+        "progress": {"labeled": _labeled_count(labeled), "remaining": remaining},
     }
     return web.json_response(payload)
 
@@ -903,12 +1115,26 @@ async def post_label_submit(request: web.Request) -> web.Response:
     cid = body.get("candidate_id")
     if not cid:
         return web.json_response({"error": "missing candidate_id"}, status=400)
+    label = body.get("label")
+    if label not in {"would_help", "would_annoy", "good_no_ping", "cant_tell"}:
+        return web.json_response({"error": "bad label"}, status=400)
+    decision_id = body.get("decision_id")
+    if _is_labeled({"candidate_id": cid, "decision_id": decision_id}, _already_labeled()):
+        return web.json_response({"ok": True, "duplicate": True})
+    try:
+        confidence = float(body.get("confidence", 1.0))
+    except (TypeError, ValueError):
+        confidence = 1.0
+    confidence = max(0.0, min(1.0, confidence))
     row = {
         "candidate_id": cid,
-        "decision_id": body.get("decision_id"),
-        "label": body.get("label"),
-        "confidence": float(body.get("confidence", 1.0)),
+        "decision_id": decision_id,
+        "decision_action": body.get("decision_action"),
+        "label": label,
+        "confidence": confidence,
         "labeled_at_offset_sec": body.get("labeled_at_offset_sec"),
+        "queue_session_cutoff": body.get("queue_session_cutoff"),
+        "rubric_version": body.get("rubric_version") or "decision_moment_v2",
         "notes": body.get("notes") or "",
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }

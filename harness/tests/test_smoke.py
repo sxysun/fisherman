@@ -12,7 +12,9 @@ from harness import critic as critic_mod
 from harness import fisherman_client as fc_mod
 from harness import gate as gate_mod
 from harness import image_redaction as image_redaction_mod
+from harness import label_ui as label_ui_mod
 from harness import memory as memory_mod
+from harness import metrics as metrics_mod
 from harness import model_audit as model_audit_mod
 from harness import privacy as privacy_mod
 from harness import push as push_mod
@@ -39,7 +41,9 @@ def test_imports():
     assert push_mod
     assert privacy_mod
     assert image_redaction_mod
+    assert label_ui_mod
     assert model_audit_mod
+    assert metrics_mod
     assert server_mod
     assert sql_store_mod
 
@@ -466,6 +470,154 @@ def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
         assert trace_rows[0]["outcome_action"] == "dismissed"
         assert trace_rows[0]["reward_value"] == -0.8
         assert '"user_action":"dismissed"' in trace_rows[0]["payload_json"]
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_label_queue_uses_frozen_cursor_and_session_skip(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        decisions = [
+            {
+                "decision_id": "pd_old",
+                "candidate_id": "cand_old",
+                "ts": "2026-05-19T12:00:00Z",
+                "action": "no_ping",
+            },
+            {
+                "decision_id": "pd_mid",
+                "candidate_id": "cand_mid",
+                "ts": "2026-05-19T12:05:00Z",
+                "action": "notch_ping",
+            },
+            {
+                "decision_id": "pd_new",
+                "candidate_id": "cand_new",
+                "ts": "2026-05-19T12:10:00Z",
+                "action": "no_ping",
+            },
+            {
+                "decision_id": "pd_live",
+                "candidate_id": "cand_live",
+                "ts": "2026-05-19T12:15:00Z",
+                "action": "no_ping",
+            },
+        ]
+        for row in decisions:
+            store_mod.append_jsonl("decisions.jsonl", row)
+        store_mod.append_jsonl(
+            "retro_labels.jsonl",
+            {
+                "candidate_id": "cand_old",
+                "decision_id": "pd_old",
+                "label": "good_no_ping",
+                "ts": "2026-05-19T12:20:00Z",
+            },
+        )
+
+        req = make_mocked_request(
+            "GET",
+            "/label/queue?before_ts=2026-05-19T12:10:00Z&order=newest&action=all",
+        )
+        resp = asyncio.run(label_ui_mod.get_label_queue(req))
+        body = json.loads(resp.text)
+        assert body["decision_id"] == "pd_new"
+        assert body["progress"]["remaining"] == 2
+
+        req = make_mocked_request(
+            "GET",
+            "/label/queue?before_ts=2026-05-19T12:10:00Z&order=newest&action=all&exclude=pd_new",
+        )
+        resp = asyncio.run(label_ui_mod.get_label_queue(req))
+        body = json.loads(resp.text)
+        assert body["decision_id"] == "pd_mid"
+
+        req = make_mocked_request(
+            "GET",
+            "/label/queue?before_ts=2026-05-19T12:10:00Z&order=newest&action=no_ping&exclude=pd_new",
+        )
+        resp = asyncio.run(label_ui_mod.get_label_queue(req))
+        assert resp.text == "null"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_metrics_computes_label_quality_and_readiness(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {
+                "decision_id": "pd_ping_good",
+                "candidate_id": "cand_ping_good",
+                "ts": "2026-05-19T12:00:00Z",
+                "action": "notch_ping",
+            },
+        )
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {
+                "decision_id": "pd_ping_bad",
+                "candidate_id": "cand_ping_bad",
+                "ts": "2026-05-19T12:01:00Z",
+                "action": "notch_ping",
+            },
+        )
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {
+                "decision_id": "pd_silence_bad",
+                "candidate_id": "cand_silence_bad",
+                "ts": "2026-05-19T12:02:00Z",
+                "action": "no_ping",
+            },
+        )
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {
+                "decision_id": "pd_silence_good",
+                "candidate_id": "cand_silence_good",
+                "ts": "2026-05-19T12:02:30Z",
+                "action": "no_ping",
+            },
+        )
+        store_mod.append_jsonl(
+            "outcomes.jsonl",
+            {
+                "decision_id": "pd_ping_good",
+                "user_action": "clicked",
+                "ts": "2026-05-19T12:03:00Z",
+            },
+        )
+        for row in [
+            ("pd_ping_good", "cand_ping_good", "would_help"),
+            ("pd_ping_bad", "cand_ping_bad", "would_annoy"),
+            ("pd_silence_bad", "cand_silence_bad", "would_help"),
+            ("pd_silence_good", "cand_silence_good", "would_annoy"),
+        ]:
+            store_mod.append_jsonl(
+                "retro_labels.jsonl",
+                {
+                    "decision_id": row[0],
+                    "candidate_id": row[1],
+                    "label": row[2],
+                    "confidence": 1.0,
+                    "ts": "2026-05-19T12:04:00Z",
+                },
+            )
+
+        report = metrics_mod.compute(window="365d")
+        assert report["n_decisions"] == 4
+        assert report["n_pings"] == 2
+        assert report["outcomes"]["capture_rate_for_pings"] == 0.5
+        assert report["labels"]["agreement_rate"] == 0.5
+        assert report["labels"]["false_interruption_rate_labeled"] == 0.5
+        assert report["labels"]["missed_help_rate_labeled"] == 0.5
+        assert report["data_readiness"]["needs_labels_for_personalization"] == 16
     finally:
         store_mod.HARNESS_DIR = old_dir
 

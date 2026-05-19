@@ -178,6 +178,13 @@ async def get_status(request: web.Request) -> web.Response:
     )
 
 
+async def get_metrics(request: web.Request) -> web.Response:
+    from . import metrics as metrics_mod
+
+    window = request.query.get("window", "24h")
+    return web.json_response(metrics_mod.compute(window=window))
+
+
 async def post_goal(request: web.Request) -> web.Response:
     """Set the user's daily intention. Body: {"goal": str, "sensitivity": "gentle"|"balanced"|"responsive"}."""
     try:
@@ -280,6 +287,7 @@ def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app.router.add_post("/outcome", post_outcome)
     app.router.add_get("/history", get_history)
     app.router.add_get("/status", get_status)
+    app.router.add_get("/metrics", get_metrics)
     app.router.add_post("/snooze", post_snooze)
     app.router.add_post("/unsnooze", post_unsnooze)
     app.router.add_post("/goal", post_goal)

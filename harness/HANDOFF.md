@@ -85,7 +85,8 @@ harness/
 │   ├── model_audit.py            privacy-safe model-call audit ledger
 │   ├── schemas.py                ALL dataclasses
 │   ├── config.py                 TOML config + default
-│   ├── label_ui.py               rewind-style labeling web UI
+│   ├── label_ui.py               rewind-style labeling web UI with frozen queue
+│   ├── metrics.py                live outcome + retro-label quality metrics
 │   └── dashboard_ui.py           settings/diag web UI (now superseded by native settings)
 │
 ├── policies/
@@ -100,7 +101,7 @@ harness/
 │
 ├── eval/                         CLI-driven offline tools
 │   ├── replay.py                 shadow-replay a policy on frozen candidates
-│   └── score.py                  utility + reward_v2 from outcomes + retro_labels
+│   └── score.py                  replay scoring + reward_v2 from outcomes/labels
 │
 ├── notch/                        Swift package
 │   ├── Package.swift             depends on ../../menubar/Packages/DynamicNotchKit
@@ -121,7 +122,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           25 tests; pytest passes
+└── tests/test_smoke.py           27 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -208,9 +209,18 @@ User flow once it's running:
 
 ✅ Retro labeling UI at :7893/label
    - Rewind-style: drag scrubber, ±2min window, ~60 thumbnails
-   - 4 label classes + confidence + notes
-   - Keyboard 1/2/3/4 + arrow scrubbing + space play
+   - Frozen review-session cutoff, so live daemon ticks do not keep jumping
+     the queue to the latest candidate
+   - Session skip state, action/order filters, confidence, and notes
+   - Clear rubric: Should ping / Should stay quiet / Can't tell
+   - Keyboard 1/2/3 + arrow scrubbing + space play + S skip
    - Feeds reward_v2 + future few-shot personalization
+
+✅ Live lab metrics
+   - `harness metrics --since 24h` reports ping rate, outcome capture,
+     avg reward, retro-label agreement, false-interruption rate, missed-help
+     rate, and readiness thresholds
+   - `/metrics?window=24h` exposes the same JSON from the daemon
 
 ✅ Outcome capture rich enough for RL
    - Per outcome: clicked/dismissed/snoozed/timed_out
@@ -277,9 +287,10 @@ User flow once it's running:
    responsive sensitivity (2-min cooldown) should help but real-world testing
    hasn't happened yet — only test --push pills.
 
-⚠ Zero retro labels in retro_labels.jsonl
-   The labeling UI is built and tested, but the user hasn't actually labeled
-   anything. recall_at_strong in score.py reports null until they do.
+⚠ Retro labels still sparse
+   The user has started labeling, but the current count is still below the
+   20-label personalization threshold and far below the 500-label learned-gate
+   threshold. Metrics exist now, but they are not statistically meaningful yet.
 ```
 
 ---
@@ -293,7 +304,7 @@ User flow once it's running:
    ~3000 candidates today and only ~5 organic pings — the gate may be too
    conservative even at "responsive."
 
-2. **Label 20-30 retros.** Open `:7893/label`, drag, press 1-4. This is
+2. **Label 20-30 retros.** Open `:7893/label`, drag, press 1-3. This is
    the single highest-leverage thing right now — it unlocks recall metrics
    AND few-shot personalization.
 
@@ -396,7 +407,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 25/25
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 27/27
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

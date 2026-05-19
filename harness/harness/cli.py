@@ -397,6 +397,42 @@ def dashboard() -> None:
 
 
 @main.command()
+@click.option("--since", default="24h", help="Window: 24h, 7d, etc.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def metrics(since: str, as_json: bool) -> None:
+    """Print lab-grade live metrics from outcomes and retro labels."""
+    from . import metrics as metrics_mod
+
+    report = metrics_mod.compute(window=since)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    labels = report["labels"]
+    outcomes = report["outcomes"]
+    readiness = report["data_readiness"]
+    click.echo(f"window: {report['window']} since {report['since']}")
+    click.echo(f"decisions: {report['n_decisions']}  pings: {report['n_pings']}  ping_rate: {_fmt_pct(report['ping_rate'])}")
+    click.echo(
+        "outcomes: "
+        f"{outcomes['n']}  capture_for_pings: {_fmt_pct(outcomes['capture_rate_for_pings'])}  "
+        f"avg_reward: {_fmt_num(outcomes['avg_reward'])}"
+    )
+    click.echo(
+        "labels: "
+        f"{labels['n']}  agreement: {_fmt_pct(labels['agreement_rate'])}  "
+        f"false_interruptions: {_fmt_pct(labels['false_interruption_rate_labeled'])}  "
+        f"missed_help: {_fmt_pct(labels['missed_help_rate_labeled'])}"
+    )
+    click.echo(
+        "readiness: "
+        f"personalization={readiness['personalization_ready']} "
+        f"(need {readiness['needs_labels_for_personalization']} more), "
+        f"learned_gate={readiness['learned_gate_ready']} "
+        f"(need {readiness['needs_labels_for_learned_gate']} more)"
+    )
+
+
+@main.command()
 def stop() -> None:
     """Stop a running daemon (by port :7893) and its notch app."""
     daemon_killed = False
@@ -511,6 +547,24 @@ def _duration_seconds(s: str) -> int:
         n = 1
     unit = s[-1]
     return {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(unit, 60) * n
+
+
+def _fmt_pct(value: object) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _fmt_num(value: object) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "n/a"
 
 
 if __name__ == "__main__":
