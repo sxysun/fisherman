@@ -191,7 +191,7 @@
     <p class="dek">A direct assessment of the proactive-presence harness as of May 19, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
-      <span class="pill">Smoke tests: 27/27 passing</span>
+      <span class="pill">Smoke tests: 28/28 passing</span>
       <span class="pill">Approx. source/docs: 55 files, 10k lines</span>
       <span class="pill">Generated: 2026-05-19</span>
     </div>
@@ -308,8 +308,8 @@
       </tr>
       <tr>
         <td>Persistent storage</td>
-        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, outcomes, labels, and model calls. A CLI backfill can rebuild the sidecar from JSONL.</td>
-        <td>Formal migrations, read-path migration, idempotent delivery semantics, retention/compaction, and automated recovery/backfill validation.</td>
+        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, outcomes, labels, and model calls. A CLI backfill can rebuild the sidecar from JSONL. Pending notch delivery is leased and completed on outcome.</td>
+        <td>Formal migrations, read-path migration, retention/compaction, and automated recovery/backfill validation.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>
@@ -365,6 +365,7 @@
         <li>Added a typed SQLite sidecar so JSONL events can be queried without log scans.</li>
         <li>Fixed the retro labeler queue so review sessions are frozen and skip moves forward instead of chasing live latest candidates.</li>
         <li>Added live lab metrics for outcome capture, reward, label agreement, false interruptions, missed help, and data-readiness thresholds.</li>
+        <li>Made pending notch delivery idempotent with leases, so a notch crash between poll and outcome does not silently drop a message.</li>
         <li>Improved replay to use live config, policy state, outcomes, and cooldown simulation.</li>
         <li>URL-encoded Fisherman query tool parameters.</li>
         <li>Switched session-memory timestamp parsing to UTC-safe parsing.</li>
@@ -441,7 +442,6 @@
         <li>Add shadow-policy comparison and counterfactual confidence intervals.</li>
         <li>Add launchd install/start/stop for the harness daemon.</li>
         <li>Add live config reload after Settings saves.</li>
-        <li>Make pending delivery idempotent so a notch crash cannot drop a message.</li>
         <li>Migrate dashboard/eval read paths from JSONL scans to the SQLite sidecar.</li>
         <li>Add token-level OCR boxes, sensitive-domain suppression, and per-provider trust boundaries.</li>
       </ul>

@@ -392,6 +392,40 @@ def test_store_attaches_outcome_to_trace(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_pending_claim_lease_and_completion(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.write_pending(
+            "pd_pending",
+            {
+                "decision_id": "pd_pending",
+                "candidate_id": "cand_pending",
+                "message": "hello",
+            },
+        )
+        first = store_mod.claim_pending(lease_sec=60)
+        assert first is not None
+        assert first["decision_id"] == "pd_pending"
+        assert first["pending_attempts"] == 1
+        assert store_mod.claim_pending(lease_sec=60) is None
+
+        p = tmp_path / "pending" / "pd_pending.json"
+        with open(p) as f:
+            payload = json.load(f)
+        payload["pending_lease_until_unix"] = time.time() - 1
+        with open(p, "w") as f:
+            json.dump(payload, f)
+
+        second = store_mod.claim_pending(lease_sec=60)
+        assert second is not None
+        assert second["pending_attempts"] == 2
+        assert store_mod.complete_pending("pd_pending")
+        assert store_mod.claim_pending(lease_sec=60) is None
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path

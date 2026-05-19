@@ -124,8 +124,55 @@ def iter_jsonl(filename: str) -> Iterator[dict]:
 def write_pending(decision_id: str, payload: dict) -> None:
     ensure_dirs()
     p = HARNESS_DIR / "pending" / f"{decision_id}.json"
+    payload = dict(payload)
+    payload.setdefault("pending_created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    payload.setdefault("pending_attempts", 0)
+    payload.pop("pending_lease_until_unix", None)
     with open(p, "w") as f:
         json.dump(payload, f)
+
+
+def claim_pending(lease_sec: float = 15.0) -> Optional[dict]:
+    """Return the oldest unleased pending payload and mark it in-flight.
+
+    The notch app reports the eventual outcome asynchronously. Removing the
+    file at poll time can drop a message if the app crashes between poll and
+    outcome, so polling now takes a short lease and outcome completion removes
+    the file. If the app dies, the lease expires and the payload is claimable
+    again.
+    """
+    ensure_dirs()
+    pending_dir = HARNESS_DIR / "pending"
+    now = time.time()
+    files = sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    for p in files:
+        try:
+            with open(p) as f:
+                payload = json.load(f)
+        except Exception:
+            p.unlink(missing_ok=True)
+            continue
+        lease_until = float(payload.get("pending_lease_until_unix") or 0)
+        if lease_until > now:
+            continue
+        payload["pending_attempts"] = int(payload.get("pending_attempts") or 0) + 1
+        payload["pending_claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+        payload["pending_lease_until_unix"] = now + float(lease_sec)
+        tmp = p.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, p)
+        return payload
+    return None
+
+
+def complete_pending(decision_id: str) -> bool:
+    ensure_dirs()
+    p = HARNESS_DIR / "pending" / f"{decision_id}.json"
+    if not p.exists():
+        return False
+    p.unlink(missing_ok=True)
+    return True
 
 
 def pop_pending() -> Optional[dict]:

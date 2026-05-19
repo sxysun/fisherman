@@ -9,8 +9,9 @@ from . import reward as reward_mod
 from .store import (
     attach_outcome_to_trace,
     append_jsonl,
+    claim_pending,
+    complete_pending,
     list_pending,
-    pop_pending,
     read_policy_state,
     tail_jsonl,
     write_policy_state,
@@ -32,8 +33,8 @@ def _apply_snooze_from_outcome(row: dict, duration: str = "30m") -> None:
 
 
 async def get_pending(request: web.Request) -> web.Response:
-    """Return the oldest pending push (and remove it). For polling by NotchApp."""
-    payload = pop_pending()
+    """Return the oldest unleased pending push. Outcome completion removes it."""
+    payload = claim_pending()
     if payload is None:
         return web.json_response(None)
     return web.json_response(payload)
@@ -85,6 +86,7 @@ async def post_outcome(request: web.Request) -> web.Response:
     row["reward"] = reward
     append_jsonl("outcomes.jsonl", row)
     attach_outcome_to_trace(decision_id, row, reward)
+    complete_pending(decision_id)
     return web.json_response({"ok": True})
 
 

@@ -122,7 +122,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           27 tests; pytest passes
+└── tests/test_smoke.py           28 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -248,6 +248,13 @@ User flow once it's running:
      traces, outcomes, model calls, and retro labels
    - Late outcome attachment updates both `traces.jsonl` and the typed trace row
    - `harness storage-backfill --reset` rebuilds the sidecar from existing JSONL
+
+✅ Idempotent pending delivery
+   - `/pending` now leases the oldest pending payload instead of deleting it
+     at poll time
+   - `/outcome` removes the pending payload only after feedback is recorded
+   - If HarnessNotch crashes between poll and outcome, the lease expires and
+     the message can be claimed again
 ```
 
 ---
@@ -407,7 +414,7 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 ```bash
 cd ~/Desktop/suapp/fisherman/harness
-.venv/bin/python -m pytest tests/test_smoke.py        # should pass 27/27
+.venv/bin/python -m pytest tests/test_smoke.py        # should pass 28/28
 .venv/bin/harness install                              # creates ~/.harness/
 .venv/bin/harness start --foreground &                 # in another shell
 sleep 5

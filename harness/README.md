@@ -76,7 +76,7 @@ harness/
 ├── prompts/        Realizer + critic prompts
 ├── notch/          Swift app (HarnessNotch.app)
 ├── eval/           replay.py, score.py (offline policy analysis)
-├── tests/          smoke tests (27/27 passing)
+├── tests/          smoke tests (28/28 passing)
 └── HANDOFF.md      read this for the full picture
 ```
 
