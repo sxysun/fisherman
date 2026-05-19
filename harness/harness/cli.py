@@ -452,6 +452,7 @@ def metrics(since: str, as_json: bool) -> None:
         click.echo(json.dumps(report, indent=2))
         return
     labels = report["labels"]
+    implicit = report["implicit"]
     outcomes = report["outcomes"]
     readiness = report["data_readiness"]
     click.echo(f"window: {report['window']} since {report['since']}")
@@ -468,12 +469,51 @@ def metrics(since: str, as_json: bool) -> None:
         f"missed_help: {_fmt_pct(labels['missed_help_rate_labeled'])}"
     )
     click.echo(
+        "implicit: "
+        f"{implicit['usable']}/{implicit['n']} usable  "
+        f"weighted_n: {_fmt_num(implicit['confidence_weighted_n'])}  "
+        f"positive: {implicit['positive']}  negative: {implicit['negative']}  "
+        f"ignored: {implicit['ignored']}"
+    )
+    click.echo(
         "readiness: "
         f"personalization={readiness['personalization_ready']} "
         f"(need {readiness['needs_labels_for_personalization']} more), "
+        f"implicit_personalization={readiness['implicit_personalization_ready']} "
+        f"(need {readiness['needs_implicit_for_personalization']} more), "
         f"learned_gate={readiness['learned_gate_ready']} "
         f"(need {readiness['needs_labels_for_learned_gate']} more)"
     )
+
+
+@main.command("implicit")
+@click.option("--since", default="7d", help="Window: 24h, 7d, etc.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit weak labels JSON.")
+def implicit(since: str, as_json: bool) -> None:
+    """Show weak labels inferred from notification behavior."""
+    from . import implicit as implicit_mod
+    from . import metrics as metrics_mod
+
+    since_iso = metrics_mod.since_iso(since)
+    decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl")
+    outcomes = metrics_mod._read_payloads("outcomes", "outcomes.jsonl", since_iso=since_iso)
+    decisions_by_id = {d.get("decision_id"): d for d in decisions if d.get("decision_id")}
+    weak = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
+    summary = implicit_mod.summarize(weak)
+    if as_json:
+        click.echo(json.dumps({"window": since, "since": since_iso, "summary": summary, "weak_labels": weak}, indent=2))
+        return
+    click.echo(f"window: {since} since {since_iso}")
+    click.echo(
+        f"weak labels: {summary['usable']}/{summary['n']} usable  "
+        f"weighted_n: {_fmt_num(summary['confidence_weighted_n'])}"
+    )
+    click.echo(
+        f"positive: {summary['positive']}  negative: {summary['negative']}  "
+        f"neutral: {summary['neutral']}  ignored: {summary['ignored']}"
+    )
+    for label, n_rows in sorted(summary["counts"].items(), key=lambda kv: (-kv[1], kv[0])):
+        click.echo(f"  {label:22s} {n_rows:5d}")
 
 
 @main.command("shadow")

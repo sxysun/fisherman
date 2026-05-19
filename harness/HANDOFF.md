@@ -246,6 +246,10 @@ User flow once it's running:
    - + interaction_summary with hover targets, approach count, intent_signal tier
    - Hovering dismiss and then timing out is treated as soft rejection and
      feeds the live recent-negative-feedback backoff
+   - `harness implicit --since 7d` converts notification behavior into
+     confidence-weighted weak labels without polluting retro_labels.jsonl
+   - Metrics now show both explicit retro-label readiness and implicit
+     outcome-signal readiness
 
 ✅ Harness privacy preflight
    - OCR text is scanned locally for secret-like patterns before model prompts

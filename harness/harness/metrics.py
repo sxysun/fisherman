@@ -4,6 +4,7 @@ import time
 from collections import Counter
 from typing import Any, Optional
 
+from . import implicit as implicit_mod
 from . import reward as reward_mod
 from . import sql_store
 from .store import iter_jsonl
@@ -70,15 +71,21 @@ def compute(window: str = "24h") -> dict[str, Any]:
         joined_labels.append((label, decision))
 
     label_quality = _label_quality(joined_labels)
+    weak_labels = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
+    implicit_summary = implicit_mod.summarize(weak_labels)
     reward_summary = reward_mod.aggregate_rewards(outcomes)
     total_reward = float(reward_summary.get("total", 0.0) or 0.0)
 
+    implicit_needed = max(0, 50 - int(implicit_summary.get("usable") or 0))
     data_readiness = {
         "retro_labels": len(labels),
         "outcomes": len(outcomes),
+        "implicit_usable": implicit_summary.get("usable", 0),
         "personalization_ready": len(labels) >= 20,
+        "implicit_personalization_ready": implicit_needed == 0,
         "learned_gate_ready": len(labels) >= 500,
         "needs_labels_for_personalization": max(0, 20 - len(labels)),
+        "needs_implicit_for_personalization": implicit_needed,
         "needs_labels_for_learned_gate": max(0, 500 - len(labels)),
     }
 
@@ -104,6 +111,7 @@ def compute(window: str = "24h") -> dict[str, Any]:
             "counts": dict(label_counts),
             **label_quality,
         },
+        "implicit": implicit_summary,
         "data_readiness": data_readiness,
     }
 

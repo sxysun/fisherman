@@ -14,6 +14,7 @@ from harness import fisherman_client as fc_mod
 from harness import experiments as experiments_mod
 from harness import gate as gate_mod
 from harness import image_redaction as image_redaction_mod
+from harness import implicit as implicit_mod
 from harness import label_ui as label_ui_mod
 from harness import memory as memory_mod
 from harness import metrics as metrics_mod
@@ -47,6 +48,7 @@ def test_imports():
     assert push_mod
     assert privacy_mod
     assert image_redaction_mod
+    assert implicit_mod
     assert label_ui_mod
     assert model_audit_mod
     assert metrics_mod
@@ -821,12 +823,56 @@ def test_metrics_computes_label_quality_and_readiness(tmp_path):
         assert report["n_decisions"] == 4
         assert report["n_pings"] == 2
         assert report["outcomes"]["capture_rate_for_pings"] == 0.5
+        assert report["implicit"]["usable"] == 1
+        assert report["implicit"]["positive"] == 1
         assert report["labels"]["agreement_rate"] == 0.5
         assert report["labels"]["false_interruption_rate_labeled"] == 0.5
         assert report["labels"]["missed_help_rate_labeled"] == 0.5
         assert report["data_readiness"]["needs_labels_for_personalization"] == 16
     finally:
         store_mod.HARNESS_DIR = old_dir
+
+
+def test_implicit_outcomes_become_confidence_weighted_weak_labels():
+    decision = {
+        "decision_id": "pd_implicit",
+        "candidate_id": "cand_implicit",
+        "action": "notch_ping",
+        "reason_codes": ["goal_aligned_help"],
+    }
+    positive = implicit_mod.weak_label_for_outcome(
+        {
+            "decision_id": "pd_implicit",
+            "user_action": "clicked",
+            "interaction_summary": {"intent_signal": "committed"},
+        },
+        decision,
+    )
+    assert positive["label"] == "would_help"
+    assert positive["direction"] == "positive"
+    assert positive["confidence"] > 0.9
+
+    weak_negative = implicit_mod.weak_label_for_outcome(
+        {
+            "decision_id": "pd_implicit",
+            "user_action": "timed_out",
+            "interaction_summary": {"intent_signal": "rejection_considered"},
+        },
+        decision,
+    )
+    assert weak_negative["label"] == "would_annoy"
+    assert weak_negative["direction"] == "negative"
+
+    ignored = implicit_mod.weak_label_for_outcome(
+        {"decision_id": "pd_implicit", "user_action": "timed_out"},
+        decision,
+    )
+    assert ignored["usable_for_training"] is False
+
+    summary = implicit_mod.summarize([positive, weak_negative, ignored])
+    assert summary["usable"] == 2
+    assert summary["positive"] == 1
+    assert summary["negative"] == 1
 
 
 def test_shadow_eval_compares_policy_variants_against_labels(tmp_path):

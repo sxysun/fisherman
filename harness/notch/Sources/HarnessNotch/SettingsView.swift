@@ -225,6 +225,19 @@ struct StatusTab: View {
                 Stat(label: "Need personal",    value: "\(model.metrics?["data_readiness"]["needs_labels_for_personalization"].int ?? 20)")
                 Stat(label: "Need learned",     value: "\(model.metrics?["data_readiness"]["needs_labels_for_learned_gate"].int ?? 500)")
             }
+            SectionTitle("Implicit learning signal")
+            HStack(spacing: 12) {
+                Stat(label: "Usable implicit",   value: "\(model.metrics?["implicit"]["usable"].int ?? 0)")
+                Stat(label: "Weighted n",        value: String(format: "%.1f", model.metrics?["implicit"]["confidence_weighted_n"].double ?? 0))
+                Stat(label: "Implicit +",        value: "\(model.metrics?["implicit"]["positive"].int ?? 0)")
+                Stat(label: "Implicit -",        value: "\(model.metrics?["implicit"]["negative"].int ?? 0)")
+            }
+            HStack(spacing: 12) {
+                Stat(label: "Implicit need",     value: "\(model.metrics?["data_readiness"]["needs_implicit_for_personalization"].int ?? 50)")
+                Stat(label: "Ignored",           value: "\(model.metrics?["implicit"]["ignored"].int ?? 0)")
+                Stat(label: "Neutral",           value: "\(model.metrics?["implicit"]["neutral"].int ?? 0)")
+                Stat(label: "Outcome labels",    value: "\(model.metrics?["implicit"]["n"].int ?? 0)")
+            }
             SectionTitle("Top scenes (24h)")
             BarList(data: dictAsKVs(model.data?["dist_scenes"].dict))
             SectionTitle("Top apps (24h)")
