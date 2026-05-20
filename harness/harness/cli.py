@@ -204,8 +204,12 @@ def storage_backfill(reset: bool) -> None:
         "decisions.jsonl",
         "traces.jsonl",
         "outcomes.jsonl",
+        "deliveries.jsonl",
         "model_calls.jsonl",
         "retro_labels.jsonl",
+        "episodes.jsonl",
+        "next_step_predictions.jsonl",
+        "prediction_errors.jsonl",
         "memory/session.jsonl",
     ]
     counts = sql_store.backfill_jsonl_files(filenames, reset=reset)
@@ -460,6 +464,7 @@ def metrics(since: str, as_json: bool) -> None:
     click.echo(
         "outcomes: "
         f"{outcomes['n']}  capture_for_pings: {_fmt_pct(outcomes['capture_rate_for_pings'])}  "
+        f"capture_for_claimed: {_fmt_pct(outcomes.get('capture_rate_for_claimed_pings'))}  "
         f"avg_reward: {_fmt_num(outcomes['avg_reward'])}"
     )
     click.echo(
@@ -574,6 +579,85 @@ def lab(since: str, as_json: bool) -> None:
             f"capture={_fmt_pct(group.get('outcome_capture_rate'))} "
             f"avg_reward={_fmt_num(group.get('avg_reward'))}"
         )
+
+
+@main.command("eval-report")
+@click.option("--since", default="7d", help="Window: 24h, 7d, etc.")
+@click.option("--policy", default="rule_v0", help="Policy module to compare.")
+@click.option("--out", default=None, help="Write full report JSON to this path.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def eval_report(since: str, policy: str, out: Optional[str], as_json: bool) -> None:
+    """Show an OpenAdapt-style intervention eval report."""
+    from . import eval_report as eval_report_mod
+
+    report = eval_report_mod.build_report(window=since, policy=policy)
+    serialized = json.dumps(report, indent=2)
+    if out:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(serialized)
+        click.echo(f"wrote {out}")
+    if as_json:
+        click.echo(serialized)
+        return
+
+    data = report["data"]
+    click.echo(
+        f"eval_report: {report['window']} since {report['since']}  "
+        f"decisions={data['n_decisions']} pings={data['n_pings']} "
+        f"claimed={data.get('n_claimed_pings', 0)} "
+        f"outcomes={data['n_outcomes']} labels={data['n_explicit_labels']} "
+        f"implicit_usable={data['n_implicit_usable']}"
+    )
+    click.echo(
+        "coverage: "
+        f"outcome_capture={_fmt_pct(data['outcome_capture_rate_for_pings'])} "
+        f"claimed_capture={_fmt_pct(data.get('outcome_capture_rate_for_claimed_pings'))} "
+        f"explicit_labels={_fmt_pct(data['explicit_label_coverage'])} "
+        f"implicit_usable={_fmt_pct(data['implicit_usable_coverage'])}"
+    )
+    best = ((report.get("variants") or {}).get("calibration") or {}).get("best_variant") or {}
+    click.echo(
+        f"best_variant: {best.get('variant') or 'n/a'} "
+        f"score={_fmt_num(best.get('score'))} overrides={best.get('overrides') or {}}"
+    )
+    click.echo("taxonomy:")
+    for row in (report.get("taxonomy") or {}).get("by_type", [])[:10]:
+        click.echo(f"  {row['type']:28s} n={row['n']:5d} rate={_fmt_pct(row['rate'])}")
+    gaps = report.get("openadapt_style_gaps") or []
+    if gaps:
+        click.echo("gaps:")
+        for gap in gaps:
+            click.echo(f"  {gap['status']:18s} {gap['name']:28s} value={gap.get('value')}")
+
+
+@main.command("next-steps")
+@click.option("--since", default="7d", help="Window: 24h, 7d, etc.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def next_steps(since: str, as_json: bool) -> None:
+    """Show predict-first next-step evaluation metrics."""
+    from . import next_step as next_step_mod
+
+    report = next_step_mod.build_report(window=since, score_due=True)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    episodes = report["episodes"]
+    preds = report["predictions"]
+    click.echo(
+        f"next_steps: {report['window']} since {report['since']}  "
+        f"episodes={episodes['n']} open={episodes['open']} "
+        f"predictions={preds['n']} scored={preds['scored']} pending={preds['pending']}"
+    )
+    click.echo(
+        "accuracy: "
+        f"top1={_fmt_pct(preds['accuracy_top1'])} "
+        f"top3={_fmt_pct(preds['accuracy_top3'])} "
+        f"unknown={_fmt_pct(preds['unknown_rate'])} "
+        f"avg_score={_fmt_num(preds['avg_score'])}"
+    )
+    click.echo("residuals:")
+    for name, n_rows in sorted((preds.get("residual_types") or {}).items(), key=lambda kv: (-kv[1], kv[0])):
+        click.echo(f"  {name:28s} {n_rows:5d}")
 
 
 @main.command("train-policy")

@@ -35,6 +35,7 @@ def compute(window: str = "24h") -> dict[str, Any]:
     all_decisions = _read_payloads("decisions", "decisions.jsonl")
     decisions = [r for r in all_decisions if r.get("ts", "") >= since]
     outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
+    deliveries = _read_payloads("deliveries", "deliveries.jsonl", since_iso=since)
     labels = latest_label_rows(
         _read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
     )
@@ -60,6 +61,13 @@ def compute(window: str = "24h") -> dict[str, Any]:
     }
     ping_decision_ids.discard(None)
     pings_with_outcome = sum(1 for did in ping_decision_ids if did in outcomes_by_decision)
+    claimed_ping_ids = {
+        row.get("decision_id")
+        for row in deliveries
+        if row.get("delivery_action") == "claimed" and row.get("decision_id")
+    }
+    claimed_ping_ids &= ping_decision_ids
+    claimed_with_outcome = sum(1 for did in claimed_ping_ids if did in outcomes_by_decision)
 
     joined_labels: list[tuple[dict, dict | None]] = []
     for label in labels:
@@ -98,10 +106,13 @@ def compute(window: str = "24h") -> dict[str, Any]:
         "n_decisions": len(decisions),
         "n_pings": n_pings,
         "n_no_pings": n_no_pings,
+        "n_claimed_pings": len(claimed_ping_ids),
         "ping_rate": _ratio(n_pings, len(decisions)),
         "outcomes": {
             "n": len(outcomes),
             "capture_rate_for_pings": _ratio(pings_with_outcome, n_pings),
+            "capture_rate_for_claimed_pings": _ratio(claimed_with_outcome, len(claimed_ping_ids)),
+            "claimed_pings": len(claimed_ping_ids),
             "user_actions": dict(outcome_counts),
             "intent_signals": dict(intent_signal_counts),
             "total_reward": total_reward,

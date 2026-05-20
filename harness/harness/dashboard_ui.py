@@ -1,7 +1,7 @@
 """Settings + diagnostics dashboard, served by the harness daemon on :7893.
 
 Layout:
-  GET  /dashboard                   → HTML, three tabs (Activity / Settings / Diagnostics)
+  GET  /dashboard                   → HTML, tabs (Activity / Eval / Settings / Diagnostics)
   GET  /dashboard/data?window=24h   → JSON: aggregated state (distributions, counts)
   GET  /dashboard/config            → JSON: current ~/.harness/config.toml
   POST /dashboard/config            → save edited config (writes ~/.harness/config.toml)
@@ -192,6 +192,55 @@ DASHBOARD_HTML = """<!doctype html>
   .log .action.notch_ping { color: var(--amber); }
   .log .reasons { color: var(--text-3); }
 
+  /* Eval report */
+  .table {
+    width: 100%;
+    border-collapse: collapse;
+    font: 11.5px ui-monospace;
+  }
+  .table th {
+    text-align: left;
+    color: var(--text-3);
+    font-weight: 600;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .table td {
+    padding: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    color: var(--text-2);
+    vertical-align: top;
+  }
+  .pill {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border-2);
+    color: var(--text-2);
+    font: 10.5px ui-monospace;
+  }
+  .pill.high { color: var(--red); border-color: rgba(196,132,140,0.45); }
+  .pill.medium { color: var(--amber); border-color: rgba(196,168,125,0.45); }
+  .pill.low { color: var(--blue); border-color: rgba(125,158,196,0.45); }
+  .pill.info { color: var(--green); border-color: rgba(126,179,126,0.45); }
+  .gap-list, .example-list { display: flex; flex-direction: column; gap: 8px; }
+  .gap-row, .example-row {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .example-row .topline {
+    display: flex; justify-content: space-between; gap: 12px;
+    color: var(--text-2); font: 11.5px ui-monospace;
+  }
+  .example-row .msg {
+    margin-top: 6px; color: var(--text); font-size: 12px;
+  }
+  .example-row .meta {
+    margin-top: 4px; color: var(--text-3); font: 10.5px ui-monospace;
+  }
+
   /* Tab content */
   .tab-content { display: none; }
   .tab-content.active { display: block; }
@@ -205,6 +254,7 @@ DASHBOARD_HTML = """<!doctype html>
 
   <div class="tabs">
     <div class="tab active" data-tab="activity">Activity</div>
+    <div class="tab" data-tab="eval">Eval</div>
     <div class="tab" data-tab="settings">Settings</div>
     <div class="tab" data-tab="diagnostics">Diagnostics</div>
   </div>
@@ -230,6 +280,31 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="panel">
       <h2>Recent outcomes (intent signal distribution)</h2>
       <div class="bars" id="intent-bars"></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-eval">
+    <div class="stats" id="eval-stats"></div>
+    <div class="panel">
+      <h2>Next-step prediction loop</h2>
+      <div class="stats" id="next-step-stats"></div>
+      <div class="bars" id="next-step-residuals" style="margin-top:12px;"></div>
+    </div>
+    <div class="panel">
+      <h2>OpenAdapt-style gaps</h2>
+      <div class="gap-list" id="eval-gaps"></div>
+    </div>
+    <div class="panel">
+      <h2>Failure taxonomy</h2>
+      <div class="bars" id="eval-taxonomy"></div>
+    </div>
+    <div class="panel">
+      <h2>Policy variants</h2>
+      <table class="table" id="eval-variants"></table>
+    </div>
+    <div class="panel">
+      <h2>Recent non-green examples</h2>
+      <div class="example-list" id="eval-examples"></div>
     </div>
   </div>
 
@@ -349,6 +424,8 @@ DASHBOARD_HTML = """<!doctype html>
 <script>
 let cfg = null;
 let policyState = null;
+let evalReport = null;
+let evalLoadedAt = 0;
 
 // Tab switching
 document.querySelectorAll('.tab').forEach(t => {
@@ -357,6 +434,7 @@ document.querySelectorAll('.tab').forEach(t => {
     document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
     t.classList.add('active');
     document.getElementById('tab-' + t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'eval') loadEval();
   });
 });
 
@@ -372,6 +450,18 @@ async function refresh() {
   cfg = c;
   policyState = p;
   populateSettings(c, p);
+}
+
+async function loadEval(force=false) {
+  const now = Date.now();
+  if (!force && evalReport && now - evalLoadedAt < 30000) {
+    renderEval(evalReport);
+    return;
+  }
+  document.getElementById('eval-stats').innerHTML = `<div class="stat"><div class="label">Eval</div><div class="value">…</div><div class="sub">loading report</div></div>`;
+  evalReport = await fetch('/eval/report?window=7d&max_examples=20').then(r => r.json());
+  evalLoadedAt = now;
+  renderEval(evalReport);
 }
 
 function renderHeader(data, p) {
@@ -400,6 +490,78 @@ function renderActivity(d) {
   document.getElementById('app-bars').innerHTML = barsHTML(d.dist_apps);
   document.getElementById('reason-bars').innerHTML = barsHTML(d.dist_reasons);
   document.getElementById('intent-bars').innerHTML = barsHTML(d.dist_intent_signals);
+}
+
+function renderEval(r) {
+  const data = r.data || {};
+  const nextStep = (r.next_step || {}).predictions || {};
+  const best = (((r.variants || {}).calibration || {}).best_variant || {});
+  const stats = [
+    {label: 'Decisions', val: data.n_decisions ?? 0, sub: `${data.n_pings ?? 0} pings · ${data.n_claimed_pings ?? 0} claimed`},
+    {label: 'Claimed capture', val: pctMaybe(data.outcome_capture_rate_for_claimed_pings), sub: `${pctMaybe(data.outcome_capture_rate_for_pings)} all pings`},
+    {label: 'Explicit labels', val: data.n_explicit_labels ?? 0, sub: pctMaybe(data.explicit_label_coverage)},
+    {label: 'Best variant', val: best.variant || 'n/a', sub: `score ${numMaybe(best.score)}`},
+  ];
+  document.getElementById('eval-stats').innerHTML = stats.map(s => `
+    <div class="stat">
+      <div class="label">${escapeHTML(s.label)}</div>
+      <div class="value" style="font-size:${String(s.val).length > 8 ? '15px' : '24px'}">${escapeHTML(s.val)}</div>
+      ${s.sub ? `<div class="sub">${escapeHTML(s.sub)}</div>` : ''}
+    </div>`).join('');
+
+  const nsStats = [
+    {label: 'Predictions', val: nextStep.n ?? 0, sub: `${nextStep.scored ?? 0} scored · ${nextStep.pending ?? 0} pending`},
+    {label: 'Top-1 accuracy', val: pctMaybe(nextStep.accuracy_top1), sub: `top-3 ${pctMaybe(nextStep.accuracy_top3)}`},
+    {label: 'Unknown rate', val: pctMaybe(nextStep.unknown_rate), sub: 'no future observation'},
+    {label: 'Avg score', val: numMaybe(nextStep.avg_score), sub: `${nextStep.matched ?? 0} matched · ${nextStep.missed ?? 0} missed`},
+  ];
+  document.getElementById('next-step-stats').innerHTML = nsStats.map(s => `
+    <div class="stat">
+      <div class="label">${escapeHTML(s.label)}</div>
+      <div class="value" style="font-size:${String(s.val).length > 8 ? '15px' : '24px'}">${escapeHTML(s.val)}</div>
+      ${s.sub ? `<div class="sub">${escapeHTML(s.sub)}</div>` : ''}
+    </div>`).join('');
+  document.getElementById('next-step-residuals').innerHTML = barsHTML(nextStep.residual_types || {});
+
+  document.getElementById('eval-gaps').innerHTML = (r.openadapt_style_gaps || []).map(g => `
+    <div class="gap-row">
+      <span class="pill ${g.status === 'pass' ? 'info' : g.status === 'missing' ? 'high' : 'medium'}">${escapeHTML(g.status)}</span>
+      <span style="margin-left:8px;color:var(--text);font:12px ui-monospace;">${escapeHTML(g.name)}</span>
+      <div style="margin-top:4px;color:var(--text-3);font-size:11.5px;">${escapeHTML(g.detail)} value=${escapeHTML(g.value ?? 'n/a')}</div>
+    </div>`).join('') || '<div style="color:#7c7c86">no gap data</div>';
+
+  const taxDist = {};
+  ((r.taxonomy || {}).by_type || []).forEach(row => taxDist[row.type] = row.n);
+  document.getElementById('eval-taxonomy').innerHTML = barsHTML(taxDist);
+
+  const variants = ((((r.variants || {}).calibration || {}).variants) || []);
+  document.getElementById('eval-variants').innerHTML = `
+    <thead><tr><th>variant</th><th>score</th><th>implicit utility</th><th>explicit</th><th>overrides</th></tr></thead>
+    <tbody>
+      ${variants.map(v => `
+        <tr>
+          <td>${escapeHTML(v.variant || 'n/a')}</td>
+          <td>${numMaybe(v.score)}</td>
+          <td>${numMaybe(v.implicit_avg_utility)} · n=${numMaybe(v.implicit_weighted_n)}</td>
+          <td>agree=${pctMaybe(v.explicit_agreement_rate)} false=${pctMaybe(v.explicit_false_interruption_rate)} missed=${pctMaybe(v.explicit_missed_help_rate)}</td>
+          <td>${escapeHTML(JSON.stringify(v.overrides || {}))}</td>
+        </tr>`).join('') || '<tr><td colspan="5">no variant comparison yet</td></tr>'}
+    </tbody>`;
+
+  document.getElementById('eval-examples').innerHTML = (r.examples || []).map(ex => {
+    const cls = ex.classification || {};
+    const dec = ex.decision || {};
+    const out = ex.outcome || {};
+    const ctx = ex.context || {};
+    return `<div class="example-row">
+      <div class="topline">
+        <span><span class="pill ${cls.severity || 'low'}">${escapeHTML(cls.type || '?')}</span> ${escapeHTML(dec.action || '?')} · ${escapeHTML(ctx.app || '?')} · ${escapeHTML(ctx.scene || '?')}</span>
+        <span>${escapeHTML((ex.ts || '').slice(0,19))}</span>
+      </div>
+      ${ctx.message ? `<div class="msg">"${escapeHTML(ctx.message)}"</div>` : ''}
+      <div class="meta">outcome=${escapeHTML(out.user_action || 'none')} signal=${escapeHTML(out.intent_signal || 'none')} label=${escapeHTML((ex.label || {}).label || 'none')} reasons=[${escapeHTML((dec.reason_codes || []).join(', '))}]</div>
+    </div>`;
+  }).join('') || '<div style="color:#7c7c86">no non-green examples in this window</div>';
 }
 
 function barsHTML(dist, prefix='') {
@@ -544,6 +706,8 @@ function flash(text, color) {
 }
 
 function pct(v) { return (v * 100).toFixed(1) + '%'; }
+function pctMaybe(v) { return v === null || v === undefined ? 'n/a' : pct(Number(v)); }
+function numMaybe(v) { return v === null || v === undefined ? 'n/a' : Number(v).toFixed(2); }
 function escapeHTML(s) {
   return String(s).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
 }

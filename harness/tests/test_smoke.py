@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import io
 import json
 import time
@@ -10,6 +11,7 @@ import time
 from harness import candidate as candidate_mod
 from harness import config as config_mod
 from harness import critic as critic_mod
+from harness import eval_report as eval_report_mod
 from harness import fisherman_client as fc_mod
 from harness import experiments as experiments_mod
 from harness import gate as gate_mod
@@ -19,6 +21,7 @@ from harness import label_ui as label_ui_mod
 from harness import memory as memory_mod
 from harness import metrics as metrics_mod
 from harness import model_audit as model_audit_mod
+from harness import next_step as next_step_mod
 from harness import privacy as privacy_mod
 from harness import push as push_mod
 from harness import realizer as realizer_mod
@@ -38,6 +41,7 @@ def test_imports():
     # all top-level modules import cleanly
     assert schemas
     assert config_mod
+    assert eval_report_mod
     assert store_mod
     assert fc_mod
     assert candidate_mod
@@ -52,6 +56,7 @@ def test_imports():
     assert implicit_mod
     assert label_ui_mod
     assert model_audit_mod
+    assert next_step_mod
     assert metrics_mod
     assert server_mod
     assert shadow_eval_mod
@@ -580,6 +585,54 @@ def test_pending_claim_lease_and_completion(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_pending_claim_writes_delivery_and_claimed_capture_metric(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        decision = {
+            "decision_id": "pd_claimed",
+            "candidate_id": "cand_claimed",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": "notch_ping",
+        }
+        store_mod.append_jsonl("decisions.jsonl", decision)
+        store_mod.write_pending(
+            "pd_claimed",
+            {
+                "decision_id": "pd_claimed",
+                "candidate_id": "cand_claimed",
+                "message": "hello",
+            },
+        )
+        req = make_mocked_request("GET", "/pending")
+        resp = asyncio.run(server_mod.get_pending(req))
+        body = json.loads(resp.text)
+        assert body["decision_id"] == "pd_claimed"
+        deliveries = store_mod.tail_jsonl("deliveries.jsonl")
+        assert deliveries[-1]["decision_id"] == "pd_claimed"
+        assert deliveries[-1]["delivery_action"] == "claimed"
+
+        report = metrics_mod.compute(window="365d")
+        assert report["n_claimed_pings"] == 1
+        assert report["outcomes"]["capture_rate_for_pings"] == 0.0
+        assert report["outcomes"]["capture_rate_for_claimed_pings"] == 0.0
+
+        store_mod.append_jsonl(
+            "outcomes.jsonl",
+            {
+                "decision_id": "pd_claimed",
+                "user_action": "clicked",
+                "ts": "2026-05-19T12:00:05Z",
+            },
+        )
+        report = metrics_mod.compute(window="365d")
+        assert report["outcomes"]["capture_rate_for_claimed_pings"] == 1.0
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_launchd_plist_points_at_harness_module(tmp_path):
     plist = service_mod.build_plist(
         python_executable="/tmp/venv/bin/python",
@@ -1017,6 +1070,240 @@ def test_implicit_promote_endpoint_appends_retro_label(tmp_path):
         assert rows[-1]["label_id"] == "implicit_panel_pd_promote"
         assert rows[-1]["label"] == "would_annoy"
         assert rows[-1]["source"] == "implicit_examples_panel"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_eval_report_builds_failure_taxonomy_and_sanitized_examples(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        rows = [
+            ("pd_false", "cand_false", "notch_ping", "would_annoy"),
+            ("pd_missed", "cand_missed", "no_ping", "would_help"),
+            ("pd_soft", "cand_soft", "notch_ping", None),
+        ]
+        for i, (did, cid, action, label) in enumerate(rows):
+            ts = f"2026-05-19T12:0{i}:00Z"
+            store_mod.append_jsonl(
+                "candidates.jsonl",
+                {
+                    "candidate_id": cid,
+                    "ts": ts,
+                    "screen": {
+                        "frontmost_app": "Chrome",
+                        "ocr_snippet": "OPENROUTER_API_KEY=or-v1-secret-should-not-appear",
+                        "frame_age_sec": 3,
+                    },
+                    "scene": {"label": "reading_browser", "source": "rule"},
+                    "context": {},
+                    "user_pref": {},
+                },
+            )
+            store_mod.append_jsonl(
+                "decisions.jsonl",
+                {
+                    "decision_id": did,
+                    "candidate_id": cid,
+                    "ts": ts,
+                    "action": action,
+                    "intent": "goal_aware" if action == "notch_ping" else None,
+                    "policy_version": "rule_v0",
+                    "reason_codes": ["reading_browser"],
+                },
+            )
+            store_mod.append_jsonl(
+                "traces.jsonl",
+                {
+                    "trace_id": f"tr_{did}",
+                    "ts": ts,
+                    "state": {
+                        "candidate": {
+                            "candidate_id": cid,
+                            "screen": {
+                                "frontmost_app": "Chrome",
+                                "ocr_snippet": "OPENROUTER_API_KEY=or-v1-secret-should-not-appear",
+                            },
+                            "scene": {"label": "reading_browser", "source": "rule"},
+                        }
+                    },
+                    "action": {"decision_id": did, "why_now": "reading stall"},
+                    "realization": {"message": "Return to the draft.", "vision_used": True},
+                },
+            )
+            if label:
+                store_mod.append_jsonl(
+                    "retro_labels.jsonl",
+                    {
+                        "decision_id": did,
+                        "candidate_id": cid,
+                        "label": label,
+                        "confidence": 1.0,
+                        "ts": "2026-05-19T12:10:00Z",
+                    },
+                )
+
+        store_mod.append_jsonl(
+            "outcomes.jsonl",
+            {
+                "decision_id": "pd_soft",
+                "user_action": "timed_out",
+                "interaction_summary": {
+                    "intent_signal": "rejection_considered",
+                    "considered_targets": ["dismiss"],
+                },
+                "ts": "2026-05-19T12:10:30Z",
+                "reward": {"version": "v2", "value": -0.8},
+            },
+        )
+
+        report = eval_report_mod.build_report(window="365d", max_examples=10)
+        assert report["data"]["n_decisions"] == 3
+        taxonomy = {row["type"]: row["n"] for row in report["taxonomy"]["by_type"]}
+        assert taxonomy["false_interruption"] == 1
+        assert taxonomy["missed_help"] == 1
+        assert taxonomy["soft_rejection"] == 1
+        serialized = json.dumps(report)
+        assert "or-v1-secret" not in serialized
+        assert "Return to the draft." in serialized
+
+        req = make_mocked_request("GET", "/eval/report?window=365d&max_examples=2")
+        resp = asyncio.run(server_mod.get_eval_report(req))
+        body = json.loads(resp.text)
+        assert body["version"] == eval_report_mod.REPORT_VERSION
+        assert len(body["examples"]) <= 2
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_eval_report_distinguishes_queued_from_claimed_missing_outcomes(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        for did, trace_delivery in [
+            ("pd_queued", {"pushed": True, "channel": "notch_pill"}),
+            ("pd_claimed_missing", {"pushed": True, "channel": "notch_pill"}),
+            ("pd_blocked", {"pushed": False, "channel": "blocked_by_critic"}),
+        ]:
+            store_mod.append_jsonl(
+                "decisions.jsonl",
+                {
+                    "decision_id": did,
+                    "candidate_id": f"cand_{did}",
+                    "ts": "2026-05-19T12:00:00Z",
+                    "action": "notch_ping",
+                    "intent": "goal_aware",
+                },
+            )
+            store_mod.append_jsonl(
+                "traces.jsonl",
+                {
+                    "trace_id": f"tr_{did}",
+                    "ts": "2026-05-19T12:00:00Z",
+                    "state": {"candidate": {"candidate_id": f"cand_{did}"}},
+                    "action": {"decision_id": did, "action": "notch_ping"},
+                    "delivery": trace_delivery,
+                },
+            )
+        store_mod.append_jsonl(
+            "deliveries.jsonl",
+            {
+                "delivery_id": "del_pd_claimed_missing_1",
+                "decision_id": "pd_claimed_missing",
+                "candidate_id": "cand_pd_claimed_missing",
+                "delivery_action": "claimed",
+                "channel": "notch_pill",
+                "pending_attempts": 1,
+                "ts": "2026-05-19T12:00:01Z",
+            },
+        )
+
+        report = eval_report_mod.build_report(window="365d", max_examples=10)
+        taxonomy = {row["type"]: row["n"] for row in report["taxonomy"]["by_type"]}
+        assert taxonomy["queued_not_claimed"] == 1
+        assert taxonomy["missing_outcome_signal"] == 1
+        assert taxonomy["undelivered_ping"] == 1
+        assert report["data"]["n_claimed_pings"] == 1
+        assert report["data"]["outcome_capture_rate_for_claimed_pings"] == 0.0
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_next_step_tracker_segments_and_scores_predictions(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        tracker = next_step_mod.EpisodeTracker(idle_boundary_sec=90)
+        event = schemas.CandidateEvent(candidate_id="cand_pred")
+        event.ts = "2026-05-19T12:00:00Z"
+        event.screen.frontmost_app = "Chrome"
+        event.screen.ocr_snippet = "reading harness plan"
+        event.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
+        decision = schemas.ProactiveDecision(
+            decision_id="pd_pred",
+            candidate_id="cand_pred",
+            policy_version="rule_v0",
+            action="notch_ping",
+            intent="goal_aware",
+            reason_codes=["goal_aligned_help"],
+        )
+        episode, rows = tracker.observe(event, decision)
+        assert rows[-1]["status"] == "open"
+        assert rows[-1]["frame_count"] == 1
+        for row in rows:
+            store_mod.append_jsonl("episodes.jsonl", row)
+        store_mod.append_jsonl("candidates.jsonl", event.to_dict())
+        store_mod.append_jsonl("decisions.jsonl", decision.to_dict() | {"ts": event.ts})
+
+        mem = schemas.MemorySnapshot.build(
+            recent_apps=["Chrome"],
+            recent_scenes=["reading_browser"],
+            recent_outcomes=[],
+            app_switches_last_15m=0,
+            minutes_on_current_app=12.0,
+        )
+        prediction = next_step_mod.predict_next_step(
+            event=event,
+            memory=mem,
+            decision=decision,
+            episode=episode,
+            daily_goal="ship harness",
+            horizon_sec=60,
+        )
+        store_mod.append_jsonl("next_step_predictions.jsonl", prediction)
+
+        future = schemas.CandidateEvent(candidate_id="cand_future")
+        future.ts = "2026-05-19T12:00:30Z"
+        future.screen.frontmost_app = "Chrome"
+        future.screen.ocr_snippet = "harness audit notes"
+        future.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
+        store_mod.append_jsonl("candidates.jsonl", future.to_dict())
+
+        scored = next_step_mod.score_due_predictions(now=calendar.timegm(time.strptime("2026-05-19T12:02:00Z", "%Y-%m-%dT%H:%M:%SZ")))
+        assert len(scored) == 1
+        assert scored[0]["status"] == "matched"
+        assert scored[0]["matched_rank"] == 1
+        assert "ocr" not in json.dumps(scored[0]).lower()
+
+        switch = schemas.CandidateEvent(candidate_id="cand_switch")
+        switch.ts = "2026-05-19T12:02:30Z"
+        switch.screen.frontmost_app = "Cursor"
+        switch.scene = schemas.SceneTag(label="coding_with_todo_in_view", strength="strong", source="rule")
+        _, switch_rows = tracker.observe(switch, None)
+        assert any(row["status"] == "closed" and row["boundary_reason"] == "idle_gap" for row in switch_rows)
+
+        report = next_step_mod.build_report(window="365d", score_due=False)
+        assert report["predictions"]["scored"] == 1
+        assert report["predictions"]["accuracy_top1"] == 1.0
+
+        req = make_mocked_request("GET", "/next-steps/report?window=365d")
+        resp = asyncio.run(server_mod.get_next_steps(req))
+        body = json.loads(resp.text)
+        assert body["version"] == "next_step_eval_v1"
     finally:
         store_mod.HARNESS_DIR = old_dir
 

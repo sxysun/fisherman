@@ -163,6 +163,91 @@ class Reward:
 
 
 @dataclass
+class Episode:
+    """Meaning-level unit over the frame stream.
+
+    Frames are the capture unit; episodes are the behavioral unit. The harness
+    writes append-only episode snapshots so the latest row for an episode id is
+    the current compact state.
+    """
+
+    episode_id: str
+    ts: str
+    ts_start: str
+    ts_end: Optional[str] = None
+    status: Literal["open", "closed"] = "open"
+    trigger: str = "initial"
+    boundary_reason: Optional[str] = None
+    app: Optional[str] = None
+    bundle_id: Optional[str] = None
+    window_title: Optional[str] = None
+    scene_label: str = "unknown"
+    scene_strength: str = "unknown"
+    frame_count: int = 0
+    candidate_ids: list[str] = field(default_factory=list)
+    decision_ids: list[str] = field(default_factory=list)
+    outcome_ids: list[str] = field(default_factory=list)
+    summary: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class PredictedNextStep:
+    rank: int
+    description: str
+    expected_app: Optional[str] = None
+    expected_scene: Optional[str] = None
+    expected_keywords: list[str] = field(default_factory=list)
+    rationale: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class NextStepPrediction:
+    prediction_id: str
+    episode_id: str
+    candidate_id: str
+    decision_id: Optional[str]
+    ts: str
+    horizon_sec: int
+    source: str
+    top_steps: list[PredictedNextStep] = field(default_factory=list)
+    confidence: float = 0.0
+    should_interrupt: bool = False
+    intervention_value: float = 0.0
+    evidence: dict[str, Any] = field(default_factory=dict)
+    status: Literal["pending", "scored"] = "pending"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class PredictionError:
+    error_id: str
+    prediction_id: str
+    episode_id: str
+    candidate_id: str
+    ts: str
+    evaluated_at: str
+    horizon_sec: int
+    status: Literal["matched", "missed", "unknown"]
+    score: float
+    residual_type: str
+    actual_step: dict[str, Any] = field(default_factory=dict)
+    matched_rank: Optional[int] = None
+    prediction_summary: str = ""
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class MemorySnapshot:
     snapshot_id: str
     ts: str
