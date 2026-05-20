@@ -52,7 +52,7 @@ final class NotchCoordinator {
             self?.recordEvent(kind: entered ? "hover_start" : "hover_end", target: target)
         }
         state.surfaceHoverHandler = { [weak self] hovering in
-            self?.setSurfaceExpanded(hovering || (self?.state.surfacePinned ?? false) || self?.currentDecisionID != nil)
+            self?.handleSurfaceHover(hovering)
         }
         state.togglePinHandler = { [weak self] in
             self?.togglePinned()
@@ -115,6 +115,24 @@ final class NotchCoordinator {
         resizeSurface()
         if !expanded {
             state.activePanel = currentDecisionID == nil ? .pipeline : .ping
+        }
+    }
+
+    private func handleSurfaceHover(_ hovering: Bool) {
+        collapseTask?.cancel()
+        if hovering {
+            setSurfaceExpanded(true)
+            return
+        }
+
+        guard !state.surfacePinned, currentDecisionID == nil else { return }
+        collapseTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            await MainActor.run {
+                guard let self else { return }
+                if self.mouseIsInsideSurface() { return }
+                self.setSurfaceExpanded(false)
+            }
         }
     }
 
@@ -195,6 +213,11 @@ final class NotchCoordinator {
         next.origin.x = min(max(next.origin.x, visible.minX + EDGE_INSET), visible.maxX - next.width - EDGE_INSET)
         next.origin.y = min(max(next.origin.y, visible.minY + EDGE_INSET), visible.maxY - next.height - EDGE_INSET)
         return next
+    }
+
+    private func mouseIsInsideSurface() -> Bool {
+        guard let panel else { return false }
+        return panel.frame.insetBy(dx: -10, dy: -10).contains(NSEvent.mouseLocation)
     }
 
     // MARK: - Polling
