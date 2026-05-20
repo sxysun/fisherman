@@ -41,7 +41,7 @@ final class NotchCoordinator {
     func start() {
         let st = state
         notch = DynamicNotch(
-            hoverBehavior: [],   // we manage show/hide explicitly; no hover-to-expand
+            hoverBehavior: .all,
             style: .auto
         ) {
             HarnessExpanded(state: st)
@@ -91,11 +91,17 @@ final class NotchCoordinator {
         autoDismissTask?.cancel()
         autoDismissTask = Task { [weak self, decisionID = pending.decisionID] in
             let fallbackDelay = 8.0
-            let delay = pending.expiresAtUnix.map {
+            let initialDelay = pending.expiresAtUnix.map {
                 max(1.0, min(60.0, $0 - Date().timeIntervalSince1970))
             } ?? fallbackDelay
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(initialDelay * 1_000_000_000))
             if Task.isCancelled { return }
+            var extraWait = 0.0
+            while self?.isInspectingPill() == true && extraWait < 30.0 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                extraWait += 1.0
+            }
             await MainActor.run {
                 guard let self = self, self.currentDecisionID == decisionID else { return }
                 self.onAction(action: "timed_out")
@@ -175,6 +181,10 @@ final class NotchCoordinator {
     private func stopMouseTracking() {
         if let m = mouseMonitorGlobal { NSEvent.removeMonitor(m); mouseMonitorGlobal = nil }
         if let m = mouseMonitorLocal  { NSEvent.removeMonitor(m); mouseMonitorLocal  = nil }
+    }
+
+    private func isInspectingPill() -> Bool {
+        lastWasNearPill || !activeHoverTargets.isEmpty
     }
 
     /// Compute a rough approach rectangle around the visible pill. We don't

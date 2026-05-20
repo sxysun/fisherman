@@ -26,6 +26,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             action: #selector(openLabeler),
             keyEquivalent: "l"
         ).withTarget(self))
+        menu.addItem(NSMenuItem(
+            title: "Open Dashboard (Web)",
+            action: #selector(openDashboard),
+            keyEquivalent: "d"
+        ).withTarget(self))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(
             title: "Snooze 30 min",
@@ -71,6 +76,11 @@ final class MenuBarController: NSObject, NSWindowDelegate {
 
     @objc func openLabeler() {
         let url = URL(string: "http://127.0.0.1:7893/label")!
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc func openDashboard() {
+        let url = URL(string: "http://127.0.0.1:7893/dashboard")!
         NSWorkspace.shared.open(url)
     }
 

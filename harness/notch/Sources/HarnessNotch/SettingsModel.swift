@@ -13,6 +13,11 @@ final class SettingsModel: ObservableObject {
     @Published var implicitWindow: String = "7d"
     @Published var labData: JSON?
     @Published var labWindow: String = "7d"
+    @Published var evalData: JSON?
+    @Published var nextStepData: JSON?
+    @Published var informationDietData: JSON?
+    @Published var pipelineWindow: String = "7d"
+    @Published var dietWindow: String = "7d"
     // Policy state from /status
     @Published var snoozedUntil: String?
 
@@ -123,11 +128,17 @@ final class SettingsModel: ObservableObject {
         async let m = HarnessAPI.fetchMetrics()
         async let i = HarnessAPI.fetchImplicit(window: implicitWindow, limit: 80)
         async let lab = HarnessAPI.fetchLab(window: labWindow)
-        let (data, config, policy, metrics, implicit, labData) = await (d, c, p, m, i, lab)
+        async let eval = HarnessAPI.fetchEvalReport(window: pipelineWindow)
+        async let next = HarnessAPI.fetchNextSteps(window: pipelineWindow)
+        async let diet = HarnessAPI.fetchInformationDiet(window: dietWindow)
+        let (data, config, policy, metrics, implicit, labData, evalData, nextStepData, dietData) = await (d, c, p, m, i, lab, eval, next, diet)
         self.data = data
         self.metrics = metrics
         applyImplicit(implicit)
         self.labData = labData
+        self.evalData = evalData
+        self.nextStepData = nextStepData
+        self.informationDietData = dietData
         self.rawConfig = config
         if let p = policy {
             self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
@@ -159,6 +170,18 @@ final class SettingsModel: ObservableObject {
 
     func refreshLab() async {
         self.labData = await HarnessAPI.fetchLab(window: labWindow)
+    }
+
+    func refreshPipeline() async {
+        async let eval = HarnessAPI.fetchEvalReport(window: pipelineWindow)
+        async let next = HarnessAPI.fetchNextSteps(window: pipelineWindow)
+        let (evalData, nextStepData) = await (eval, next)
+        self.evalData = evalData
+        self.nextStepData = nextStepData
+    }
+
+    func refreshDiet() async {
+        self.informationDietData = await HarnessAPI.fetchInformationDiet(window: dietWindow)
     }
 
     func promoteImplicit(decisionID: String, label: String, implicitLabel: String, implicitDirection: String) async {
@@ -209,11 +232,20 @@ final class SettingsModel: ObservableObject {
                 let p = await HarnessAPI.fetchPolicyState()
                 let m = await HarnessAPI.fetchMetrics()
                 let i = await HarnessAPI.fetchImplicit(window: window, limit: 80)
+                let pipelineWindow = await MainActor.run { self?.pipelineWindow ?? "7d" }
+                let dietWindow = await MainActor.run { self?.dietWindow ?? "7d" }
+                async let eval = HarnessAPI.fetchEvalReport(window: pipelineWindow)
+                async let next = HarnessAPI.fetchNextSteps(window: pipelineWindow)
+                async let diet = HarnessAPI.fetchInformationDiet(window: dietWindow)
+                let (evalData, nextStepData, dietData) = await (eval, next, diet)
                 await MainActor.run {
                     guard let self = self else { return }
                     self.data = d
                     self.metrics = m
                     self.applyImplicit(i)
+                    self.evalData = evalData
+                    self.nextStepData = nextStepData
+                    self.informationDietData = dietData
                     if let p = p {
                         self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
                         self.intentsMuted = Set(p["muted_intents"].list.compactMap { $0 as? String })

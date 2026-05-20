@@ -15,6 +15,8 @@ struct SettingsRoot: View {
                     switch selectedTab {
                     case .today:       TodayTab(model: model)
                     case .status:      StatusTab(model: model)
+                    case .pipeline:    PipelineTab(model: model)
+                    case .diet:        DietTab(model: model)
                     case .implicit:    ImplicitTab(model: model)
                     case .lab:         LabTab(model: model)
                     case .gate:        GateTab(model: model)
@@ -156,6 +158,8 @@ struct TodayTab: View {
 enum SettingsTab: String, CaseIterable {
     case today = "Today"
     case status = "Status"
+    case pipeline = "Pipeline"
+    case diet = "Diet"
     case implicit = "Implicit"
     case lab = "Lab"
     case gate = "Behavior"
@@ -261,6 +265,358 @@ struct StatusTab: View {
     private func pct(_ value: JSON?) -> String {
         guard let value, !value.isNull else { return "n/a" }
         return String(format: "%.1f%%", value.double * 100.0)
+    }
+}
+
+// MARK: - Pipeline tab
+
+struct PipelineTab: View {
+    @ObservedObject var model: SettingsModel
+
+    private let windows = ["24h", "7d", "30d"]
+
+    var body: some View {
+        let eval = model.evalData
+        let data = eval?["data"]
+        let preds = model.nextStepData?["predictions"]
+
+        VStack(alignment: .leading, spacing: 16) {
+            SectionTitle("Harness pipeline")
+            HStack(spacing: 10) {
+                Picker("Window", selection: $model.pipelineWindow) {
+                    ForEach(windows, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 170)
+                .onChange(of: model.pipelineWindow) {
+                    Task { await model.refreshPipeline() }
+                }
+
+                Button("Refresh") { Task { await model.refreshPipeline() } }
+                    .buttonStyle(.bordered)
+                Spacer()
+            }
+
+            PipelineRail(stages: [
+                PipelineStage(name: "Observe", value: "\(model.data?["n_candidates"].int ?? 0)", detail: "screen candidates"),
+                PipelineStage(name: "Gate", value: "\(model.data?["n_decisions"].int ?? 0)", detail: "policy decisions"),
+                PipelineStage(name: "Ping", value: "\(data?["n_pings"].int ?? 0)", detail: "would notify"),
+                PipelineStage(name: "Claim", value: "\(data?["n_claimed_pings"].int ?? 0)", detail: "notch displayed"),
+                PipelineStage(name: "Outcome", value: "\(data?["n_outcomes"].int ?? 0)", detail: "reaction captured"),
+                PipelineStage(name: "Replay", value: "\(preds?["scored"].int ?? 0)", detail: "next-step scored"),
+            ])
+
+            SectionTitle("Eval health")
+            HStack(spacing: 12) {
+                Stat(label: "Claimed capture", value: pct(data?["outcome_capture_rate_for_claimed_pings"]))
+                Stat(label: "Explicit labels", value: "\(data?["n_explicit_labels"].int ?? 0)")
+                Stat(label: "Implicit usable", value: "\(data?["n_implicit_usable"].int ?? 0)")
+                Stat(label: "Best variant", value: model.evalData?["variants"]["calibration"]["best_variant"]["variant"].string.isEmpty == false ? model.evalData?["variants"]["calibration"]["best_variant"]["variant"].string ?? "n/a" : "n/a")
+            }
+
+            SectionTitle("Next-step prediction")
+            HStack(spacing: 12) {
+                Stat(label: "Predictions", value: "\(preds?["n"].int ?? 0)")
+                Stat(label: "Top-1", value: pct(preds?["accuracy_top1"]))
+                Stat(label: "Top-3", value: pct(preds?["accuracy_top3"]))
+                Stat(label: "Unknown", value: pct(preds?["unknown_rate"]))
+            }
+            BarList(data: dictAsKVs(preds?["residual_types"].dict))
+
+            SectionTitle("Failure taxonomy")
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(taxonomyRows.prefix(8).enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 10) {
+                        Text(str(row, "type"))
+                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                            .frame(width: 210, alignment: .leading)
+                        Text("n=\(int(row["n"]))")
+                        Text("rate=\(pct(row["rate"]))")
+                        Text(str(row, "detail"))
+                            .lineLimit(1)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                    }
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .padding(9)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .cornerRadius(6)
+                }
+                if taxonomyRows.isEmpty {
+                    EmptyState("No taxonomy data yet.")
+                }
+            }
+
+            SectionTitle("Recent non-green examples")
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(exampleRows.prefix(6).enumerated()), id: \.offset) { _, row in
+                    EvalExampleRow(row: row)
+                }
+                if exampleRows.isEmpty {
+                    EmptyState("No examples in this window.")
+                }
+            }
+        }
+    }
+
+    private var taxonomyRows: [[String: Any]] {
+        asDicts(model.evalData?["taxonomy"]["by_type"].list)
+    }
+
+    private var exampleRows: [[String: Any]] {
+        asDicts(model.evalData?["examples"].list)
+    }
+
+    private func asDicts(_ rows: [Any]?) -> [[String: Any]] {
+        (rows ?? []).compactMap { $0 as? [String: Any] }
+    }
+
+    private func dictAsKVs(_ d: [String: Any]?) -> [(String, Int)] {
+        let pairs = (d ?? [:]).map { ($0.key, int($0.value)) }
+        return pairs.sorted { $0.1 > $1.1 }.prefix(10).map { $0 }
+    }
+}
+
+struct PipelineStage {
+    let name: String
+    let value: String
+    let detail: String
+}
+
+struct PipelineRail: View {
+    let stages: [PipelineStage]
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(index == 0 ? Color.accentColor : Color.accentColor.opacity(0.55))
+                            .frame(width: 7, height: 7)
+                        Text(stage.name.uppercased())
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(stage.value)
+                        .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                    Text(stage.detail)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                )
+                .cornerRadius(8)
+            }
+        }
+    }
+}
+
+struct EvalExampleRow: View {
+    let row: [String: Any]
+
+    var body: some View {
+        let cls = dict(row, "classification")
+        let decision = dict(row, "decision")
+        let outcome = dict(row, "outcome")
+        let context = dict(row, "context")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(str(cls, "type").uppercased())
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(severityColor(str(cls, "severity")))
+                Text(str(decision, "action"))
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(String(str(row, "ts").prefix(19)))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            if !str(context, "message").isEmpty && str(context, "message") != "—" {
+                Text("\"\(str(context, "message"))\"")
+                    .font(.system(size: 12))
+                    .lineLimit(2)
+            }
+            HStack(spacing: 10) {
+                Text("app \(short(str(context, "app")))")
+                Text("scene \(short(str(context, "scene")))")
+                Text("outcome \(str(outcome, "user_action"))")
+                Text("signal \(str(outcome, "intent_signal"))")
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(6)
+    }
+
+    private func dict(_ row: [String: Any], _ key: String) -> [String: Any] {
+        row[key] as? [String: Any] ?? [:]
+    }
+
+    private func severityColor(_ value: String) -> Color {
+        switch value {
+        case "high": return .red
+        case "medium": return .orange
+        case "low": return .blue
+        default: return .secondary
+        }
+    }
+}
+
+// MARK: - Diet tab
+
+struct DietTab: View {
+    @ObservedObject var model: SettingsModel
+
+    private let windows = ["24h", "7d", "30d"]
+
+    var body: some View {
+        let summary = model.informationDietData?["summary"]
+        VStack(alignment: .leading, spacing: 16) {
+            SectionTitle("Information diet")
+            HStack(spacing: 10) {
+                Picker("Window", selection: $model.dietWindow) {
+                    ForEach(windows, id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 170)
+                .onChange(of: model.dietWindow) {
+                    Task { await model.refreshDiet() }
+                }
+                Button("Refresh") { Task { await model.refreshDiet() } }
+                    .buttonStyle(.bordered)
+                Spacer()
+            }
+
+            HStack(spacing: 12) {
+                Stat(label: "Research events", value: "\(summary?["n_research_events"].int ?? 0)")
+                Stat(label: "Episodes", value: "\(summary?["n_episodes"].int ?? 0)")
+                Stat(label: "Observed min", value: fmt(summary?["observed_research_min"].double))
+                Stat(label: "Hypotheses", value: "\(skillRows.count)")
+            }
+
+            SectionTitle("Workflow patterns")
+            BarList(data: dictAsKVs(summary?["workflow_patterns"].dict))
+
+            SectionTitle("Source domains")
+            BarList(data: dictAsKVs(summary?["top_domains"].dict))
+
+            SectionTitle("Workflow hypotheses")
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(skillRows.prefix(8).enumerated()), id: \.offset) { _, row in
+                    DietSkillRow(row: row)
+                }
+                if skillRows.isEmpty {
+                    EmptyState("No research-workflow hypotheses yet.")
+                }
+            }
+
+            SectionTitle("Recent research episodes")
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(episodeRows.prefix(10).enumerated()), id: \.offset) { _, row in
+                    DietEpisodeRow(row: row)
+                }
+                if episodeRows.isEmpty {
+                    EmptyState("No research episodes in this window.")
+                }
+            }
+        }
+    }
+
+    private var skillRows: [[String: Any]] {
+        asDicts(model.informationDietData?["skill_hypotheses"].list)
+    }
+
+    private var episodeRows: [[String: Any]] {
+        asDicts(model.informationDietData?["episodes"].list)
+    }
+
+    private func asDicts(_ rows: [Any]?) -> [[String: Any]] {
+        (rows ?? []).compactMap { $0 as? [String: Any] }
+    }
+
+    private func dictAsKVs(_ d: [String: Any]?) -> [(String, Int)] {
+        let pairs = (d ?? [:]).map { ($0.key, int($0.value)) }
+        return pairs.sorted { $0.1 > $1.1 }.prefix(10).map { $0 }
+    }
+}
+
+struct DietSkillRow: View {
+    let row: [String: Any]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(str(row, "topic").uppercased())
+                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Color.accentColor)
+                Spacer()
+                Text("c=\(fmt(number(row["confidence"]))) · \(fmt(number(row["observed_duration_min"])))m")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            Text(str(row, "hypothesis"))
+                .font(.system(size: 12))
+                .lineLimit(3)
+            HStack(spacing: 10) {
+                Text("patterns \(keys(dict(row, "patterns")).joined(separator: ","))")
+                Text("domains \(list(row, "domains").prefix(4).joined(separator: ","))")
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(6)
+    }
+}
+
+struct DietEpisodeRow: View {
+    let row: [String: Any]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(str(row, "task_hypothesis"))
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .lineLimit(1)
+                Spacer()
+                Text(String(str(row, "ts_start").prefix(19)))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            HStack(spacing: 10) {
+                Text("\(fmt(number(row["observed_duration_min"])))m")
+                Text("\(int(row["n_events"])) events")
+                Text("patterns \(list(row, "workflow_patterns").joined(separator: ","))")
+            }
+            .font(.system(size: 10.5, design: .monospaced))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            Text("domains \(list(row, "source_domains").prefix(5).joined(separator: ", "))")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(6)
     }
 }
 
@@ -590,7 +946,6 @@ struct LabMetric: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label.uppercased())
                 .font(.system(size: 9.5, weight: .semibold))
-                .tracking(0.6)
                 .foregroundStyle(.tertiary)
             Text(value)
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
@@ -673,9 +1028,28 @@ private func str(_ row: [String: Any], _ key: String) -> String {
     return String(describing: value!)
 }
 
+private func dict(_ row: [String: Any], _ key: String) -> [String: Any] {
+    row[key] as? [String: Any] ?? [:]
+}
+
+private func list(_ row: [String: Any], _ key: String) -> [String] {
+    if let values = row[key] as? [String] { return values }
+    return (row[key] as? [Any])?.compactMap { $0 as? String } ?? []
+}
+
+private func keys(_ row: [String: Any]) -> [String] {
+    row.keys.sorted()
+}
+
+private func short(_ value: String, max: Int = 28) -> String {
+    if value.count <= max { return value }
+    return String(value.prefix(max - 3)) + "..."
+}
+
 private func int(_ value: Any?) -> Int {
     if let n = value as? NSNumber { return n.intValue }
     if let i = value as? Int { return i }
+    if let j = value as? JSON { return j.int }
     return 0
 }
 
@@ -687,10 +1061,16 @@ private func bool(_ value: Any?) -> Bool {
 
 private func number(_ value: Any?) -> Double? {
     if value == nil || value is NSNull { return nil }
+    if let j = value as? JSON, !j.isNull { return j.double }
     if let n = value as? NSNumber { return n.doubleValue }
     if let d = value as? Double { return d }
     if let i = value as? Int { return Double(i) }
     return nil
+}
+
+private func pct(_ value: JSON?) -> String {
+    guard let value, !value.isNull else { return "n/a" }
+    return String(format: "%.1f%%", value.double * 100.0)
 }
 
 private func pct(_ value: Any?) -> String {
@@ -961,7 +1341,6 @@ struct SectionTitle: View {
     var body: some View {
         Text(title.uppercased())
             .font(.system(size: 10, weight: .semibold))
-            .tracking(0.5)
             .foregroundStyle(.secondary)
             .padding(.top, 4)
     }
@@ -1001,7 +1380,6 @@ struct Stat: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label.uppercased())
                 .font(.system(size: 9.5, weight: .semibold))
-                .tracking(0.6)
                 .foregroundStyle(.tertiary)
             Text(value)
                 .font(.system(size: 24, weight: .semibold, design: .monospaced))
@@ -1064,6 +1442,21 @@ struct DiagList: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(6)
+    }
+}
+
+struct EmptyState: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 11, design: .monospaced))
+            .foregroundStyle(.tertiary)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(6)
     }
 }
 

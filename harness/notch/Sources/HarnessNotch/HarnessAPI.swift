@@ -51,6 +51,33 @@ enum HarnessAPI {
         return await getJSON(url: c.url!)
     }
 
+    static func fetchEvalReport(window: String = "7d", maxExamples: Int = 12) async -> JSON? {
+        var c = URLComponents(url: baseURL().appendingPathComponent("eval/report"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [
+            URLQueryItem(name: "window", value: window),
+            URLQueryItem(name: "max_examples", value: "\(maxExamples)"),
+        ]
+        return await getJSON(url: c.url!)
+    }
+
+    static func fetchNextSteps(window: String = "7d", maxExamples: Int = 12) async -> JSON? {
+        var c = URLComponents(url: baseURL().appendingPathComponent("next-steps/report"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [
+            URLQueryItem(name: "window", value: window),
+            URLQueryItem(name: "max_examples", value: "\(maxExamples)"),
+        ]
+        return await getJSON(url: c.url!)
+    }
+
+    static func fetchInformationDiet(window: String = "7d", maxEpisodes: Int = 16) async -> JSON? {
+        var c = URLComponents(url: baseURL().appendingPathComponent("information-diet/report"), resolvingAgainstBaseURL: false)!
+        c.queryItems = [
+            URLQueryItem(name: "window", value: window),
+            URLQueryItem(name: "max_episodes", value: "\(maxEpisodes)"),
+        ]
+        return await getJSON(url: c.url!)
+    }
+
     static func promoteImplicit(decisionID: String, label: String, implicitLabel: String, implicitDirection: String) async -> Bool {
         var req = URLRequest(url: baseURL().appendingPathComponent("implicit/promote"))
         req.httpMethod = "POST"
