@@ -1,24 +1,30 @@
 import AppKit
-import Combine
-import DynamicNotchKit
 import Foundation
 import SwiftUI
 
-private let APPROACH_HALO_PX: CGFloat = 200
-private let DEFAULT_HARNESS_NOTCH_OFFSET_X: CGFloat = 390
-private let HARNESS_NOTCH_OFFSET_KEY = "harness_notch_offset_x"
+private let APPROACH_HALO_PX: CGFloat = 160
+private let SURFACE_SIDE_KEY = "harness_presence_side"
+private let SURFACE_TOP_KEY = "harness_presence_top_inset"
+private let DEFAULT_TOP_INSET: CGFloat = 86
+private let EDGE_INSET: CGFloat = 18
+
+private enum SurfaceSide: String {
+    case left
+    case right
+}
 
 @MainActor
 final class NotchCoordinator {
     private let client: HarnessClient
     let state = HarnessState()
-    private var notchOffsetX: CGFloat
 
-    // The DynamicNotch instance. Generic over the three view types so we don't
-    // wrap everything in AnyView.
-    private var notch: DynamicNotch<HarnessExpanded, HarnessCompactLeading, HarnessCompactTrailing>?
-    private var hoverCancellable: AnyCancellable?
+    private var panel: NSPanel?
+    private var hostingView: NSHostingView<HarnessFloatingSurface>?
     private var pollTimer: Timer?
+    private var collapseTask: Task<Void, Never>?
+
+    private var surfaceSide: SurfaceSide
+    private var surfaceTopInset: CGFloat
 
     private var currentDecisionID: String?
     private var displayedAt: Date?
@@ -33,57 +39,34 @@ final class NotchCoordinator {
 
     init(baseURL: String) {
         self.client = HarnessClient(baseURLString: baseURL)
-        if UserDefaults.standard.object(forKey: HARNESS_NOTCH_OFFSET_KEY) != nil {
-            self.notchOffsetX = CGFloat(UserDefaults.standard.double(forKey: HARNESS_NOTCH_OFFSET_KEY))
-        } else {
-            self.notchOffsetX = DEFAULT_HARNESS_NOTCH_OFFSET_X
-        }
+        self.surfaceSide = SurfaceSide(rawValue: UserDefaults.standard.string(forKey: SURFACE_SIDE_KEY) ?? "") ?? .right
+        let savedTop = UserDefaults.standard.object(forKey: SURFACE_TOP_KEY) == nil
+            ? DEFAULT_TOP_INSET
+            : CGFloat(UserDefaults.standard.double(forKey: SURFACE_TOP_KEY))
+        self.surfaceTopInset = max(EDGE_INSET, savedTop)
 
-        // Install handlers up front so views can call into the coordinator.
         state.actionHandler = { [weak self] action in
             Task { @MainActor in self?.onAction(action: action) }
         }
         state.hoverHandler = { [weak self] target, entered in
             self?.recordEvent(kind: entered ? "hover_start" : "hover_end", target: target)
         }
-        state.dragHandler = { [weak self] deltaX in
-            self?.dragNotch(deltaX: deltaX)
+        state.surfaceHoverHandler = { [weak self] hovering in
+            self?.setSurfaceExpanded(hovering || (self?.state.surfacePinned ?? false) || self?.currentDecisionID != nil)
+        }
+        state.togglePinHandler = { [weak self] in
+            self?.togglePinned()
+        }
+        state.dragHandler = { [weak self] delta in
+            self?.dragSurface(delta: delta)
         }
         state.dragEndHandler = { [weak self] in
-            self?.persistNotchOffset()
+            self?.snapAndPersistSurface()
         }
     }
 
     func start() {
-        let st = state
-        notch = DynamicNotch(
-            hoverBehavior: .all,
-            style: .auto,
-            horizontalOffset: notchOffsetX
-        ) {
-            HarnessExpanded(state: st)
-        } compactLeading: {
-            HarnessCompactLeading(state: st)
-        } compactTrailing: {
-            HarnessCompactTrailing(state: st)
-        }
-
-        let n = notch!
-        hoverCancellable = n.$isHovering
-            .debounce(for: .milliseconds(120), scheduler: DispatchQueue.main)
-            .removeDuplicates()
-            .sink { hovering in
-                Task { @MainActor in
-                    if hovering {
-                        await n.expand()
-                    } else {
-                        await n.compact()
-                    }
-                }
-            }
-
-        Task { await n.compact() }
-
+        showPanel()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -91,12 +74,127 @@ final class NotchCoordinator {
 
     func stop() {
         pollTimer?.invalidate()
-        hoverCancellable?.cancel()
+        collapseTask?.cancel()
         autoDismissTask?.cancel()
         stopMouseTracking()
-        state.activePanel = .pipeline
-        let n = notch
-        Task { await n?.hide() }
+        panel?.close()
+        panel = nil
+    }
+
+    // MARK: - Surface
+
+    private func showPanel() {
+        let view = HarnessFloatingSurface(state: state)
+        let host = NSHostingView(rootView: view)
+        hostingView = host
+
+        let panel = NSPanel(
+            contentRect: frameForCurrentState(),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = host
+        panel.hasShadow = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.level = .screenSaver
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.orderFrontRegardless()
+        self.panel = panel
+    }
+
+    private func setSurfaceExpanded(_ expanded: Bool) {
+        collapseTask?.cancel()
+        if !expanded, state.surfacePinned || currentDecisionID != nil {
+            return
+        }
+        withAnimation(.smooth(duration: 0.16)) {
+            state.surfaceExpanded = expanded
+        }
+        resizeSurface()
+        if !expanded {
+            state.activePanel = currentDecisionID == nil ? .pipeline : .ping
+        }
+    }
+
+    private func togglePinned() {
+        state.surfacePinned.toggle()
+        setSurfaceExpanded(state.surfacePinned)
+    }
+
+    private func resizeSurface() {
+        guard let panel else { return }
+        let old = panel.frame
+        let size = currentSurfaceSize()
+        let screen = screenForPanel() ?? primaryScreen()
+        let x: CGFloat
+        if surfaceSide == .right {
+            x = old.maxX - size.width
+        } else {
+            x = old.minX
+        }
+        let y = old.maxY - size.height
+        let next = clampedFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), screen: screen)
+        panel.setFrame(next, display: true, animate: true)
+    }
+
+    private func currentSurfaceSize() -> CGSize {
+        if !state.surfaceExpanded {
+            return CGSize(width: 132, height: 38)
+        }
+        switch state.activePanel {
+        case .ping:
+            return CGSize(width: 620, height: 176)
+        case .pipeline:
+            return CGSize(width: 780, height: 384)
+        case .diet:
+            return CGSize(width: 780, height: 418)
+        }
+    }
+
+    private func frameForCurrentState() -> NSRect {
+        let size = currentSurfaceSize()
+        let screen = primaryScreen()
+        let frame = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let top = min(surfaceTopInset, max(EDGE_INSET, frame.height - size.height - EDGE_INSET))
+        let x = surfaceSide == .right
+            ? frame.maxX - size.width - EDGE_INSET
+            : frame.minX + EDGE_INSET
+        let y = frame.maxY - top - size.height
+        return clampedFrame(NSRect(x: x, y: y, width: size.width, height: size.height), screen: screen)
+    }
+
+    private func dragSurface(delta: CGSize) {
+        guard let panel else { return }
+        var frame = panel.frame
+        frame.origin.x += delta.width
+        frame.origin.y -= delta.height
+        panel.setFrame(clampedFrame(frame, screen: screenForPanel()), display: true)
+    }
+
+    private func snapAndPersistSurface() {
+        guard let panel else { return }
+        let screen = screenForPanel() ?? primaryScreen()
+        let visible = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? panel.frame
+        var frame = panel.frame
+        surfaceSide = frame.midX < visible.midX ? .left : .right
+        frame.origin.x = surfaceSide == .right
+            ? visible.maxX - frame.width - EDGE_INSET
+            : visible.minX + EDGE_INSET
+        frame = clampedFrame(frame, screen: screen)
+        surfaceTopInset = max(EDGE_INSET, visible.maxY - frame.maxY)
+        panel.setFrame(frame, display: true, animate: true)
+        UserDefaults.standard.set(surfaceSide.rawValue, forKey: SURFACE_SIDE_KEY)
+        UserDefaults.standard.set(Double(surfaceTopInset), forKey: SURFACE_TOP_KEY)
+    }
+
+    private func clampedFrame(_ frame: NSRect, screen: NSScreen?) -> NSRect {
+        let visible = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? frame
+        var next = frame
+        next.origin.x = min(max(next.origin.x, visible.minX + EDGE_INSET), visible.maxX - next.width - EDGE_INSET)
+        next.origin.y = min(max(next.origin.y, visible.minY + EDGE_INSET), visible.maxY - next.height - EDGE_INSET)
+        return next
     }
 
     // MARK: - Polling
@@ -119,9 +217,7 @@ final class NotchCoordinator {
         lastWasNearPill = false
         state.activePanel = .ping
         state.current = pending
-
-        let n = notch
-        Task { await n?.compact() }
+        setSurfaceExpanded(true)
         startMouseTracking()
 
         autoDismissTask?.cancel()
@@ -168,8 +264,13 @@ final class NotchCoordinator {
 
         state.current = nil
         state.activePanel = .pipeline
-        let n = notch
-        Task { await n?.compact() }
+        if !state.surfacePinned {
+            collapseTask?.cancel()
+            collapseTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 650_000_000)
+                await MainActor.run { self?.setSurfaceExpanded(false) }
+            }
+        }
     }
 
     // MARK: - Interaction tracking
@@ -199,11 +300,9 @@ final class NotchCoordinator {
 
     private func startMouseTracking() {
         stopMouseTracking()
-        let halo = computeApproachRect()
         let handler: (NSEvent) -> Void = { [weak self] _ in
             guard let self = self else { return }
-            let p = NSEvent.mouseLocation
-            let near = halo.contains(p)
+            let near = self.computeApproachRect().contains(NSEvent.mouseLocation)
             if near != self.lastWasNearPill {
                 self.recordEvent(kind: near ? "approach" : "leave_proximity")
                 self.lastWasNearPill = near
@@ -221,58 +320,17 @@ final class NotchCoordinator {
     }
 
     private func isInspectingPill() -> Bool {
-        lastWasNearPill || !activeHoverTargets.isEmpty
+        state.surfaceExpanded || lastWasNearPill || !activeHoverTargets.isEmpty
     }
 
-    // MARK: - Drag positioning
-
-    private func dragNotch(deltaX: CGFloat) {
-        guard abs(deltaX) > 0.1, let notch else { return }
-        let next = clampedOffset(notchOffsetX + deltaX)
-        let applied = next - notchOffsetX
-        guard abs(applied) > 0.1 else { return }
-
-        notchOffsetX = next
-        notch.horizontalOffset = next
-        if let window = notch.windowController?.window {
-            var frame = window.frame
-            frame.origin.x += applied
-            window.setFrame(frame, display: true)
-        }
-    }
-
-    private func persistNotchOffset() {
-        UserDefaults.standard.set(Double(notchOffsetX), forKey: HARNESS_NOTCH_OFFSET_KEY)
-    }
-
-    private func clampedOffset(_ proposed: CGFloat) -> CGFloat {
-        guard let screen = primaryScreen() else { return proposed }
-        let screenWidth = screen.frame.width
-        let panelWidth = screenWidth / 2
-        let margin: CGFloat = 80
-        let centerX = screen.frame.midX - panelWidth / 2
-        let minOffset = screen.frame.minX - centerX + margin
-        let maxOffset = screen.frame.maxX - centerX - panelWidth - margin
-        return min(max(proposed, minOffset), maxOffset)
-    }
-
-    /// Compute a rough approach rectangle around the visible pill. We don't
-    /// have direct access to DynamicNotch's window frame, so approximate from
-    /// screen geometry: top-center of the primary (preferably notched) screen.
     private func computeApproachRect() -> NSRect {
-        guard let screen = primaryScreen() else { return .zero }
-        let frame = screen.frame
-        let pillW: CGFloat = 600
-        let pillH: CGFloat = 120
-        let cx = frame.midX
-        let topY = frame.maxY
-        let pillRect = NSRect(
-            x: cx - pillW / 2 + notchOffsetX,
-            y: topY - pillH,
-            width: pillW,
-            height: pillH
-        )
-        return pillRect.insetBy(dx: -APPROACH_HALO_PX, dy: -APPROACH_HALO_PX)
+        guard let panel else { return .zero }
+        return panel.frame.insetBy(dx: -APPROACH_HALO_PX, dy: -APPROACH_HALO_PX)
+    }
+
+    private func screenForPanel() -> NSScreen? {
+        guard let panel else { return primaryScreen() }
+        return NSScreen.screens.first { $0.frame.intersects(panel.frame) } ?? primaryScreen()
     }
 
     private func primaryScreen() -> NSScreen? {

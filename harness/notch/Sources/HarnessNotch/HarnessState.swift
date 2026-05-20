@@ -9,16 +9,20 @@ enum HarnessNotchPanel: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-/// Observable state shared with the SwiftUI views inside DynamicNotch.
+/// Observable state shared with the SwiftUI views inside the harness surface.
 /// The coordinator drives this; views react to changes via @ObservedObject.
 @MainActor
 final class HarnessState: ObservableObject {
     @Published var current: PendingPayload?
     @Published var activePanel: HarnessNotchPanel = .pipeline
+    @Published var surfaceExpanded = false
+    @Published var surfacePinned = false
 
     /// Coordinator-installed handlers, called from view actions.
     var actionHandler: ((String) -> Void)?
     var hoverHandler: ((String, Bool) -> Void)?
-    var dragHandler: ((CGFloat) -> Void)?
+    var surfaceHoverHandler: ((Bool) -> Void)?
+    var togglePinHandler: (() -> Void)?
+    var dragHandler: ((CGSize) -> Void)?
     var dragEndHandler: (() -> Void)?
 }

@@ -7,16 +7,11 @@ let package = Package(
     products: [
         .executable(name: "HarnessNotch", targets: ["HarnessNotch"]),
     ],
-    dependencies: [
-        // Same library FishermanMenu uses — for UI parity.
-        .package(path: "../../menubar/Packages/DynamicNotchKit"),
-    ],
+    dependencies: [],
     targets: [
         .executableTarget(
             name: "HarnessNotch",
-            dependencies: [
-                .product(name: "DynamicNotchKit", package: "DynamicNotchKit"),
-            ],
+            dependencies: [],
             path: "Sources/HarnessNotch"
         ),
     ]

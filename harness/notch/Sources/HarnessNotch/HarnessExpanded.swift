@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Expanded content (shown when DynamicNotch is in .expanded state)
+// MARK: - Expanded content (shown when the harness surface is open)
 
 struct HarnessExpanded: View {
     @ObservedObject var state: HarnessState
@@ -72,7 +72,7 @@ struct HarnessExpanded: View {
                 }
             }
             .notchDragHandle(state)
-            .help("Drag to move the harness notch")
+            .help("Drag to move the harness capsule")
 
             Spacer(minLength: 12)
             Picker("", selection: Binding(
@@ -86,6 +86,16 @@ struct HarnessExpanded: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: state.current == nil ? 190 : 270)
+
+            Button(action: { state.togglePinHandler?() }) {
+                Image(systemName: state.surfacePinned ? "pin.fill" : "pin")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(state.surfacePinned ? Color(hex: 0xE8D8A8) : .white.opacity(0.62))
+                    .frame(width: 27, height: 24)
+                    .background(Capsule().fill(Color.white.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+            .help(state.surfacePinned ? "Unpin" : "Pin open")
         }
     }
 
@@ -174,6 +184,57 @@ struct HarnessExpanded: View {
             refreshedAt = Date()
             loadingPanel = nil
         }
+    }
+}
+
+struct HarnessFloatingSurface: View {
+    @ObservedObject var state: HarnessState
+
+    var body: some View {
+        Group {
+            if state.surfaceExpanded {
+                HarnessExpanded(state: state)
+                    .background(FloatingSurfaceBackground(radius: 18))
+                    .shadow(color: .black.opacity(0.35), radius: 18, x: 0, y: 8)
+            } else {
+                HarnessFloatingCompact(state: state)
+                    .background(FloatingSurfaceBackground(radius: 18))
+                    .shadow(color: .black.opacity(0.32), radius: 12, x: 0, y: 5)
+            }
+        }
+        .onHover { state.surfaceHoverHandler?($0) }
+    }
+}
+
+private struct HarnessFloatingCompact: View {
+    @ObservedObject var state: HarnessState
+
+    var body: some View {
+        HStack(spacing: 9) {
+            StatusDot()
+            Text(compactLabel)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.74))
+                .lineLimit(1)
+            if state.current != nil {
+                Circle()
+                    .fill(Color(hex: 0xE8D8A8))
+                    .frame(width: 5, height: 5)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(width: 132, height: 38)
+        .contentShape(Rectangle())
+        .notchDragHandle(state)
+        .onTapGesture { state.surfaceHoverHandler?(true) }
+        .help("Drag to move. Hover to expand.")
+    }
+
+    private var compactLabel: String {
+        if let intent = state.current?.intent, !intent.isEmpty {
+            return intent.replacingOccurrences(of: "_", with: " ").uppercased()
+        }
+        return state.activePanel.rawValue.uppercased()
     }
 }
 
@@ -556,7 +617,7 @@ struct HarnessCompactLeading: View {
         StatusDot()
             .padding(.leading, 4)
             .notchDragHandle(state)
-            .help("Drag to move the harness notch")
+            .help("Drag to move the harness capsule")
     }
 }
 
@@ -571,14 +632,14 @@ struct HarnessCompactTrailing: View {
                     .foregroundStyle(.white.opacity(0.55))
                     .padding(.trailing, 4)
                     .notchDragHandle(state)
-                    .help("Drag to move the harness notch")
+                    .help("Drag to move the harness capsule")
             } else {
                 Text(state.activePanel.rawValue.uppercased())
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.55))
                     .padding(.trailing, 4)
                     .notchDragHandle(state)
-                    .help("Drag to move the harness notch")
+                    .help("Drag to move the harness capsule")
             }
         }
     }
@@ -587,6 +648,7 @@ struct HarnessCompactTrailing: View {
 private struct NotchDragHandle: ViewModifier {
     @ObservedObject var state: HarnessState
     @State private var lastTranslationX: CGFloat = 0
+    @State private var lastTranslationY: CGFloat = 0
 
     func body(content: Content) -> some View {
         content
@@ -594,12 +656,17 @@ private struct NotchDragHandle: ViewModifier {
             .gesture(
                 DragGesture(minimumDistance: 3)
                     .onChanged { value in
-                        let delta = value.translation.width - lastTranslationX
+                        let delta = CGSize(
+                            width: value.translation.width - lastTranslationX,
+                            height: value.translation.height - lastTranslationY
+                        )
                         lastTranslationX = value.translation.width
+                        lastTranslationY = value.translation.height
                         state.dragHandler?(delta)
                     }
                     .onEnded { _ in
                         lastTranslationX = 0
+                        lastTranslationY = 0
                         state.dragEndHandler?()
                     }
             )
@@ -609,6 +676,19 @@ private struct NotchDragHandle: ViewModifier {
 private extension View {
     func notchDragHandle(_ state: HarnessState) -> some View {
         modifier(NotchDragHandle(state: state))
+    }
+}
+
+private struct FloatingSurfaceBackground: View {
+    let radius: CGFloat
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: radius, style: .continuous)
+            .fill(Color.black.opacity(0.96))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.75)
+            )
     }
 }
 
