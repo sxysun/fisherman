@@ -72,7 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             c.start()
             self.coordinator = c
 
-            let mb = MenuBarController(coordinator: c)
+            let mb = MenuBarController()
             mb.install()
             self.menuBar = mb
         }

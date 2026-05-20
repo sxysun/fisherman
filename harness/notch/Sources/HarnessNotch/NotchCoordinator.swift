@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import DynamicNotchKit
 import Foundation
 import SwiftUI
@@ -13,6 +14,7 @@ final class NotchCoordinator {
     // The DynamicNotch instance. Generic over the three view types so we don't
     // wrap everything in AnyView.
     private var notch: DynamicNotch<HarnessExpanded, HarnessCompactLeading, HarnessCompactTrailing>?
+    private var hoverCancellable: AnyCancellable?
     private var pollTimer: Timer?
 
     private var currentDecisionID: String?
@@ -36,9 +38,6 @@ final class NotchCoordinator {
         state.hoverHandler = { [weak self] target, entered in
             self?.recordEvent(kind: entered ? "hover_start" : "hover_end", target: target)
         }
-        state.closeInspectorHandler = { [weak self] in
-            Task { @MainActor in self?.closeInspector() }
-        }
     }
 
     func start() {
@@ -54,6 +53,22 @@ final class NotchCoordinator {
             HarnessCompactTrailing(state: st)
         }
 
+        let n = notch!
+        hoverCancellable = n.$isHovering
+            .debounce(for: .milliseconds(120), scheduler: DispatchQueue.main)
+            .removeDuplicates()
+            .sink { hovering in
+                Task { @MainActor in
+                    if hovering {
+                        await n.expand()
+                    } else {
+                        await n.compact()
+                    }
+                }
+            }
+
+        Task { await n.compact() }
+
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -61,28 +76,10 @@ final class NotchCoordinator {
 
     func stop() {
         pollTimer?.invalidate()
+        hoverCancellable?.cancel()
         autoDismissTask?.cancel()
         stopMouseTracking()
-        state.inspectorVisible = false
-        state.activePanel = .ping
-        let n = notch
-        Task { await n?.hide() }
-    }
-
-    func showInspector(panel: HarnessNotchPanel) {
-        state.activePanel = panel
-        state.inspectorVisible = true
-        let n = notch
-        Task { await n?.expand() }
-    }
-
-    func closeInspector() {
-        if currentDecisionID != nil {
-            state.activePanel = .ping
-            return
-        }
-        state.inspectorVisible = false
-        state.activePanel = .ping
+        state.activePanel = .pipeline
         let n = notch
         Task { await n?.hide() }
     }
@@ -106,11 +103,10 @@ final class NotchCoordinator {
         activeHoverTargets.removeAll(keepingCapacity: true)
         lastWasNearPill = false
         state.activePanel = .ping
-        state.inspectorVisible = false
         state.current = pending
 
         let n = notch
-        Task { await n?.expand() }
+        Task { await n?.compact() }
         startMouseTracking()
 
         autoDismissTask?.cancel()
@@ -156,10 +152,9 @@ final class NotchCoordinator {
         )
 
         state.current = nil
-        state.inspectorVisible = false
-        state.activePanel = .ping
+        state.activePanel = .pipeline
         let n = notch
-        Task { await n?.hide() }
+        Task { await n?.compact() }
     }
 
     // MARK: - Interaction tracking
@@ -211,7 +206,7 @@ final class NotchCoordinator {
     }
 
     private func isInspectingPill() -> Bool {
-        state.activePanel != .ping || lastWasNearPill || !activeHoverTargets.isEmpty
+        lastWasNearPill || !activeHoverTargets.isEmpty
     }
 
     /// Compute a rough approach rectangle around the visible pill. We don't

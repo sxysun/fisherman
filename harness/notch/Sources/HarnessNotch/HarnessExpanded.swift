@@ -13,13 +13,7 @@ struct HarnessExpanded: View {
     @State private var refreshedAt: Date?
 
     var body: some View {
-        Group {
-            if state.current != nil || state.inspectorVisible {
-                inspectorBody
-            } else {
-                EmptyView()
-            }
-        }
+        inspectorBody
         .task { await refreshActivePanel() }
         .onChange(of: state.activePanel) {
             Task { await refreshActivePanel() }
@@ -87,21 +81,6 @@ struct HarnessExpanded: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(width: state.current == nil ? 190 : 270)
-
-            Button(action: {
-                if state.current == nil || state.activePanel != .ping {
-                    state.closeInspectorHandler?()
-                }
-            }) {
-                Image(systemName: state.current == nil ? "xmark" : "arrow.uturn.backward")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.64))
-                    .frame(width: 26, height: 24)
-                    .background(Capsule().fill(Color.white.opacity(0.08)))
-            }
-            .buttonStyle(.plain)
-            .opacity(state.current == nil || state.activePanel != .ping ? 1 : 0)
-            .disabled(state.current != nil && state.activePanel == .ping)
         }
     }
 
@@ -114,7 +93,7 @@ struct HarnessExpanded: View {
             let intent = p.intent?.replacingOccurrences(of: "_", with: " ") ?? "notification"
             return "live ping · \(intent)"
         }
-        return "live pipeline inspector"
+        return "hover-expanded pipeline inspector"
     }
 
     private func pingPanel(for p: PendingPayload) -> some View {
@@ -583,13 +562,11 @@ struct HarnessCompactTrailing: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.55))
                     .padding(.trailing, 4)
-            } else if state.inspectorVisible {
+            } else {
                 Text(state.activePanel.rawValue.uppercased())
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.55))
                     .padding(.trailing, 4)
-            } else {
-                EmptyView()
             }
         }
     }

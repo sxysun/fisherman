@@ -14,11 +14,9 @@ enum HarnessNotchPanel: String, CaseIterable, Identifiable {
 @MainActor
 final class HarnessState: ObservableObject {
     @Published var current: PendingPayload?
-    @Published var activePanel: HarnessNotchPanel = .ping
-    @Published var inspectorVisible = false
+    @Published var activePanel: HarnessNotchPanel = .pipeline
 
     /// Coordinator-installed handlers, called from view actions.
     var actionHandler: ((String) -> Void)?
     var hoverHandler: ((String, Bool) -> Void)?
-    var closeInspectorHandler: (() -> Void)?
 }
