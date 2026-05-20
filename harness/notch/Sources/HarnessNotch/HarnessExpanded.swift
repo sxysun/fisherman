@@ -59,16 +59,21 @@ struct HarnessExpanded: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            StatusDot()
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Harness")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.94))
-                Text(headerSubtitle)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.white.opacity(0.48))
-                    .lineLimit(1)
+            HStack(spacing: 12) {
+                StatusDot()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Harness")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.94))
+                    Text(headerSubtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.white.opacity(0.48))
+                        .lineLimit(1)
+                }
             }
+            .notchDragHandle(state)
+            .help("Drag to move the harness notch")
+
             Spacer(minLength: 12)
             Picker("", selection: Binding(
                 get: { state.activePanel },
@@ -548,7 +553,10 @@ private func notchTime(_ date: Date) -> String {
 struct HarnessCompactLeading: View {
     @ObservedObject var state: HarnessState
     var body: some View {
-        StatusDot().padding(.leading, 4)
+        StatusDot()
+            .padding(.leading, 4)
+            .notchDragHandle(state)
+            .help("Drag to move the harness notch")
     }
 }
 
@@ -562,13 +570,45 @@ struct HarnessCompactTrailing: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.55))
                     .padding(.trailing, 4)
+                    .notchDragHandle(state)
+                    .help("Drag to move the harness notch")
             } else {
                 Text(state.activePanel.rawValue.uppercased())
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.55))
                     .padding(.trailing, 4)
+                    .notchDragHandle(state)
+                    .help("Drag to move the harness notch")
             }
         }
+    }
+}
+
+private struct NotchDragHandle: ViewModifier {
+    @ObservedObject var state: HarnessState
+    @State private var lastTranslationX: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 3)
+                    .onChanged { value in
+                        let delta = value.translation.width - lastTranslationX
+                        lastTranslationX = value.translation.width
+                        state.dragHandler?(delta)
+                    }
+                    .onEnded { _ in
+                        lastTranslationX = 0
+                        state.dragEndHandler?()
+                    }
+            )
+    }
+}
+
+private extension View {
+    func notchDragHandle(_ state: HarnessState) -> some View {
+        modifier(NotchDragHandle(state: state))
     }
 }
 

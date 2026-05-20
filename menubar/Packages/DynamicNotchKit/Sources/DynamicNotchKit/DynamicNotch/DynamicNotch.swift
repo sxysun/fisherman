@@ -67,7 +67,7 @@ public final class DynamicNotch<Expanded, CompactLeading, CompactTrailing>: Obse
 
     /// Horizontal window offset from the screen center. Keep this at zero for
     /// the primary notch owner; sidecar notch apps can move themselves aside.
-    public let horizontalOffset: CGFloat
+    public var horizontalOffset: CGFloat
 
     /// Namespace for matched geometry effect. It is automatically generated if `nil` when the notch is first presented.
     @Published public internal(set) var namespace: Namespace.ID?

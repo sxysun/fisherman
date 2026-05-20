@@ -19,4 +19,6 @@ final class HarnessState: ObservableObject {
     /// Coordinator-installed handlers, called from view actions.
     var actionHandler: ((String) -> Void)?
     var hoverHandler: ((String, Bool) -> Void)?
+    var dragHandler: ((CGFloat) -> Void)?
+    var dragEndHandler: (() -> Void)?
 }

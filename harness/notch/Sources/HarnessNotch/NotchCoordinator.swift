@@ -5,12 +5,14 @@ import Foundation
 import SwiftUI
 
 private let APPROACH_HALO_PX: CGFloat = 200
-private let HARNESS_NOTCH_OFFSET_X: CGFloat = 390
+private let DEFAULT_HARNESS_NOTCH_OFFSET_X: CGFloat = 390
+private let HARNESS_NOTCH_OFFSET_KEY = "harness_notch_offset_x"
 
 @MainActor
 final class NotchCoordinator {
     private let client: HarnessClient
     let state = HarnessState()
+    private var notchOffsetX: CGFloat
 
     // The DynamicNotch instance. Generic over the three view types so we don't
     // wrap everything in AnyView.
@@ -31,6 +33,11 @@ final class NotchCoordinator {
 
     init(baseURL: String) {
         self.client = HarnessClient(baseURLString: baseURL)
+        if UserDefaults.standard.object(forKey: HARNESS_NOTCH_OFFSET_KEY) != nil {
+            self.notchOffsetX = CGFloat(UserDefaults.standard.double(forKey: HARNESS_NOTCH_OFFSET_KEY))
+        } else {
+            self.notchOffsetX = DEFAULT_HARNESS_NOTCH_OFFSET_X
+        }
 
         // Install handlers up front so views can call into the coordinator.
         state.actionHandler = { [weak self] action in
@@ -39,6 +46,12 @@ final class NotchCoordinator {
         state.hoverHandler = { [weak self] target, entered in
             self?.recordEvent(kind: entered ? "hover_start" : "hover_end", target: target)
         }
+        state.dragHandler = { [weak self] deltaX in
+            self?.dragNotch(deltaX: deltaX)
+        }
+        state.dragEndHandler = { [weak self] in
+            self?.persistNotchOffset()
+        }
     }
 
     func start() {
@@ -46,7 +59,7 @@ final class NotchCoordinator {
         notch = DynamicNotch(
             hoverBehavior: .all,
             style: .auto,
-            horizontalOffset: HARNESS_NOTCH_OFFSET_X
+            horizontalOffset: notchOffsetX
         ) {
             HarnessExpanded(state: st)
         } compactLeading: {
@@ -211,6 +224,38 @@ final class NotchCoordinator {
         lastWasNearPill || !activeHoverTargets.isEmpty
     }
 
+    // MARK: - Drag positioning
+
+    private func dragNotch(deltaX: CGFloat) {
+        guard abs(deltaX) > 0.1, let notch else { return }
+        let next = clampedOffset(notchOffsetX + deltaX)
+        let applied = next - notchOffsetX
+        guard abs(applied) > 0.1 else { return }
+
+        notchOffsetX = next
+        notch.horizontalOffset = next
+        if let window = notch.windowController?.window {
+            var frame = window.frame
+            frame.origin.x += applied
+            window.setFrame(frame, display: true)
+        }
+    }
+
+    private func persistNotchOffset() {
+        UserDefaults.standard.set(Double(notchOffsetX), forKey: HARNESS_NOTCH_OFFSET_KEY)
+    }
+
+    private func clampedOffset(_ proposed: CGFloat) -> CGFloat {
+        guard let screen = primaryScreen() else { return proposed }
+        let screenWidth = screen.frame.width
+        let panelWidth = screenWidth / 2
+        let margin: CGFloat = 80
+        let centerX = screen.frame.midX - panelWidth / 2
+        let minOffset = screen.frame.minX - centerX + margin
+        let maxOffset = screen.frame.maxX - centerX - panelWidth - margin
+        return min(max(proposed, minOffset), maxOffset)
+    }
+
     /// Compute a rough approach rectangle around the visible pill. We don't
     /// have direct access to DynamicNotch's window frame, so approximate from
     /// screen geometry: top-center of the primary (preferably notched) screen.
@@ -222,7 +267,7 @@ final class NotchCoordinator {
         let cx = frame.midX
         let topY = frame.maxY
         let pillRect = NSRect(
-            x: cx - pillW / 2 + HARNESS_NOTCH_OFFSET_X,
+            x: cx - pillW / 2 + notchOffsetX,
             y: topY - pillH,
             width: pillW,
             height: pillH
