@@ -5,6 +5,7 @@ import Foundation
 import SwiftUI
 
 private let APPROACH_HALO_PX: CGFloat = 200
+private let HARNESS_NOTCH_OFFSET_X: CGFloat = 390
 
 @MainActor
 final class NotchCoordinator {
@@ -44,7 +45,8 @@ final class NotchCoordinator {
         let st = state
         notch = DynamicNotch(
             hoverBehavior: .all,
-            style: .auto
+            style: .auto,
+            horizontalOffset: HARNESS_NOTCH_OFFSET_X
         ) {
             HarnessExpanded(state: st)
         } compactLeading: {
@@ -220,7 +222,7 @@ final class NotchCoordinator {
         let cx = frame.midX
         let topY = frame.maxY
         let pillRect = NSRect(
-            x: cx - pillW / 2,
+            x: cx - pillW / 2 + HARNESS_NOTCH_OFFSET_X,
             y: topY - pillH,
             width: pillW,
             height: pillH

@@ -65,6 +65,10 @@ public final class DynamicNotch<Expanded, CompactLeading, CompactTrailing>: Obse
     /// Behavior of window when mouse enters.
     public let hoverBehavior: DynamicNotchHoverBehavior
 
+    /// Horizontal window offset from the screen center. Keep this at zero for
+    /// the primary notch owner; sidecar notch apps can move themselves aside.
+    public let horizontalOffset: CGFloat
+
     /// Namespace for matched geometry effect. It is automatically generated if `nil` when the notch is first presented.
     @Published public internal(set) var namespace: Namespace.ID?
 
@@ -96,12 +100,14 @@ public final class DynamicNotch<Expanded, CompactLeading, CompactTrailing>: Obse
     public init(
         hoverBehavior: DynamicNotchHoverBehavior = .all,
         style: DynamicNotchStyle = .auto,
+        horizontalOffset: CGFloat = 0,
         @ViewBuilder expanded: @escaping () -> Expanded,
         @ViewBuilder compactLeading: @escaping () -> CompactLeading = { EmptyView() },
         @ViewBuilder compactTrailing: @escaping () -> CompactTrailing = { EmptyView() }
     ) {
         self.hoverBehavior = hoverBehavior
         self.style = style
+        self.horizontalOffset = horizontalOffset
 
         self.expandedContent = expanded()
         self.compactLeadingContent = compactLeading()
@@ -118,11 +124,13 @@ public final class DynamicNotch<Expanded, CompactLeading, CompactTrailing>: Obse
     public convenience init(
         hoverBehavior: DynamicNotchHoverBehavior = [.keepVisible],
         style: DynamicNotchStyle = .auto,
+        horizontalOffset: CGFloat = 0,
         @ViewBuilder expanded: @escaping () -> Expanded
     ) where CompactLeading == EmptyView, CompactTrailing == EmptyView {
         self.init(
             hoverBehavior: hoverBehavior,
             style: style,
+            horizontalOffset: horizontalOffset,
             expanded: expanded,
             compactLeading: { EmptyView() },
             compactTrailing: { EmptyView() }
@@ -370,7 +378,7 @@ private extension DynamicNotch {
             height: screen.frame.height / 2
         )
         let origin = NSPoint(
-            x: screen.frame.midX - (size.width / 2),
+            x: screen.frame.midX - (size.width / 2) + horizontalOffset,
             y: screen.frame.maxY - size.height
         )
 
