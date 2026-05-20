@@ -660,6 +660,34 @@ def next_steps(since: str, as_json: bool) -> None:
         click.echo(f"  {name:28s} {n_rows:5d}")
 
 
+@main.command("info-diet")
+@click.option("--since", default="7d", help="Window: 24h, 7d, etc.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def info_diet(since: str, as_json: bool) -> None:
+    """Summarize research/information-diet episodes from screen history."""
+    from . import information_diet as information_diet_mod
+
+    report = information_diet_mod.build_report(window=since)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    summary = report["summary"]
+    click.echo(
+        f"info_diet: {report['window']} since {report['since']}  "
+        f"events={summary['n_research_events']} episodes={summary['n_episodes']} "
+        f"observed_min={_fmt_num(summary['observed_research_min'])}"
+    )
+    click.echo("workflow patterns:")
+    for name, n_rows in sorted((summary.get("workflow_patterns") or {}).items(), key=lambda kv: (-kv[1], kv[0])):
+        click.echo(f"  {name:28s} {n_rows:5d}")
+    click.echo("top domains:")
+    for name, n_rows in sorted((summary.get("top_domains") or {}).items(), key=lambda kv: (-kv[1], kv[0]))[:8]:
+        click.echo(f"  {name:28s} {n_rows:5d}")
+    click.echo("skill hypotheses:")
+    for row in report.get("skill_hypotheses", [])[:5]:
+        click.echo(f"  {row['confidence']:.2f}  {row['hypothesis']}")
+
+
 @main.command("train-policy")
 @click.option("--since", default="30d", help="Training window: 7d, 30d, etc.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")

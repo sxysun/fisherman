@@ -28,6 +28,8 @@ class ScreenContext:
     bundle_id: Optional[str] = None
     window_title: Optional[str] = None
     ocr_snippet: str = ""
+    capture_ts_unix: Optional[float] = None
+    capture_gap_sec: float = 0.0
     frame_age_sec: float = 0.0
     sensitive_scene: bool = False
 
@@ -256,6 +258,8 @@ class MemorySnapshot:
     recent_outcomes: list[dict] = field(default_factory=list)
     app_switches_last_15m: int = 0
     minutes_on_current_app: float = 0.0
+    last_event_gap_sec: float = 0.0
+    session_boundary: Optional[str] = None
 
     @classmethod
     def build(
@@ -265,6 +269,8 @@ class MemorySnapshot:
         recent_outcomes: list[dict],
         app_switches_last_15m: int,
         minutes_on_current_app: float,
+        last_event_gap_sec: float = 0.0,
+        session_boundary: Optional[str] = None,
     ) -> "MemorySnapshot":
         body = {
             "recent_apps": recent_apps,
@@ -272,6 +278,8 @@ class MemorySnapshot:
             "recent_outcomes": recent_outcomes,
             "app_switches_last_15m": app_switches_last_15m,
             "minutes_on_current_app": round(minutes_on_current_app, 2),
+            "last_event_gap_sec": round(last_event_gap_sec, 2),
+            "session_boundary": session_boundary,
         }
         snap_id = f"mem_{_stable_hash(body)}"
         return cls(snapshot_id=snap_id, ts=_now_iso(), **body)

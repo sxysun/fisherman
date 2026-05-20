@@ -160,7 +160,9 @@ def _serialize_state(
             lines.append(f"scene_intent_signals: {', '.join(active_signals)}")
     lines.extend([
         f"frame_age_sec: {int(event.screen.frame_age_sec)}",
-        f"minutes_on_current_app: {memory.minutes_on_current_app}",
+        f"capture_gap_sec: {int(getattr(event.screen, 'capture_gap_sec', 0.0) or 0.0)}",
+        f"continuous_minutes_on_current_app: {memory.minutes_on_current_app}",
+        f"session_boundary: {memory.session_boundary or 'none'}",
         f"app_switches_last_15m: {memory.app_switches_last_15m}",
         f"ocr_snippet: {ocr}",
     ])

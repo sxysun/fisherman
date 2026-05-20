@@ -26,7 +26,7 @@ async def synthesize(
     if status is None:
         return None
 
-    frames = await fc.list_frames(count=1)
+    frames = await fc.list_frames(count=2)
     if not frames:
         screen = ScreenContext(active=False)
     else:
@@ -34,14 +34,27 @@ async def synthesize(
         ocr_full = f.get("ocr_text") or ""
         scan = privacy.scan_text(ocr_full)
         ocr = scan.redacted_text[:OCR_SNIPPET_MAX]
-        ts = f.get("ts") or 0.0
+        try:
+            ts = float(f.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        capture_gap_sec = 0.0
+        if len(frames) > 1:
+            try:
+                prev_ts = float(frames[1].get("ts") or 0.0)
+                if prev_ts > 0:
+                    capture_gap_sec = max(0.0, ts - prev_ts)
+            except (TypeError, ValueError):
+                capture_gap_sec = 0.0
         screen = ScreenContext(
             active=True,
             frontmost_app=f.get("app"),
             bundle_id=f.get("bundle"),
             window_title=f.get("window"),
             ocr_snippet=ocr,
-            frame_age_sec=max(0.0, _now_unix() - float(ts)),
+            capture_ts_unix=ts if ts > 0 else None,
+            capture_gap_sec=capture_gap_sec,
+            frame_age_sec=max(0.0, _now_unix() - ts) if ts > 0 else 0.0,
             sensitive_scene=scan.sensitive,
         )
 

@@ -140,13 +140,16 @@ def _summarize_interactions(events: list) -> dict:
         hover_total[tgt] = hover_total.get(tgt, 0) + max(0, last_t - start_t)
 
     # Convenience flag for downstream reward shaping. Target matters: hovering
-    # "dismiss" is a very different signal from hovering "yes".
+    # "dismiss" is a very different signal from hovering "yes". For timeouts,
+    # use the dominant dwell target rather than letting an accidental brush over
+    # Dismiss override a much longer hover on Later/Yes.
     any_hover = bool(considered)
-    if "dismiss" in considered:
+    dominant_target = _dominant_hover_target(hover_total, considered)
+    if dominant_target == "dismiss":
         intent_signal = "rejection_considered"
-    elif "later" in considered:
+    elif dominant_target == "later":
         intent_signal = "snooze_considered"
-    elif "yes" in considered:
+    elif dominant_target == "yes":
         intent_signal = "positive_considered"
     elif any_hover:
         intent_signal = "considered"
@@ -159,9 +162,26 @@ def _summarize_interactions(events: list) -> dict:
         "n_approaches": n_approaches,
         "considered_targets": sorted(considered),
         "total_hover_ms_by_target": hover_total,
+        "dominant_hover_target": dominant_target,
         "any_hover": any_hover,
         "intent_signal": intent_signal,
     }
+
+
+def _dominant_hover_target(hover_total: dict[str, int], considered: set[str]) -> str | None:
+    if not considered:
+        return None
+    if hover_total:
+        return sorted(
+            hover_total.items(),
+            key=lambda item: (int(item[1]), _hover_priority(item[0])),
+            reverse=True,
+        )[0][0]
+    return sorted(considered, key=_hover_priority, reverse=True)[0]
+
+
+def _hover_priority(target: str) -> int:
+    return {"yes": 3, "later": 2, "dismiss": 1}.get(target, 0)
 
 
 async def get_history(request: web.Request) -> web.Response:
@@ -344,6 +364,21 @@ async def get_next_steps(request: web.Request) -> web.Response:
     ))
 
 
+async def get_information_diet(request: web.Request) -> web.Response:
+    from . import information_diet as information_diet_mod
+
+    window = request.query.get("window", "7d")
+    try:
+        max_episodes = int(request.query.get("max_episodes", "20"))
+    except ValueError:
+        max_episodes = 20
+    max_episodes = max(1, min(max_episodes, 100))
+    return web.json_response(information_diet_mod.build_report(
+        window=window,
+        max_episodes=max_episodes,
+    ))
+
+
 async def post_next_steps_score(request: web.Request) -> web.Response:
     from . import next_step as next_step_mod
 
@@ -514,6 +549,7 @@ def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app.router.add_get("/lab", get_lab)
     app.router.add_get("/eval/report", get_eval_report)
     app.router.add_get("/next-steps/report", get_next_steps)
+    app.router.add_get("/information-diet/report", get_information_diet)
     app.router.add_post("/next-steps/score", post_next_steps_score)
     app.router.add_post("/trainer/run", post_trainer_run)
     app.router.add_post("/trainer/activate", post_trainer_activate)

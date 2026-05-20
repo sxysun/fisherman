@@ -255,6 +255,7 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="tabs">
     <div class="tab active" data-tab="activity">Activity</div>
     <div class="tab" data-tab="eval">Eval</div>
+    <div class="tab" data-tab="diet">Diet</div>
     <div class="tab" data-tab="settings">Settings</div>
     <div class="tab" data-tab="diagnostics">Diagnostics</div>
   </div>
@@ -305,6 +306,26 @@ DASHBOARD_HTML = """<!doctype html>
     <div class="panel">
       <h2>Recent non-green examples</h2>
       <div class="example-list" id="eval-examples"></div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-diet">
+    <div class="stats" id="diet-stats"></div>
+    <div class="panel">
+      <h2>Workflow patterns</h2>
+      <div class="bars" id="diet-patterns"></div>
+    </div>
+    <div class="panel">
+      <h2>Top source domains</h2>
+      <div class="bars" id="diet-domains"></div>
+    </div>
+    <div class="panel">
+      <h2>Skill hypotheses</h2>
+      <div class="example-list" id="diet-skills"></div>
+    </div>
+    <div class="panel">
+      <h2>Recent research episodes</h2>
+      <div class="example-list" id="diet-episodes"></div>
     </div>
   </div>
 
@@ -426,6 +447,8 @@ let cfg = null;
 let policyState = null;
 let evalReport = null;
 let evalLoadedAt = 0;
+let dietReport = null;
+let dietLoadedAt = 0;
 
 // Tab switching
 document.querySelectorAll('.tab').forEach(t => {
@@ -435,6 +458,7 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     document.getElementById('tab-' + t.dataset.tab).classList.add('active');
     if (t.dataset.tab === 'eval') loadEval();
+    if (t.dataset.tab === 'diet') loadDiet();
   });
 });
 
@@ -462,6 +486,18 @@ async function loadEval(force=false) {
   evalReport = await fetch('/eval/report?window=7d&max_examples=20').then(r => r.json());
   evalLoadedAt = now;
   renderEval(evalReport);
+}
+
+async function loadDiet(force=false) {
+  const now = Date.now();
+  if (!force && dietReport && now - dietLoadedAt < 30000) {
+    renderDiet(dietReport);
+    return;
+  }
+  document.getElementById('diet-stats').innerHTML = `<div class="stat"><div class="label">Diet</div><div class="value">…</div><div class="sub">loading report</div></div>`;
+  dietReport = await fetch('/information-diet/report?window=7d&max_episodes=20').then(r => r.json());
+  dietLoadedAt = now;
+  renderDiet(dietReport);
 }
 
 function renderHeader(data, p) {
@@ -562,6 +598,42 @@ function renderEval(r) {
       <div class="meta">outcome=${escapeHTML(out.user_action || 'none')} signal=${escapeHTML(out.intent_signal || 'none')} label=${escapeHTML((ex.label || {}).label || 'none')} reasons=[${escapeHTML((dec.reason_codes || []).join(', '))}]</div>
     </div>`;
   }).join('') || '<div style="color:#7c7c86">no non-green examples in this window</div>';
+}
+
+function renderDiet(r) {
+  const s = r.summary || {};
+  const stats = [
+    {label: 'Research events', val: s.n_research_events ?? 0, sub: `${s.n_episodes ?? 0} episodes`},
+    {label: 'Observed minutes', val: numMaybe(s.observed_research_min), sub: r.window || '7d'},
+    {label: 'Top domain', val: Object.keys(s.top_domains || {})[0] || 'n/a', sub: 'OCR inferred'},
+    {label: 'Hypotheses', val: (r.skill_hypotheses || []).length, sub: 'confidence-weighted'},
+  ];
+  document.getElementById('diet-stats').innerHTML = stats.map(st => `
+    <div class="stat">
+      <div class="label">${escapeHTML(st.label)}</div>
+      <div class="value" style="font-size:${String(st.val).length > 12 ? '14px' : '24px'}">${escapeHTML(st.val)}</div>
+      ${st.sub ? `<div class="sub">${escapeHTML(st.sub)}</div>` : ''}
+    </div>`).join('');
+  document.getElementById('diet-patterns').innerHTML = barsHTML(s.workflow_patterns || {});
+  document.getElementById('diet-domains').innerHTML = barsHTML(s.top_domains || {});
+  document.getElementById('diet-skills').innerHTML = (r.skill_hypotheses || []).map(row => `
+    <div class="example-row">
+      <div class="topline">
+        <span><span class="pill info">${numMaybe(row.confidence)}</span> ${escapeHTML(row.topic || 'topic')}</span>
+        <span>${escapeHTML(numMaybe(row.observed_duration_min))}m</span>
+      </div>
+      <div class="msg">${escapeHTML(row.hypothesis || '')}</div>
+      <div class="meta">patterns=${escapeHTML(Object.keys(row.patterns || {}).join(', ') || 'none')} domains=${escapeHTML((row.domains || []).join(', ') || 'none')}</div>
+    </div>`).join('') || '<div style="color:#7c7c86">no skill hypotheses yet</div>';
+  document.getElementById('diet-episodes').innerHTML = (r.episodes || []).map(ep => `
+    <div class="example-row">
+      <div class="topline">
+        <span>${escapeHTML(ep.task_hypothesis || 'research episode')}</span>
+        <span>${escapeHTML((ep.ts_start || '').slice(0,19))}</span>
+      </div>
+      <div class="meta">duration=${escapeHTML(numMaybe(ep.observed_duration_min))}m events=${escapeHTML(ep.n_events)} patterns=${escapeHTML((ep.workflow_patterns || []).join(', '))}</div>
+      <div class="meta">domains=${escapeHTML((ep.source_domains || []).join(', ') || 'none')} queries=${escapeHTML((ep.query_candidates || []).join(' | ') || 'none')}</div>
+    </div>`).join('') || '<div style="color:#7c7c86">no research episodes in this window</div>';
 }
 
 function barsHTML(dist, prefix='') {

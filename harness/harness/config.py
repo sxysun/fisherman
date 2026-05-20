@@ -21,6 +21,7 @@ fisherman_url = "http://localhost:7892"
 active_policy = "rule_v0"
 cooldown_min = 5
 negative_feedback_backoff_min = 15
+resume_suppression_sec = 90
 quiet_hours_start = 22
 quiet_hours_end = 8
 frequency = "medium"
@@ -73,6 +74,11 @@ timeout_sec = 12
 
 [memory]
 session_window_min = 120
+# Break continuity after a likely laptop sleep, lock-screen pause, or capture
+# outage. This keeps "minutes on current app" tied to observed active frames
+# instead of wall-clock time.
+idle_boundary_sec = 90
+active_frame_max_age_sec = 60
 
 # Realizer points at the hermes-agent endpoint. Hermes handles its own
 # agentic loop server-side, so client-side tool calls are disabled by default.

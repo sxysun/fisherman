@@ -193,6 +193,7 @@ def _joined_decision_row(
             "intent_signal": summary.get("intent_signal"),
             "considered_targets": summary.get("considered_targets") or [],
             "hover_ms_by_target": summary.get("total_hover_ms_by_target") or {},
+            "dominant_hover_target": summary.get("dominant_hover_target"),
             "reward_value": reward.get("value"),
             "reward_version": reward.get("version"),
         },

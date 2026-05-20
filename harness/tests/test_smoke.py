@@ -17,6 +17,7 @@ from harness import experiments as experiments_mod
 from harness import gate as gate_mod
 from harness import image_redaction as image_redaction_mod
 from harness import implicit as implicit_mod
+from harness import information_diet as information_diet_mod
 from harness import label_ui as label_ui_mod
 from harness import memory as memory_mod
 from harness import metrics as metrics_mod
@@ -54,6 +55,7 @@ def test_imports():
     assert privacy_mod
     assert image_redaction_mod
     assert implicit_mod
+    assert information_diet_mod
     assert label_ui_mod
     assert model_audit_mod
     assert next_step_mod
@@ -480,6 +482,68 @@ def test_rule_v0_negative_feedback_backoff_uses_event_time_for_replay():
     assert blocked.action == "no_ping"
     assert "recent_negative_feedback" in blocked.reason_codes
     assert rule_v0.decide(event, mem, replay_stale, cfg).action == "notch_ping"
+
+
+def test_session_memory_breaks_continuity_across_sleep_gap(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        mem = memory_mod.SessionMemory(window_min=120, idle_boundary_sec=90)
+        first = schemas.CandidateEvent()
+        first.ts = "2026-05-19T12:00:00Z"
+        first.screen.frontmost_app = "Chrome"
+        first.screen.frame_age_sec = 1
+        first.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
+        mem.record(first)
+
+        resumed = schemas.CandidateEvent()
+        resumed.ts = "2026-05-19T12:30:00Z"
+        resumed.screen.frontmost_app = "Chrome"
+        resumed.screen.frame_age_sec = 1
+        resumed.screen.capture_gap_sec = 1800
+        resumed.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
+        mem.record(resumed)
+        snap = mem.snapshot([])
+
+        assert snap.minutes_on_current_app == 0.0
+        assert snap.session_boundary == "capture_gap"
+        assert snap.last_event_gap_sec == 1800.0
+        assert snap.recent_apps == ["Chrome"]
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_rule_v0_suppresses_resume_from_idle():
+    from policies import rule_v0
+
+    event = schemas.CandidateEvent()
+    event.screen.frame_age_sec = 5.0
+    event.screen.capture_gap_sec = 240.0
+    event.screen.ocr_snippet = "ship harness"
+    event.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
+    mem = schemas.MemorySnapshot.build(
+        recent_apps=["Chrome"],
+        recent_scenes=["reading_browser"],
+        recent_outcomes=[],
+        app_switches_last_15m=0,
+        minutes_on_current_app=0.0,
+        last_event_gap_sec=240.0,
+        session_boundary="capture_gap",
+    )
+    cfg = {
+        "cooldown_min": 5,
+        "negative_feedback_backoff_min": 15,
+        "resume_suppression_sec": 90,
+        "quiet_hours_start": 3,
+        "quiet_hours_end": 4,
+        "sensitivity": "responsive",
+        "daily_goal": "ship harness",
+        "allowed_intents": [],
+    }
+
+    blocked = rule_v0.decide(event, mem, [], cfg)
+    assert blocked.action == "no_ping"
+    assert "resume_from_idle" in blocked.reason_codes
 
 
 def test_rule_v0_snooze_expires():
@@ -1074,6 +1138,51 @@ def test_implicit_promote_endpoint_appends_retro_label(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_information_diet_report_synthesizes_research_hypotheses(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        rows = [
+            ("cand_diet_1", "2026-05-19T12:00:00Z", "Google Chrome", "screenpipe github.com/screenpipe screen capture search"),
+            ("cand_diet_2", "2026-05-19T12:00:30Z", "Google Chrome", "docs.screenpi.pe home local screen audio capture"),
+            ("cand_diet_3", "2026-05-19T12:01:00Z", "Google Chrome", "openadapt.ai evals github.com/OpenAdaptAI/OpenAdapt"),
+        ]
+        for cid, ts, app, ocr in rows:
+            store_mod.append_jsonl(
+                "candidates.jsonl",
+                {
+                    "candidate_id": cid,
+                    "ts": ts,
+                    "screen": {
+                        "frontmost_app": app,
+                        "ocr_snippet": ocr,
+                        "frame_age_sec": 3,
+                        "sensitive_scene": False,
+                    },
+                    "scene": {"label": "reading_browser", "strength": "medium", "source": "rule"},
+                    "context": {},
+                    "user_pref": {},
+                },
+            )
+
+        report = information_diet_mod.build_report(window="365d")
+        assert report["summary"]["n_research_events"] == 3
+        assert report["summary"]["n_episodes"] == 1
+        assert "source_triage" in report["summary"]["workflow_patterns"]
+        assert report["skill_hypotheses"]
+        serialized = json.dumps(report)
+        assert "screenpipe github.com" not in serialized
+
+        req = make_mocked_request("GET", "/information-diet/report?window=365d")
+        resp = asyncio.run(server_mod.get_information_diet(req))
+        body = json.loads(resp.text)
+        assert body["version"] == information_diet_mod.REPORT_VERSION
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_eval_report_builds_failure_taxonomy_and_sanitized_examples(tmp_path):
     from aiohttp.test_utils import make_mocked_request
 
@@ -1515,3 +1624,15 @@ def test_interaction_summary_is_target_aware():
     assert summary["intent_signal"] == "rejection_considered"
     assert summary["considered_targets"] == ["dismiss"]
     assert summary["total_hover_ms_by_target"]["dismiss"] == 320
+    assert summary["dominant_hover_target"] == "dismiss"
+
+
+def test_interaction_summary_uses_dominant_hover_target():
+    summary = server_mod._summarize_interactions([
+        {"t_ms": 100, "kind": "hover_start", "target": "dismiss"},
+        {"t_ms": 200, "kind": "hover_end", "target": "dismiss"},
+        {"t_ms": 250, "kind": "hover_start", "target": "later"},
+        {"t_ms": 1250, "kind": "hover_end", "target": "later"},
+    ])
+    assert summary["dominant_hover_target"] == "later"
+    assert summary["intent_signal"] == "snooze_considered"

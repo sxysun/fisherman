@@ -68,8 +68,14 @@ class EpisodeTracker:
     def _boundary_reason(self, event: CandidateEvent, event_ts: float) -> str | None:
         if self.current is None:
             return None
+        if float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0) > self.idle_boundary_sec:
+            return "capture_gap"
         if self._last_event_ts is not None and event_ts - self._last_event_ts > self.idle_boundary_sec:
             return "idle_gap"
+        if event.screen.sensitive_scene or event.scene.label == "sensitive":
+            return "sensitive_or_locked"
+        if event.screen.frame_age_sec > 60:
+            return "stale_frame"
         app = event.screen.frontmost_app or ""
         if (self.current.app or "") != app:
             return "app_switch"
@@ -132,6 +138,9 @@ def predict_next_step(
             "goal_terms_matched": goal_terms_matched,
             "app_switches_last_15m": memory.app_switches_last_15m,
             "minutes_on_current_app": memory.minutes_on_current_app,
+            "last_event_gap_sec": getattr(memory, "last_event_gap_sec", 0.0),
+            "session_boundary": getattr(memory, "session_boundary", None),
+            "capture_gap_sec": getattr(event.screen, "capture_gap_sec", 0.0),
         },
     )
     return prediction.to_dict()

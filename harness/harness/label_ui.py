@@ -528,6 +528,7 @@ function render() {
           <div class="meta-row"><span class="k">app</span><span class="v">${(t.screen || {}).frontmost_app || '?'}</span></div>
           <div class="meta-row"><span class="k">scene</span><span class="v">${(t.scene || {}).label || '?'} (${(t.scene || {}).strength || '?'})</span></div>
           <div class="meta-row"><span class="k">frame_age</span><span class="v">${Math.round((t.screen || {}).frame_age_sec || 0)}s</span></div>
+          <div class="meta-row"><span class="k">capture_gap</span><span class="v">${Math.round((t.screen || {}).capture_gap_sec || 0)}s</span></div>
           <div class="ocr">${escapeHTML((t.screen || {}).ocr_snippet || '(no ocr)')}</div>
         </div>
         ${t.memory ? `
@@ -535,6 +536,7 @@ function render() {
           <h2>memory snapshot</h2>
           <div class="meta-row"><span class="k">app switches 15m</span><span class="v">${t.memory.app_switches_last_15m}</span></div>
           <div class="meta-row"><span class="k">mins on current</span><span class="v">${t.memory.minutes_on_current_app}</span></div>
+          <div class="meta-row"><span class="k">session boundary</span><span class="v">${t.memory.session_boundary || 'none'}</span></div>
           <div class="meta-row"><span class="k">recent apps</span><span class="v">${(t.memory.recent_apps || []).slice(-5).join(', ') || '—'}</span></div>
         </div>` : ''}
       </aside>

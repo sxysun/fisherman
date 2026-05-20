@@ -112,6 +112,7 @@ harness metrics [--since 24h --json]        live outcome + retro-label metrics
 harness implicit [--since 7d --json]         weak labels from notification behavior
 harness eval-report [--since 7d --json]      joined eval report + failure taxonomy
 harness next-steps [--since 7d --json]       predict-first next-step eval
+harness info-diet [--since 7d --json]        research episodes + workflow hypotheses
 harness storage-backfill [--reset]          mirror JSONL history into harness.db
 harness collect --since 24h                 freeze candidates to datasets/dogfood/
 harness shadow --since 24h [--full]         compare policy variants against labels
@@ -125,6 +126,8 @@ harness score --predictions reports/...     replay scoring + reward_v2
 
 The report includes data coverage, claimed-ping outcome capture, explicit/implicit label readiness, policy variant scores, failure taxonomy (`false_interruption`, `missed_help`, `queued_not_claimed`, `undelivered_ping`, `soft_rejection`, `missing_outcome_signal`, etc.), next-step prediction accuracy/residuals, and recent non-green examples without raw OCR or screenshots. `harness next-steps --since 7d` shows the prediction loop directly.
 
+`harness info-diet --since 7d` builds a conservative research/workflow report from the same candidate stream. It groups browser-like reading episodes, inferred domains, query-like phrases, dwell patterns, and tentative workflow hypotheses. Treat it as an evidence panel, not a trusted skill compiler yet: current source attribution is OCR-derived until Fisherman exposes browser URL/title ground truth.
+
 ## State storage
 
 Runtime state lives outside the repo at `~/.harness/`. See `HANDOFF.md` for the full layout.
@@ -137,4 +140,4 @@ The canonical append path still writes JSONL files such as `candidates.jsonl`, `
 .venv/bin/python -m pytest tests/test_smoke.py
 ```
 
-The smoke suite covers schemas, config default merging, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay, gate, experiments, launchd plist generation, labeler queueing, metrics, next-step eval, shadow eval, critic, and reward.
+The smoke suite covers schemas, config default merging, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay, gate, sleep/resume continuity, experiments, launchd plist generation, labeler queueing, metrics, next-step eval, information-diet reporting, shadow eval, critic, and reward.

@@ -80,6 +80,8 @@ def _should_skip(event: CandidateEvent, min_interval_sec: float) -> Optional[str
         return "sensitive_ocr"
     if event.screen.frame_age_sec > 60:
         return "frame_too_old"
+    if float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0) > 90:
+        return "resume_from_idle"
     sig = _signal(event)
     if _last_signal is not None and sig == _last_signal:
         return "no_change_since_last_vlm"

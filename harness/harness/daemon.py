@@ -121,7 +121,12 @@ async def run_loop(config: dict) -> None:
     push_channel = config.get("push", {}).get("channel", "notch_pill")
 
     fc = FishermanClient(fisherman_url)
-    memory = SessionMemory(window_min=int(config.get("memory", {}).get("session_window_min", 120)))
+    memory_cfg = config.get("memory", {})
+    memory = SessionMemory(
+        window_min=int(memory_cfg.get("session_window_min", 120)),
+        idle_boundary_sec=int(memory_cfg.get("idle_boundary_sec", 90)),
+        active_frame_max_age_sec=int(memory_cfg.get("active_frame_max_age_sec", 60)),
+    )
     episode_tracker = next_step_mod.EpisodeTracker()
 
     last_push_at_ref: list[Optional[float]] = [None]
@@ -248,6 +253,7 @@ async def _tick(
     gate_cfg = {
         "cooldown_min": config["gate"]["cooldown_min"],
         "negative_feedback_backoff_min": config["gate"].get("negative_feedback_backoff_min", 15),
+        "resume_suppression_sec": config["gate"].get("resume_suppression_sec", 90),
         "quiet_hours_start": config["gate"]["quiet_hours_start"],
         "quiet_hours_end": config["gate"]["quiet_hours_end"],
         "allowed_intents": config["intents"]["enabled"],

@@ -201,10 +201,15 @@ User flow once it's running:
    - Sensitivity (gentle/balanced/responsive) → cooldown_min mapping
    - Single goal_aware_v1.md prompt; no fixed intent catalog
    - reason_codes from gate flow directly to the realizer
+   - Sleep/resume gaps are now explicit (`capture_gap_sec`,
+     `last_event_gap_sec`, `session_boundary`) so long-session messages do
+     not count closed-laptop time as active work
 
 ✅ Signal-derived reward (reward_v2)
    - clicked +2, considered +0.5, approached -0.2, ignored -1, dismissed -1.5
    - Computed from interaction_summary.intent_signal (hover/approach tracking)
+   - Timeout hover feedback is dwell-based: the dominant hovered button wins,
+     so a brief brush over Dismiss no longer overrides a longer Later/Yes hover
    - Replaces the ad-hoc 3/-5/-8/-1 weights
 
 ✅ Native settings UI
@@ -223,6 +228,14 @@ User flow once it's running:
    - Feeds reward_v2 + future few-shot personalization
 
 ✅ Live lab metrics
+
+✅ Information-diet report
+   - `harness info-diet --since 7d` and Dashboard → Diet summarize
+     browser-like research episodes, OCR-inferred domains/query phrases,
+     dwell patterns, and tentative workflow hypotheses
+   - This is deliberately conservative: useful for inspecting tacit workflow
+     evidence, not a trusted skill compiler until Fisherman exposes direct
+     URL/title and downstream artifact links
    - `harness metrics --since 24h` reports ping rate, outcome capture,
      avg reward, retro-label agreement, false-interruption rate, missed-help
      rate, and readiness thresholds
@@ -446,8 +459,9 @@ These don't have answers yet — the next agent (or the user) should resolve the
 
 2. **Are the intent_signal tiers calibrated correctly?**
    `considered=+0.5, approached=-0.2` are reasonable defaults but
-   not validated. Once you have ≥50 outcomes, check if the reward
-   correlates with the user's after-the-fact "was this useful?"
+   not validated. Hover targets are now dwell-based, but once you have ≥50
+   outcomes, check if the reward correlates with the user's after-the-fact
+   "was this useful?"
 
 3. **Does the gate fire often enough?**
    Even with sensitivity=responsive (2-min cooldown), only ~5 organic

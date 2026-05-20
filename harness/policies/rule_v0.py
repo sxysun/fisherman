@@ -109,6 +109,7 @@ def decide(
     qh_start = int(config.get("quiet_hours_start", 22))
     qh_end = int(config.get("quiet_hours_end", 8))
     daily_goal = (config.get("daily_goal") or "").strip()
+    resume_suppression_sec = float(config.get("resume_suppression_sec", 90))
 
     # ── Hard gates ────────────────────────────────────────────────────────
     if event.context.in_call:
@@ -123,6 +124,10 @@ def decide(
         return _decision(cid, action="no_ping", reasons=["sensitive_scene"])
     if event.screen.frame_age_sec > 180:
         return _decision(cid, action="no_ping", reasons=["stale_context"])
+    capture_gap_sec = float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0)
+    last_event_gap_sec = float(getattr(memory, "last_event_gap_sec", 0.0) or 0.0)
+    if max(capture_gap_sec, last_event_gap_sec) > resume_suppression_sec:
+        return _decision(cid, action="no_ping", reasons=["resume_from_idle"])
     if event.scene.strength in ("weak", "unknown"):
         return _decision(cid, action="no_ping", reasons=["weak_semantic_signal"])
 

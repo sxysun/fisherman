@@ -132,6 +132,8 @@ def _to_event(row: dict):
             bundle_id=screen_d.get("bundle_id"),
             window_title=screen_d.get("window_title"),
             ocr_snippet=screen_d.get("ocr_snippet", ""),
+            capture_ts_unix=screen_d.get("capture_ts_unix"),
+            capture_gap_sec=float(screen_d.get("capture_gap_sec", 0.0) or 0.0),
             frame_age_sec=float(screen_d.get("frame_age_sec", 0.0)),
             sensitive_scene=screen_d.get("sensitive_scene", False),
         ),
@@ -178,29 +180,79 @@ def _memory_for_windows(
     if not recent_2h:
         return MemorySnapshot.build([], [], [], 0, 0.0)
 
+    valid_2h = [(event, ts) for event, ts in recent_2h if _is_valid_work_event(event)]
+    valid_15m = [(event, ts) for event, ts in recent_15m if _is_valid_work_event(event)]
+
     switches = 0
     prev = None
-    for event, _ in recent_15m:
+    for event, _ in valid_15m:
         app = event.screen.frontmost_app
         if prev is not None and app != prev:
             switches += 1
         prev = app
 
+    latest_capture_gap = float(getattr(recent_2h[-1][0].screen, "capture_gap_sec", 0.0) or 0.0)
+    if not valid_2h or not _is_valid_work_event(recent_2h[-1][0]) or latest_capture_gap > 90:
+        return MemorySnapshot.build(
+            recent_apps=[event.screen.frontmost_app or "" for event, _ in valid_2h[-30:]],
+            recent_scenes=[event.scene.label for event, _ in valid_2h[-30:]],
+            recent_outcomes=[],
+            app_switches_last_15m=switches,
+            minutes_on_current_app=0.0,
+            last_event_gap_sec=_last_gap_sec(recent_2h),
+            session_boundary=_session_boundary(recent_2h),
+        )
+
     current_app = recent_2h[-1][0].screen.frontmost_app
     start_ts = now_ts or recent_2h[-1][1]
-    for event, event_ts in reversed(recent_2h):
+    last_ts = start_ts
+    for event, event_ts in reversed(recent_2h[:-1]):
+        if last_ts - event_ts > 90:
+            break
+        if not _is_valid_work_event(event):
+            break
         if event.screen.frontmost_app != current_app:
             break
+        if float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0) > 90:
+            break
         start_ts = event_ts
+        last_ts = event_ts
 
     now_ts = now_ts or start_ts
     return MemorySnapshot.build(
-        recent_apps=[event.screen.frontmost_app or "" for event, _ in recent_2h[-30:]],
-        recent_scenes=[event.scene.label for event, _ in recent_2h[-30:]],
+        recent_apps=[event.screen.frontmost_app or "" for event, _ in valid_2h[-30:]],
+        recent_scenes=[event.scene.label for event, _ in valid_2h[-30:]],
         recent_outcomes=[],
         app_switches_last_15m=switches,
         minutes_on_current_app=max(0.0, (now_ts - start_ts) / 60.0),
+        last_event_gap_sec=_last_gap_sec(recent_2h),
+        session_boundary=_session_boundary(recent_2h),
     )
+
+
+def _is_valid_work_event(event: Any) -> bool:
+    return (
+        bool(event.screen.active)
+        and not bool(event.screen.sensitive_scene)
+        and event.scene.label != "sensitive"
+        and float(event.screen.frame_age_sec or 0.0) <= 60
+    )
+
+
+def _last_gap_sec(recent: list[tuple[Any, float]]) -> float:
+    if len(recent) < 2:
+        return 0.0
+    return max(0.0, recent[-1][1] - recent[-2][1])
+
+
+def _session_boundary(recent: list[tuple[Any, float]]) -> str | None:
+    if not recent:
+        return None
+    if float(getattr(recent[-1][0].screen, "capture_gap_sec", 0.0) or 0.0) > 90:
+        return "capture_gap"
+    if _last_gap_sec(recent) > 90:
+        return "idle_gap"
+    return None
 
 
 def _recent_outcomes_for(outcomes: list[dict], event_ts_iso: str, n: int = 5) -> list[dict]:
@@ -219,6 +271,7 @@ def _live_gate_config() -> dict:
     cfg = {
         "cooldown_min": 5,
         "negative_feedback_backoff_min": 15,
+        "resume_suppression_sec": 90,
         "quiet_hours_start": 22,
         "quiet_hours_end": 8,
         "allowed_intents": [
@@ -243,6 +296,10 @@ def _live_gate_config() -> dict:
                 "negative_feedback_backoff_min": gate.get(
                     "negative_feedback_backoff_min",
                     cfg["negative_feedback_backoff_min"],
+                ),
+                "resume_suppression_sec": gate.get(
+                    "resume_suppression_sec",
+                    cfg.get("resume_suppression_sec", 90),
                 ),
                 "quiet_hours_start": gate.get("quiet_hours_start", cfg["quiet_hours_start"]),
                 "quiet_hours_end": gate.get("quiet_hours_end", cfg["quiet_hours_end"]),

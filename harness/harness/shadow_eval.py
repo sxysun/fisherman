@@ -131,29 +131,84 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
     if not recent_2h:
         return memory_cls.build([], [], [], 0, 0.0)
 
+    valid_2h = [event for event in recent_2h if _is_valid_work_event(event)]
+    valid_15m = [event for event in recent_15m if _is_valid_work_event(event)]
+
     switches = 0
     prev = None
-    for event in recent_15m:
+    for event in valid_15m:
         app = event.screen.frontmost_app
         if prev is not None and app != prev:
             switches += 1
         prev = app
 
+    latest_capture_gap = float(getattr(recent_2h[-1].screen, "capture_gap_sec", 0.0) or 0.0)
+    if not valid_2h or not _is_valid_work_event(recent_2h[-1]) or latest_capture_gap > 90:
+        return memory_cls.build(
+            recent_apps=[event.screen.frontmost_app or "" for event in valid_2h[-30:]],
+            recent_scenes=[event.scene.label for event in valid_2h[-30:]],
+            recent_outcomes=[],
+            app_switches_last_15m=switches,
+            minutes_on_current_app=0.0,
+            last_event_gap_sec=_last_gap_sec(recent_2h),
+            session_boundary=_session_boundary(recent_2h),
+        )
+
     current_app = recent_2h[-1].screen.frontmost_app
     start_ts = now_ts or replay_mod._iso_to_unix(recent_2h[-1].ts) or 0.0
-    for event in reversed(recent_2h):
+    last_ts = start_ts
+    for event in reversed(recent_2h[:-1]):
+        event_ts = replay_mod._iso_to_unix(event.ts) or last_ts
+        if last_ts - event_ts > 90:
+            break
+        if not _is_valid_work_event(event):
+            break
         if event.screen.frontmost_app != current_app:
             break
-        start_ts = replay_mod._iso_to_unix(event.ts) or start_ts
+        if float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0) > 90:
+            break
+        start_ts = event_ts
+        last_ts = event_ts
 
     now_ts = now_ts or start_ts
     return memory_cls.build(
-        recent_apps=[event.screen.frontmost_app or "" for event in recent_2h[-30:]],
-        recent_scenes=[event.scene.label for event in recent_2h[-30:]],
+        recent_apps=[event.screen.frontmost_app or "" for event in valid_2h[-30:]],
+        recent_scenes=[event.scene.label for event in valid_2h[-30:]],
         recent_outcomes=[],
         app_switches_last_15m=switches,
         minutes_on_current_app=max(0.0, (now_ts - start_ts) / 60.0),
+        last_event_gap_sec=_last_gap_sec(recent_2h),
+        session_boundary=_session_boundary(recent_2h),
     )
+
+
+def _is_valid_work_event(event: Any) -> bool:
+    return (
+        bool(event.screen.active)
+        and not bool(event.screen.sensitive_scene)
+        and event.scene.label != "sensitive"
+        and float(event.screen.frame_age_sec or 0.0) <= 60
+    )
+
+
+def _last_gap_sec(recent: list[Any]) -> float:
+    if len(recent) < 2:
+        return 0.0
+    latest = replay_mod._iso_to_unix(recent[-1].ts)
+    previous = replay_mod._iso_to_unix(recent[-2].ts)
+    if latest is None or previous is None:
+        return 0.0
+    return max(0.0, latest - previous)
+
+
+def _session_boundary(recent: list[Any]) -> str | None:
+    if not recent:
+        return None
+    if float(getattr(recent[-1].screen, "capture_gap_sec", 0.0) or 0.0) > 90:
+        return "capture_gap"
+    if _last_gap_sec(recent) > 90:
+        return "idle_gap"
+    return None
 
 
 def _score_variant(
