@@ -6,6 +6,12 @@ import SwiftUI
 final class MenuBarController: NSObject, NSWindowDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
+    private weak var coordinator: NotchCoordinator?
+
+    init(coordinator: NotchCoordinator? = nil) {
+        self.coordinator = coordinator
+        super.init()
+    }
 
     func install() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -30,6 +36,22 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             title: "Open Dashboard (Web)",
             action: #selector(openDashboard),
             keyEquivalent: "d"
+        ).withTarget(self))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(NSMenuItem(
+            title: "Show Pipeline in Notch",
+            action: #selector(showPipelineInNotch),
+            keyEquivalent: "p"
+        ).withTarget(self))
+        menu.addItem(NSMenuItem(
+            title: "Show Diet in Notch",
+            action: #selector(showDietInNotch),
+            keyEquivalent: "i"
+        ).withTarget(self))
+        menu.addItem(NSMenuItem(
+            title: "Hide Notch Inspector",
+            action: #selector(hideNotchInspector),
+            keyEquivalent: ""
         ).withTarget(self))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(
@@ -82,6 +104,18 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     @objc func openDashboard() {
         let url = URL(string: "http://127.0.0.1:7893/dashboard")!
         NSWorkspace.shared.open(url)
+    }
+
+    @objc func showPipelineInNotch() {
+        coordinator?.showInspector(panel: .pipeline)
+    }
+
+    @objc func showDietInNotch() {
+        coordinator?.showInspector(panel: .diet)
+    }
+
+    @objc func hideNotchInspector() {
+        coordinator?.closeInspector()
     }
 
     @objc func snooze30() {

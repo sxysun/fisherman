@@ -36,6 +36,9 @@ final class NotchCoordinator {
         state.hoverHandler = { [weak self] target, entered in
             self?.recordEvent(kind: entered ? "hover_start" : "hover_end", target: target)
         }
+        state.closeInspectorHandler = { [weak self] in
+            Task { @MainActor in self?.closeInspector() }
+        }
     }
 
     func start() {
@@ -60,6 +63,26 @@ final class NotchCoordinator {
         pollTimer?.invalidate()
         autoDismissTask?.cancel()
         stopMouseTracking()
+        state.inspectorVisible = false
+        state.activePanel = .ping
+        let n = notch
+        Task { await n?.hide() }
+    }
+
+    func showInspector(panel: HarnessNotchPanel) {
+        state.activePanel = panel
+        state.inspectorVisible = true
+        let n = notch
+        Task { await n?.expand() }
+    }
+
+    func closeInspector() {
+        if currentDecisionID != nil {
+            state.activePanel = .ping
+            return
+        }
+        state.inspectorVisible = false
+        state.activePanel = .ping
         let n = notch
         Task { await n?.hide() }
     }
@@ -82,6 +105,8 @@ final class NotchCoordinator {
         events.removeAll(keepingCapacity: true)
         activeHoverTargets.removeAll(keepingCapacity: true)
         lastWasNearPill = false
+        state.activePanel = .ping
+        state.inspectorVisible = false
         state.current = pending
 
         let n = notch
@@ -131,6 +156,8 @@ final class NotchCoordinator {
         )
 
         state.current = nil
+        state.inspectorVisible = false
+        state.activePanel = .ping
         let n = notch
         Task { await n?.hide() }
     }
@@ -184,7 +211,7 @@ final class NotchCoordinator {
     }
 
     private func isInspectingPill() -> Bool {
-        lastWasNearPill || !activeHoverTargets.isEmpty
+        state.activePanel != .ping || lastWasNearPill || !activeHoverTargets.isEmpty
     }
 
     /// Compute a rough approach rectangle around the visible pill. We don't
