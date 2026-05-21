@@ -49,6 +49,22 @@ initial_delay_sec = 60
 min_implicit_usable = 20
 min_explicit_labels = 0
 
+[policy_learner]
+# Optional LLM in-context policy. To use it live, set [gate].active_policy to
+# "llm_icl_v0" and enabled=true. rule_v0 still runs first for hard safety gates
+# and fallback.
+enabled = false
+base_url = "http://3.82.134.133:8642"
+model = "hermes-agent"
+api_key = ""
+api_key_env = "HARNESS_REALIZER_KEY"
+timeout_sec = 8
+max_tokens = 220
+temperature = 0.0
+max_examples = 16
+min_interval_sec = 15
+min_confidence_to_ping = 0.55
+
 [scene]
 llm_fallback_enabled = false
 

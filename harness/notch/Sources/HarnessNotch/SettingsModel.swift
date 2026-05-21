@@ -14,7 +14,6 @@ final class SettingsModel: ObservableObject {
     @Published var labData: JSON?
     @Published var labWindow: String = "7d"
     @Published var evalData: JSON?
-    @Published var nextStepData: JSON?
     @Published var informationDietData: JSON?
     @Published var pipelineWindow: String = "7d"
     @Published var dietWindow: String = "7d"
@@ -33,6 +32,14 @@ final class SettingsModel: ObservableObject {
     @Published var experimentSalt: String = "local_v1"
     @Published var holdoutRate: Double = 0.02
     @Published var explorePingRate: Double = 0.0
+
+    @Published var policyLearnerEnabled: Bool = false
+    @Published var policyLearnerBaseURL: String = "http://3.82.134.133:8642"
+    @Published var policyLearnerModel: String = "hermes-agent"
+    @Published var policyLearnerApiKey: String = ""
+    @Published var policyLearnerMaxExamples: Int = 16
+    @Published var policyLearnerMinInterval: Int = 15
+    @Published var policyLearnerMinConfidence: Double = 0.55
 
     @Published var realizerBaseURL: String = ""
     @Published var realizerModel: String = ""
@@ -94,6 +101,13 @@ final class SettingsModel: ObservableObject {
             $experimentSalt.map { _ in () }.eraseToAnyPublisher(),
             $holdoutRate.map { _ in () }.eraseToAnyPublisher(),
             $explorePingRate.map { _ in () }.eraseToAnyPublisher(),
+            $policyLearnerEnabled.map { _ in () }.eraseToAnyPublisher(),
+            $policyLearnerBaseURL.map { _ in () }.eraseToAnyPublisher(),
+            $policyLearnerModel.map { _ in () }.eraseToAnyPublisher(),
+            $policyLearnerApiKey.map { _ in () }.eraseToAnyPublisher(),
+            $policyLearnerMaxExamples.map { _ in () }.eraseToAnyPublisher(),
+            $policyLearnerMinInterval.map { _ in () }.eraseToAnyPublisher(),
+            $policyLearnerMinConfidence.map { _ in () }.eraseToAnyPublisher(),
             $realizerBaseURL.map { _ in () }.eraseToAnyPublisher(),
             $realizerModel.map { _ in () }.eraseToAnyPublisher(),
             $realizerApiKey.map { _ in () }.eraseToAnyPublisher(),
@@ -129,15 +143,13 @@ final class SettingsModel: ObservableObject {
         async let i = HarnessAPI.fetchImplicit(window: implicitWindow, limit: 80)
         async let lab = HarnessAPI.fetchLab(window: labWindow)
         async let eval = HarnessAPI.fetchEvalReport(window: pipelineWindow)
-        async let next = HarnessAPI.fetchNextSteps(window: pipelineWindow)
         async let diet = HarnessAPI.fetchInformationDiet(window: dietWindow)
-        let (data, config, policy, metrics, implicit, labData, evalData, nextStepData, dietData) = await (d, c, p, m, i, lab, eval, next, diet)
+        let (data, config, policy, metrics, implicit, labData, evalData, dietData) = await (d, c, p, m, i, lab, eval, diet)
         self.data = data
         self.metrics = metrics
         applyImplicit(implicit)
         self.labData = labData
         self.evalData = evalData
-        self.nextStepData = nextStepData
         self.informationDietData = dietData
         self.rawConfig = config
         if let p = policy {
@@ -173,11 +185,7 @@ final class SettingsModel: ObservableObject {
     }
 
     func refreshPipeline() async {
-        async let eval = HarnessAPI.fetchEvalReport(window: pipelineWindow)
-        async let next = HarnessAPI.fetchNextSteps(window: pipelineWindow)
-        let (evalData, nextStepData) = await (eval, next)
-        self.evalData = evalData
-        self.nextStepData = nextStepData
+        self.evalData = await HarnessAPI.fetchEvalReport(window: pipelineWindow)
     }
 
     func refreshDiet() async {
@@ -235,16 +243,14 @@ final class SettingsModel: ObservableObject {
                 let pipelineWindow = await MainActor.run { self?.pipelineWindow ?? "7d" }
                 let dietWindow = await MainActor.run { self?.dietWindow ?? "7d" }
                 async let eval = HarnessAPI.fetchEvalReport(window: pipelineWindow)
-                async let next = HarnessAPI.fetchNextSteps(window: pipelineWindow)
                 async let diet = HarnessAPI.fetchInformationDiet(window: dietWindow)
-                let (evalData, nextStepData, dietData) = await (eval, next, diet)
+                let (evalData, dietData) = await (eval, diet)
                 await MainActor.run {
                     guard let self = self else { return }
                     self.data = d
                     self.metrics = m
                     self.applyImplicit(i)
                     self.evalData = evalData
-                    self.nextStepData = nextStepData
                     self.informationDietData = dietData
                     if let p = p {
                         self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
@@ -287,6 +293,15 @@ final class SettingsModel: ObservableObject {
         experimentSalt = exp["salt"].string.isEmpty ? "local_v1" : exp["salt"].string
         holdoutRate = exp["holdout_rate"].raw is NSNull ? 0.02 : exp["holdout_rate"].double
         explorePingRate = exp["explore_ping_rate"].raw is NSNull ? 0.0 : exp["explore_ping_rate"].double
+
+        let learner = c["policy_learner"]
+        policyLearnerEnabled = learner["enabled"].bool
+        policyLearnerBaseURL = learner["base_url"].string.isEmpty ? "http://3.82.134.133:8642" : learner["base_url"].string
+        policyLearnerModel = learner["model"].string.isEmpty ? "hermes-agent" : learner["model"].string
+        policyLearnerApiKey = learner["api_key"].string
+        policyLearnerMaxExamples = learner["max_examples"].int == 0 ? 16 : learner["max_examples"].int
+        policyLearnerMinInterval = learner["min_interval_sec"].int == 0 ? 15 : learner["min_interval_sec"].int
+        policyLearnerMinConfidence = learner["min_confidence_to_ping"].raw is NSNull ? 0.55 : learner["min_confidence_to_ping"].double
 
         realizerBaseURL = c["realizer"]["base_url"].string
         realizerModel = c["realizer"]["model"].string
@@ -354,6 +369,20 @@ final class SettingsModel: ObservableObject {
         expBlock["respect_hard_gates"] = (expBlock["respect_hard_gates"] as? Bool) ?? true
         expBlock["explore_eligible_reasons"] = (expBlock["explore_eligible_reasons"] as? [String]) ?? ["no_clear_help"]
         c["experiment"] = JSON(any: expBlock)
+
+        var learnerBlock = c["policy_learner"].dict
+        learnerBlock["enabled"] = policyLearnerEnabled
+        learnerBlock["base_url"] = policyLearnerBaseURL
+        learnerBlock["model"] = policyLearnerModel
+        learnerBlock["api_key"] = policyLearnerApiKey
+        learnerBlock["api_key_env"] = (learnerBlock["api_key_env"] as? String) ?? "HARNESS_REALIZER_KEY"
+        learnerBlock["timeout_sec"] = (learnerBlock["timeout_sec"] as? Int) ?? 8
+        learnerBlock["max_tokens"] = (learnerBlock["max_tokens"] as? Int) ?? 220
+        learnerBlock["temperature"] = (learnerBlock["temperature"] as? Double) ?? 0.0
+        learnerBlock["max_examples"] = policyLearnerMaxExamples
+        learnerBlock["min_interval_sec"] = policyLearnerMinInterval
+        learnerBlock["min_confidence_to_ping"] = policyLearnerMinConfidence
+        c["policy_learner"] = JSON(any: learnerBlock)
 
         c["realizer"]["base_url"] = JSON(any: realizerBaseURL)
         c["realizer"]["model"] = JSON(any: realizerModel)

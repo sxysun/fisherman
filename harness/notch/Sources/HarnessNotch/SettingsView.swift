@@ -282,7 +282,6 @@ struct PipelineTab: View {
     var body: some View {
         let eval = model.evalData
         let data = eval?["data"]
-        let preds = model.nextStepData?["predictions"]
 
         VStack(alignment: .leading, spacing: 16) {
             SectionTitle("Harness pipeline")
@@ -308,7 +307,6 @@ struct PipelineTab: View {
                 PipelineStage(name: "Ping", value: "\(data?["n_pings"].int ?? 0)", detail: "would notify"),
                 PipelineStage(name: "Claim", value: "\(data?["n_claimed_pings"].int ?? 0)", detail: "notch displayed"),
                 PipelineStage(name: "Outcome", value: "\(data?["n_outcomes"].int ?? 0)", detail: "reaction captured"),
-                PipelineStage(name: "Replay", value: "\(preds?["scored"].int ?? 0)", detail: "next-step scored"),
             ])
 
             SectionTitle("Eval health")
@@ -318,15 +316,6 @@ struct PipelineTab: View {
                 Stat(label: "Implicit usable", value: "\(data?["n_implicit_usable"].int ?? 0)")
                 Stat(label: "Best variant", value: model.evalData?["variants"]["calibration"]["best_variant"]["variant"].string.isEmpty == false ? model.evalData?["variants"]["calibration"]["best_variant"]["variant"].string ?? "n/a" : "n/a")
             }
-
-            SectionTitle("Next-step prediction")
-            HStack(spacing: 12) {
-                Stat(label: "Predictions", value: "\(preds?["n"].int ?? 0)")
-                Stat(label: "Top-1", value: pct(preds?["accuracy_top1"]))
-                Stat(label: "Top-3", value: pct(preds?["accuracy_top3"]))
-                Stat(label: "Unknown", value: pct(preds?["unknown_rate"]))
-            }
-            BarList(data: dictAsKVs(preds?["residual_types"].dict))
 
             SectionTitle("Failure taxonomy")
             VStack(alignment: .leading, spacing: 6) {
@@ -1098,6 +1087,9 @@ struct GateTab: View {
             FormRow("Poll interval (sec)", hint: "5 = matches Fisherman capture") {
                 TextField("", value: $model.pollInterval, formatter: intFormatter).textFieldStyle(.roundedBorder)
             }
+            FormRow("Active policy", hint: "rule_v0 or llm_icl_v0") {
+                TextField("", text: $model.activePolicy).textFieldStyle(.roundedBorder)
+            }
             FormRow("Cooldown between pings", hint: "minimum minutes") {
                 TextField("", value: $model.cooldownMin, formatter: doubleFormatter).textFieldStyle(.roundedBorder)
             }
@@ -1122,6 +1114,28 @@ struct GateTab: View {
             }
             FormRow("Experiment salt", hint: "changes assignment buckets") {
                 TextField("", text: $model.experimentSalt).textFieldStyle(.roundedBorder)
+            }
+            SectionTitle("LLM ICL policy learner")
+            FormRow("Enabled", hint: "used when Active policy is llm_icl_v0") {
+                Toggle("", isOn: $model.policyLearnerEnabled).labelsHidden()
+            }
+            FormRow("Endpoint", hint: "OpenAI-compatible") {
+                TextField("", text: $model.policyLearnerBaseURL).textFieldStyle(.roundedBorder)
+            }
+            FormRow("Model", hint: "small/fast text model is enough") {
+                TextField("", text: $model.policyLearnerModel).textFieldStyle(.roundedBorder)
+            }
+            FormRow("API key", hint: "optional if endpoint is local") {
+                SecureField("", text: $model.policyLearnerApiKey).textFieldStyle(.roundedBorder)
+            }
+            FormRow("Few-shot examples", hint: "recent balanced labels") {
+                TextField("", value: $model.policyLearnerMaxExamples, formatter: intFormatter).textFieldStyle(.roundedBorder)
+            }
+            FormRow("Min confidence", hint: "minimum confidence required to ping") {
+                TextField("", value: $model.policyLearnerMinConfidence, formatter: doubleFormatter).textFieldStyle(.roundedBorder)
+            }
+            FormRow("Min call interval", hint: "seconds between policy model calls") {
+                TextField("", value: $model.policyLearnerMinInterval, formatter: intFormatter).textFieldStyle(.roundedBorder)
             }
             SectionTitle("Snooze")
             HStack(spacing: 8) {

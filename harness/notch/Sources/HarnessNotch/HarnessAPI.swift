@@ -60,15 +60,6 @@ enum HarnessAPI {
         return await getJSON(url: c.url!)
     }
 
-    static func fetchNextSteps(window: String = "7d", maxExamples: Int = 12) async -> JSON? {
-        var c = URLComponents(url: baseURL().appendingPathComponent("next-steps/report"), resolvingAgainstBaseURL: false)!
-        c.queryItems = [
-            URLQueryItem(name: "window", value: window),
-            URLQueryItem(name: "max_examples", value: "\(maxExamples)"),
-        ]
-        return await getJSON(url: c.url!)
-    }
-
     static func fetchInformationDiet(window: String = "7d", maxEpisodes: Int = 16) async -> JSON? {
         var c = URLComponents(url: baseURL().appendingPathComponent("information-diet/report"), resolvingAgainstBaseURL: false)!
         c.queryItems = [

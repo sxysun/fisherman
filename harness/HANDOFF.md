@@ -87,13 +87,12 @@ harness/
 │   ├── config.py                 TOML config + default
 │   ├── label_ui.py               rewind-style labeling web UI with frozen queue
 │   ├── metrics.py                live outcome + retro-label quality metrics
-│   ├── next_step.py              episode segmentation + predict-first scoring
 │   ├── eval_report.py            joined OpenAdapt-style eval report
 │   └── dashboard_ui.py           settings/diag web UI (now superseded by native settings)
 │
 ├── policies/
-│   └── rule_v0.py                ONLY active policy. Goal-aware: hard gates +
-│                                  reason_code collection. No intent selection.
+│   ├── rule_v0.py                deterministic safety/baseline policy
+│   └── llm_icl_v0.py             optional LLM ICL ping/not-ping policy learner
 │
 ├── prompts/
 │   ├── realizer/goal_aware_v1.md ONLY realizer prompt. Goal-driven.
@@ -141,9 +140,6 @@ State on disk (outside the repo):
 ├── traces.jsonl                  joined view per tick
 ├── retro_labels.jsonl            from the labeling UI
 ├── model_calls.jsonl             privacy-safe model-call audit rows
-├── episodes.jsonl                append-only episode snapshots
-├── next_step_predictions.jsonl   top-k personal next-step predictions
-├── prediction_errors.jsonl       delayed comparisons against observed behavior
 ├── harness.db                    SQLite sidecar with typed query tables
 ├── memory/
 │   ├── session.jsonl
@@ -241,10 +237,8 @@ User flow once it's running:
      rate, and readiness thresholds
    - Delivery capture is split into queued vs notch-claimed pings, so eval no
      longer treats realizer/critic skips as missing user outcomes
-   - `harness next-steps --since 7d` reports predict-first episode/next-step
-     eval: pending/scored predictions, top-1/top-3 accuracy, residual types
-   - `harness eval-report --since 7d` includes the next-step loop alongside
-     intervention taxonomy and policy-variant calibration
+   - `harness eval-report --since 7d` includes intervention taxonomy,
+     binary policy calibration, and compact non-green examples
    - `/metrics?window=24h` exposes the same JSON from the daemon
    - Native Settings -> Status now shows the live lab counters and label
      readiness, so the user can tell whether the harness is learning or only

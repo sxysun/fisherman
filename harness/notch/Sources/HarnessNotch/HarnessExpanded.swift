@@ -6,7 +6,6 @@ struct HarnessExpanded: View {
     @ObservedObject var state: HarnessState
     @State private var dashboardData: JSON?
     @State private var evalData: JSON?
-    @State private var nextStepData: JSON?
     @State private var dietData: JSON?
     @State private var loadingPanel: HarnessNotchPanel?
     @State private var loadError: String?
@@ -36,7 +35,6 @@ struct HarnessExpanded: View {
                 PipelineNotchPanel(
                     dashboard: dashboardData,
                     eval: evalData,
-                    next: nextStepData,
                     loading: loadingPanel == .pipeline,
                     error: loadError,
                     refreshedAt: refreshedAt,
@@ -155,17 +153,15 @@ struct HarnessExpanded: View {
         case .ping:
             return
         case .pipeline:
-            if !force, dashboardData != nil, evalData != nil, nextStepData != nil { return }
+            if !force, dashboardData != nil, evalData != nil { return }
             loadingPanel = .pipeline
             loadError = nil
             async let dashboard = HarnessAPI.fetchData(window: "24h")
             async let eval = HarnessAPI.fetchEvalReport(window: "24h", maxExamples: 4)
-            async let next = HarnessAPI.fetchNextSteps(window: "24h", maxExamples: 4)
-            let (dashboardResult, evalResult, nextResult) = await (dashboard, eval, next)
+            let (dashboardResult, evalResult) = await (dashboard, eval)
             dashboardData = dashboardResult
             evalData = evalResult
-            nextStepData = nextResult
-            if dashboardResult == nil && evalResult == nil && nextResult == nil {
+            if dashboardResult == nil && evalResult == nil {
                 loadError = "Pipeline data unavailable"
             }
             refreshedAt = Date()
@@ -268,7 +264,6 @@ private struct HarnessFloatingCompact: View {
 private struct PipelineNotchPanel: View {
     let dashboard: JSON?
     let eval: JSON?
-    let next: JSON?
     let loading: Bool
     let error: String?
     let refreshedAt: Date?
@@ -276,7 +271,6 @@ private struct PipelineNotchPanel: View {
 
     var body: some View {
         let evalData = eval?["data"]
-        let preds = next?["predictions"]
         let nPings = evalData?["n_pings"].int ?? 0
         VStack(alignment: .leading, spacing: 12) {
             panelToolbar(title: "Pipeline and eval", detail: updatedText, loading: loading, refresh: refresh)
@@ -286,14 +280,13 @@ private struct PipelineNotchPanel: View {
                 NotchStage("Ping", "\(evalData?["n_pings"].int ?? 0)", "eligible"),
                 NotchStage("Claim", "\(evalData?["n_claimed_pings"].int ?? 0)", "shown"),
                 NotchStage("Outcome", "\(evalData?["n_outcomes"].int ?? 0)", "captured"),
-                NotchStage("Replay", "\(preds?["scored"].int ?? 0)", "scored"),
             ])
 
             HStack(spacing: 8) {
                 NotchMetric(label: "claimed capture", value: nPings == 0 ? "no pings" : notchPct(evalData?["outcome_capture_rate_for_claimed_pings"]))
                 NotchMetric(label: "implicit usable", value: "\(evalData?["n_implicit_usable"].int ?? 0)")
-                NotchMetric(label: "top-1 next", value: notchPct(preds?["accuracy_top1"]))
-                NotchMetric(label: "unknown", value: notchPct(preds?["unknown_rate"]))
+                NotchMetric(label: "explicit labels", value: "\(evalData?["n_explicit_labels"].int ?? 0)")
+                NotchMetric(label: "label coverage", value: notchPct(evalData?["explicit_label_coverage"]))
             }
 
             if nPings == 0 {
@@ -301,9 +294,6 @@ private struct PipelineNotchPanel: View {
             }
 
             HStack(alignment: .top, spacing: 10) {
-                NotchMiniSection(title: "Residuals") {
-                    NotchBars(data: notchPairs(preds?["residual_types"].dict, limit: 5))
-                }
                 NotchMiniSection(title: "Recent misses") {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(exampleRows.prefix(3).enumerated()), id: \.offset) { _, row in

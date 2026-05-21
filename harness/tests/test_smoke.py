@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import calendar
 import io
 import json
 import time
@@ -22,7 +21,6 @@ from harness import label_ui as label_ui_mod
 from harness import memory as memory_mod
 from harness import metrics as metrics_mod
 from harness import model_audit as model_audit_mod
-from harness import next_step as next_step_mod
 from harness import privacy as privacy_mod
 from harness import push as push_mod
 from harness import realizer as realizer_mod
@@ -58,7 +56,6 @@ def test_imports():
     assert information_diet_mod
     assert label_ui_mod
     assert model_audit_mod
-    assert next_step_mod
     assert metrics_mod
     assert server_mod
     assert shadow_eval_mod
@@ -517,6 +514,89 @@ def test_rule_v0_ignored_timeout_counts_as_recent_negative_feedback():
     blocked = rule_v0.decide(event, mem, ignored_timeout, cfg)
     assert blocked.action == "no_ping"
     assert "recent_negative_feedback" in blocked.reason_codes
+
+
+def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
+    from policies import llm_icl_v0
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    llm_icl_v0._last_call_ts = 0.0
+    try:
+        event = schemas.CandidateEvent(candidate_id="cand_llm")
+        event.screen.frame_age_sec = 5.0
+        event.screen.frontmost_app = "Chrome"
+        event.screen.ocr_snippet = "drafting harness policy learner"
+        event.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
+        mem = schemas.MemorySnapshot.build(
+            recent_apps=["Chrome"],
+            recent_scenes=["reading_browser"],
+            recent_outcomes=[],
+            app_switches_last_15m=0,
+            minutes_on_current_app=12.0,
+        )
+        cfg = {
+            "cooldown_min": 5,
+            "negative_feedback_backoff_min": 15,
+            "quiet_hours_start": 3,
+            "quiet_hours_end": 4,
+            "sensitivity": "responsive",
+            "daily_goal": "ship harness",
+            "allowed_intents": [],
+            "privacy": {"allow_local_model_hosts": True, "block_untrusted_model_hosts": True},
+            "policy_learner": {
+                "enabled": True,
+                "base_url": "http://localhost:9000",
+                "model": "test-policy",
+                "min_interval_sec": 0,
+                "min_confidence_to_ping": 0.55,
+            },
+        }
+
+        def fake_call(cfg, base_url, model, messages):
+            assert "drafting harness policy learner" in messages[1]["content"]
+            return {
+                "action": "notch_ping",
+                "confidence": 0.82,
+                "reason_codes": ["goal_aligned"],
+                "why_now": "The visible work matches today's harness goal.",
+            }
+
+        monkeypatch.setattr(llm_icl_v0, "_call_model", fake_call)
+        decision = llm_icl_v0.decide(event, mem, [], cfg)
+
+        assert decision.action == "notch_ping"
+        assert decision.policy_version == "llm_icl_v0"
+        assert "llm_icl_policy" in decision.reason_codes
+        assert store_mod.tail_jsonl("model_calls.jsonl", n=1)[0]["purpose"] == "policy_learner"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_llm_icl_policy_respects_rule_hard_gates(monkeypatch):
+    from policies import llm_icl_v0
+
+    def fail_call(*args, **kwargs):
+        raise AssertionError("LLM should not be called for hard gates")
+
+    monkeypatch.setattr(llm_icl_v0, "_call_model", fail_call)
+    event = schemas.CandidateEvent()
+    event.context.in_call = True
+    event.screen.frame_age_sec = 5.0
+    event.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
+    mem = schemas.MemorySnapshot.build([], [], [], 0, 0.0)
+    cfg = {
+        "cooldown_min": 5,
+        "negative_feedback_backoff_min": 15,
+        "quiet_hours_start": 3,
+        "quiet_hours_end": 4,
+        "policy_learner": {"enabled": True},
+    }
+
+    decision = llm_icl_v0.decide(event, mem, [], cfg)
+    assert decision.action == "no_ping"
+    assert "in_call" in decision.reason_codes
+    assert "rule_hard_gate" in decision.reason_codes
 
 
 def test_session_memory_breaks_continuity_across_sleep_gap(tmp_path):
@@ -1373,83 +1453,6 @@ def test_eval_report_distinguishes_queued_from_claimed_missing_outcomes(tmp_path
         assert taxonomy["undelivered_ping"] == 1
         assert report["data"]["n_claimed_pings"] == 1
         assert report["data"]["outcome_capture_rate_for_claimed_pings"] == 0.0
-    finally:
-        store_mod.HARNESS_DIR = old_dir
-
-
-def test_next_step_tracker_segments_and_scores_predictions(tmp_path):
-    from aiohttp.test_utils import make_mocked_request
-
-    old_dir = store_mod.HARNESS_DIR
-    store_mod.HARNESS_DIR = tmp_path
-    try:
-        tracker = next_step_mod.EpisodeTracker(idle_boundary_sec=90)
-        event = schemas.CandidateEvent(candidate_id="cand_pred")
-        event.ts = "2026-05-19T12:00:00Z"
-        event.screen.frontmost_app = "Chrome"
-        event.screen.ocr_snippet = "reading harness plan"
-        event.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
-        decision = schemas.ProactiveDecision(
-            decision_id="pd_pred",
-            candidate_id="cand_pred",
-            policy_version="rule_v0",
-            action="notch_ping",
-            intent="goal_aware",
-            reason_codes=["goal_aligned_help"],
-        )
-        episode, rows = tracker.observe(event, decision)
-        assert rows[-1]["status"] == "open"
-        assert rows[-1]["frame_count"] == 1
-        for row in rows:
-            store_mod.append_jsonl("episodes.jsonl", row)
-        store_mod.append_jsonl("candidates.jsonl", event.to_dict())
-        store_mod.append_jsonl("decisions.jsonl", decision.to_dict() | {"ts": event.ts})
-
-        mem = schemas.MemorySnapshot.build(
-            recent_apps=["Chrome"],
-            recent_scenes=["reading_browser"],
-            recent_outcomes=[],
-            app_switches_last_15m=0,
-            minutes_on_current_app=12.0,
-        )
-        prediction = next_step_mod.predict_next_step(
-            event=event,
-            memory=mem,
-            decision=decision,
-            episode=episode,
-            daily_goal="ship harness",
-            horizon_sec=60,
-        )
-        store_mod.append_jsonl("next_step_predictions.jsonl", prediction)
-
-        future = schemas.CandidateEvent(candidate_id="cand_future")
-        future.ts = "2026-05-19T12:00:30Z"
-        future.screen.frontmost_app = "Chrome"
-        future.screen.ocr_snippet = "harness audit notes"
-        future.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
-        store_mod.append_jsonl("candidates.jsonl", future.to_dict())
-
-        scored = next_step_mod.score_due_predictions(now=calendar.timegm(time.strptime("2026-05-19T12:02:00Z", "%Y-%m-%dT%H:%M:%SZ")))
-        assert len(scored) == 1
-        assert scored[0]["status"] == "matched"
-        assert scored[0]["matched_rank"] == 1
-        assert "ocr" not in json.dumps(scored[0]).lower()
-
-        switch = schemas.CandidateEvent(candidate_id="cand_switch")
-        switch.ts = "2026-05-19T12:02:30Z"
-        switch.screen.frontmost_app = "Cursor"
-        switch.scene = schemas.SceneTag(label="coding_with_todo_in_view", strength="strong", source="rule")
-        _, switch_rows = tracker.observe(switch, None)
-        assert any(row["status"] == "closed" and row["boundary_reason"] == "idle_gap" for row in switch_rows)
-
-        report = next_step_mod.build_report(window="365d", score_due=False)
-        assert report["predictions"]["scored"] == 1
-        assert report["predictions"]["accuracy_top1"] == 1.0
-
-        req = make_mocked_request("GET", "/next-steps/report?window=365d")
-        resp = asyncio.run(server_mod.get_next_steps(req))
-        body = json.loads(resp.text)
-        assert body["version"] == "next_step_eval_v1"
     finally:
         store_mod.HARNESS_DIR = old_dir
 

@@ -287,11 +287,6 @@ DASHBOARD_HTML = """<!doctype html>
   <div class="tab-content" id="tab-eval">
     <div class="stats" id="eval-stats"></div>
     <div class="panel">
-      <h2>Next-step prediction loop</h2>
-      <div class="stats" id="next-step-stats"></div>
-      <div class="bars" id="next-step-residuals" style="margin-top:12px;"></div>
-    </div>
-    <div class="panel">
       <h2>OpenAdapt-style gaps</h2>
       <div class="gap-list" id="eval-gaps"></div>
     </div>
@@ -344,11 +339,11 @@ DASHBOARD_HTML = """<!doctype html>
       </div>
     </div>
     <div class="panel">
-      <h2>Gate (rule_v0 thresholds)</h2>
+      <h2>Gate</h2>
       <div class="form-row">
         <span class="label">Active policy</span>
         <input type="text" id="cfg-policy">
-        <span class="hint">module under policies/</span>
+        <span class="hint">rule_v0 or llm_icl_v0</span>
       </div>
       <div class="form-row">
         <span class="label">Cooldown (min)</span>
@@ -359,6 +354,39 @@ DASHBOARD_HTML = """<!doctype html>
         <span class="label">Quiet hours</span>
         <input type="text" id="cfg-quiet" placeholder="22-8">
         <span class="hint">start-end (24h, wraps midnight)</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>LLM ICL policy learner</h2>
+      <div class="form-row">
+        <span class="label">Enabled</span>
+        <input type="checkbox" id="cfg-learner-enabled">
+        <span class="hint">used only when active_policy=llm_icl_v0</span>
+      </div>
+      <div class="form-row">
+        <span class="label">Base URL</span>
+        <input type="text" id="cfg-learner-base-url">
+        <span class="hint">OpenAI-compatible</span>
+      </div>
+      <div class="form-row">
+        <span class="label">Model</span>
+        <input type="text" id="cfg-learner-model">
+        <span class="hint">fast text model is enough</span>
+      </div>
+      <div class="form-row">
+        <span class="label">API key</span>
+        <input type="password" id="cfg-learner-api-key">
+        <span class="hint">optional for local endpoints</span>
+      </div>
+      <div class="form-row">
+        <span class="label">Few-shot examples</span>
+        <input type="number" id="cfg-learner-examples" min="0" max="64" step="1">
+        <span class="hint">balanced explicit + implicit labels</span>
+      </div>
+      <div class="form-row">
+        <span class="label">Min confidence</span>
+        <input type="number" id="cfg-learner-conf" min="0" max="1" step="0.05">
+        <span class="hint">threshold to allow a ping</span>
       </div>
     </div>
     <div class="panel">
@@ -530,7 +558,6 @@ function renderActivity(d) {
 
 function renderEval(r) {
   const data = r.data || {};
-  const nextStep = (r.next_step || {}).predictions || {};
   const best = (((r.variants || {}).calibration || {}).best_variant || {});
   const stats = [
     {label: 'Decisions', val: data.n_decisions ?? 0, sub: `${data.n_pings ?? 0} pings · ${data.n_claimed_pings ?? 0} claimed`},
@@ -544,20 +571,6 @@ function renderEval(r) {
       <div class="value" style="font-size:${String(s.val).length > 8 ? '15px' : '24px'}">${escapeHTML(s.val)}</div>
       ${s.sub ? `<div class="sub">${escapeHTML(s.sub)}</div>` : ''}
     </div>`).join('');
-
-  const nsStats = [
-    {label: 'Predictions', val: nextStep.n ?? 0, sub: `${nextStep.scored ?? 0} scored · ${nextStep.pending ?? 0} pending`},
-    {label: 'Top-1 accuracy', val: pctMaybe(nextStep.accuracy_top1), sub: `top-3 ${pctMaybe(nextStep.accuracy_top3)}`},
-    {label: 'Unknown rate', val: pctMaybe(nextStep.unknown_rate), sub: 'no future observation'},
-    {label: 'Avg score', val: numMaybe(nextStep.avg_score), sub: `${nextStep.matched ?? 0} matched · ${nextStep.missed ?? 0} missed`},
-  ];
-  document.getElementById('next-step-stats').innerHTML = nsStats.map(s => `
-    <div class="stat">
-      <div class="label">${escapeHTML(s.label)}</div>
-      <div class="value" style="font-size:${String(s.val).length > 8 ? '15px' : '24px'}">${escapeHTML(s.val)}</div>
-      ${s.sub ? `<div class="sub">${escapeHTML(s.sub)}</div>` : ''}
-    </div>`).join('');
-  document.getElementById('next-step-residuals').innerHTML = barsHTML(nextStep.residual_types || {});
 
   document.getElementById('eval-gaps').innerHTML = (r.openadapt_style_gaps || []).map(g => `
     <div class="gap-row">
@@ -690,6 +703,7 @@ function renderDiagnostics(d) {
 function populateSettings(c, p) {
   const g = c.gate || {};
   const r = c.realizer || {};
+  const learner = c.policy_learner || {};
   const rw = (c.reward && c.reward.weights) || {};
   const d = c.daemon || {};
   const intents = (c.intents && c.intents.enabled) || [];
@@ -699,6 +713,12 @@ function populateSettings(c, p) {
   document.getElementById('cfg-policy').value       = g.active_policy ?? '';
   document.getElementById('cfg-cooldown').value     = g.cooldown_min ?? '';
   document.getElementById('cfg-quiet').value        = `${g.quiet_hours_start ?? 22}-${g.quiet_hours_end ?? 8}`;
+  document.getElementById('cfg-learner-enabled').checked = !!learner.enabled;
+  document.getElementById('cfg-learner-base-url').value  = learner.base_url ?? '';
+  document.getElementById('cfg-learner-model').value     = learner.model ?? '';
+  document.getElementById('cfg-learner-api-key').value   = learner.api_key ?? '';
+  document.getElementById('cfg-learner-examples').value  = learner.max_examples ?? 16;
+  document.getElementById('cfg-learner-conf').value      = learner.min_confidence_to_ping ?? 0.55;
   document.getElementById('cfg-base-url').value     = r.base_url ?? '';
   document.getElementById('cfg-model').value        = r.model ?? '';
   document.getElementById('cfg-vision').checked     = !!r.include_vision;
@@ -742,6 +762,18 @@ async function saveConfig() {
   const q = (document.getElementById('cfg-quiet').value || '22-8').split('-');
   next.gate.quiet_hours_start = parseInt(q[0]);
   next.gate.quiet_hours_end = parseInt(q[1]);
+  next.policy_learner ||= {};
+  next.policy_learner.enabled = document.getElementById('cfg-learner-enabled').checked;
+  next.policy_learner.base_url = document.getElementById('cfg-learner-base-url').value;
+  next.policy_learner.model = document.getElementById('cfg-learner-model').value;
+  next.policy_learner.api_key = document.getElementById('cfg-learner-api-key').value;
+  next.policy_learner.max_examples = parseInt(document.getElementById('cfg-learner-examples').value || '16');
+  next.policy_learner.min_confidence_to_ping = parseFloat(document.getElementById('cfg-learner-conf').value || '0.55');
+  next.policy_learner.api_key_env ||= 'HARNESS_REALIZER_KEY';
+  next.policy_learner.timeout_sec ||= 8;
+  next.policy_learner.max_tokens ||= 220;
+  next.policy_learner.temperature ||= 0.0;
+  next.policy_learner.min_interval_sec ||= 15;
   next.realizer.base_url = document.getElementById('cfg-base-url').value;
   next.realizer.model = document.getElementById('cfg-model').value;
   next.realizer.include_vision = document.getElementById('cfg-vision').checked;
@@ -932,7 +964,7 @@ def _dump_toml(cfg: dict) -> str:
     """Minimal TOML dump for the harness config shape. Preserves nested tables."""
     lines: list[str] = []
     # Top-level tables in a stable order
-    section_order = ["daemon", "gate", "experiment", "trainer", "scene", "scene_tagger", "memory",
+    section_order = ["daemon", "gate", "experiment", "trainer", "policy_learner", "scene", "scene_tagger", "memory",
                      "realizer", "critic", "privacy", "push", "reward", "intents", "debug"]
     written: set[str] = set()
 

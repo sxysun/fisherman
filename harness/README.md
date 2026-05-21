@@ -37,7 +37,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a rule-based gate that returns `{action, reason_codes, why_now}`, then applies deterministic experiment assignment. Each tick is also folded into an episode stream and a predict-first next-step record; once the horizon elapses, the harness compares predicted behavior against later screen observations/outcomes and writes a `prediction_errors.jsonl` residual. Low-rate holdouts are logged for counterfactual measurement; exploration pings are available but default to 0. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app claims the pending payload via HTTP polling and renders a pill; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, next-step eval, and the eval report prefer indexed read paths where available.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a binary gate that returns `{action, reason_codes, why_now}`, then applies deterministic experiment assignment. The default gate is `rule_v0`; the optional `llm_icl_v0` policy runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from the current context plus recent explicit/implicit examples. Low-rate holdouts are logged for counterfactual measurement; exploration pings are available but default to 0. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app claims the pending payload via HTTP polling and renders a pill; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, and the eval report prefer indexed read paths where available.
 
 ## Configuration
 
@@ -58,6 +58,13 @@ negative_feedback_backoff_min = 15
 enabled = true
 holdout_rate = 0.02                      # safe counterfactuals
 explore_ping_rate = 0.0                   # opt-in random pings
+
+[policy_learner]                         # used when active_policy="llm_icl_v0"
+enabled = false
+base_url = "http://3.82.134.133:8642"
+model = "hermes-agent"
+max_examples = 16
+min_confidence_to_ping = 0.55
 
 [realizer]
 base_url = "http://3.82.134.133:8642"    # OpenAI-compatible
@@ -83,7 +90,7 @@ min_interval_sec = 30
 ```
 harness/
 ├── harness/        Python package (daemon, gate, realizer, critic, ...)
-├── policies/       Gate policies (currently just rule_v0.py)
+├── policies/       Gate policies (rule_v0.py, llm_icl_v0.py)
 ├── prompts/        Realizer + critic prompts
 ├── notch/          Swift app (HarnessNotch.app)
 ├── eval/           replay.py, score.py (offline policy analysis)
@@ -111,7 +118,6 @@ harness dashboard                           open web dashboard (settings duplica
 harness metrics [--since 24h --json]        live outcome + retro-label metrics
 harness implicit [--since 7d --json]         weak labels from notification behavior
 harness eval-report [--since 7d --json]      joined eval report + failure taxonomy
-harness next-steps [--since 7d --json]       predict-first next-step eval
 harness info-diet [--since 7d --json]        research episodes + workflow hypotheses
 harness storage-backfill [--reset]          mirror JSONL history into harness.db
 harness collect --since 24h                 freeze candidates to datasets/dogfood/
@@ -122,9 +128,9 @@ harness score --predictions reports/...     replay scoring + reward_v2
 
 ## Eval hardening
 
-`harness eval-report --since 7d` builds an OpenAdapt-style intervention report for the harness. It joins decisions, outcomes, explicit labels, implicit weak labels, compact traces, predict-first next-step metrics, and policy-variant calibration into one sanitized JSON object. The same report is available at `GET /eval/report` and in the dashboard's Eval tab.
+`harness eval-report --since 7d` builds an OpenAdapt-style intervention report for the harness. It joins decisions, outcomes, explicit labels, implicit weak labels, compact traces, and policy-variant calibration into one sanitized JSON object. The same report is available at `GET /eval/report` and in the dashboard's Eval tab.
 
-The report includes data coverage, claimed-ping outcome capture, explicit/implicit label readiness, policy variant scores, failure taxonomy (`false_interruption`, `missed_help`, `queued_not_claimed`, `undelivered_ping`, `soft_rejection`, `missing_outcome_signal`, etc.), next-step prediction accuracy/residuals, and recent non-green examples without raw OCR or screenshots. `harness next-steps --since 7d` shows the prediction loop directly.
+The report includes data coverage, claimed-ping outcome capture, explicit/implicit label readiness, policy variant scores, failure taxonomy (`false_interruption`, `missed_help`, `queued_not_claimed`, `undelivered_ping`, `soft_rejection`, `missing_outcome_signal`, etc.), and recent non-green examples without raw OCR or screenshots.
 
 `harness info-diet --since 7d` builds a conservative research/workflow report from the same candidate stream. It groups browser-like reading episodes, inferred domains, query-like phrases, dwell patterns, and tentative workflow hypotheses. Treat it as an evidence panel, not a trusted skill compiler yet: current source attribution is OCR-derived until Fisherman exposes browser URL/title ground truth.
 
@@ -132,7 +138,7 @@ The report includes data coverage, claimed-ping outcome capture, explicit/implic
 
 Runtime state lives outside the repo at `~/.harness/`. See `HANDOFF.md` for the full layout.
 
-The canonical append path still writes JSONL files such as `candidates.jsonl`, `decisions.jsonl`, `deliveries.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, `model_calls.jsonl`, `episodes.jsonl`, `next_step_predictions.jsonl`, and `prediction_errors.jsonl`. Each append is also mirrored into `~/.harness/harness.db` event history, with typed tables for the core candidate/decision/trace/outcome/model/label streams. Late outcome attachment updates both `traces.jsonl` and the typed SQLite trace row. Dashboard, metrics, replay, score, and shadow comparison read from SQLite when the sidecar is present and fall back to JSONL for old installs. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
+The canonical append path still writes JSONL files such as `candidates.jsonl`, `decisions.jsonl`, `deliveries.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, and `model_calls.jsonl`. Each append is also mirrored into `~/.harness/harness.db` event history, with typed tables for the core candidate/decision/trace/outcome/model/label streams. Late outcome attachment updates both `traces.jsonl` and the typed SQLite trace row. Dashboard, metrics, replay, score, and shadow comparison read from SQLite when the sidecar is present and fall back to JSONL for old installs. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
 
 ## Tests
 
@@ -140,4 +146,4 @@ The canonical append path still writes JSONL files such as `candidates.jsonl`, `
 .venv/bin/python -m pytest tests/test_smoke.py
 ```
 
-The smoke suite covers schemas, config default merging, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay, gate, sleep/resume continuity, experiments, launchd plist generation, labeler queueing, metrics, next-step eval, information-diet reporting, shadow eval, critic, and reward.
+The smoke suite covers schemas, config default merging, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay, gate, LLM ICL policy, sleep/resume continuity, experiments, launchd plist generation, labeler queueing, metrics, information-diet reporting, shadow eval, critic, and reward.

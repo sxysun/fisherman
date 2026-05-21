@@ -348,22 +348,6 @@ async def get_eval_report(request: web.Request) -> web.Response:
     )
 
 
-async def get_next_steps(request: web.Request) -> web.Response:
-    from . import next_step as next_step_mod
-
-    window = request.query.get("window", "7d")
-    try:
-        max_examples = int(request.query.get("max_examples", "40"))
-    except ValueError:
-        max_examples = 40
-    max_examples = max(1, min(max_examples, 200))
-    return web.json_response(next_step_mod.build_report(
-        window=window,
-        max_examples=max_examples,
-        score_due=True,
-    ))
-
-
 async def get_information_diet(request: web.Request) -> web.Response:
     from . import information_diet as information_diet_mod
 
@@ -377,23 +361,6 @@ async def get_information_diet(request: web.Request) -> web.Response:
         window=window,
         max_episodes=max_episodes,
     ))
-
-
-async def post_next_steps_score(request: web.Request) -> web.Response:
-    from . import next_step as next_step_mod
-
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    if not isinstance(body, dict):
-        body = {}
-    try:
-        limit = int(body.get("limit") or request.query.get("limit") or 100)
-    except (TypeError, ValueError):
-        limit = 100
-    scored = next_step_mod.score_due_predictions(limit=max(1, min(limit, 500)))
-    return web.json_response({"ok": True, "scored": len(scored), "errors": scored})
 
 
 async def post_trainer_run(request: web.Request) -> web.Response:
@@ -548,9 +515,7 @@ def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app.router.add_post("/implicit/promote", post_implicit_promote)
     app.router.add_get("/lab", get_lab)
     app.router.add_get("/eval/report", get_eval_report)
-    app.router.add_get("/next-steps/report", get_next_steps)
     app.router.add_get("/information-diet/report", get_information_diet)
-    app.router.add_post("/next-steps/score", post_next_steps_score)
     app.router.add_post("/trainer/run", post_trainer_run)
     app.router.add_post("/trainer/activate", post_trainer_activate)
     app.router.add_post("/trainer/rollback", post_trainer_rollback)

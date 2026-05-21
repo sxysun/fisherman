@@ -14,7 +14,6 @@ from aiohttp import web
 from . import critic as critic_mod
 from . import experiments as experiments_mod
 from . import gate as gate_mod
-from . import next_step as next_step_mod
 from . import push as push_mod
 from . import realizer as realizer_mod
 from . import reward as reward_mod
@@ -127,7 +126,6 @@ async def run_loop(config: dict) -> None:
         idle_boundary_sec=int(memory_cfg.get("idle_boundary_sec", 90)),
         active_frame_max_age_sec=int(memory_cfg.get("active_frame_max_age_sec", 60)),
     )
-    episode_tracker = next_step_mod.EpisodeTracker()
 
     last_push_at_ref: list[Optional[float]] = [None]
 
@@ -156,7 +154,6 @@ async def run_loop(config: dict) -> None:
                 config=config,
                 fc=fc,
                 memory=memory,
-                episode_tracker=episode_tracker,
                 last_push_at_ref=last_push_at_ref,
             )
             await asyncio.sleep(poll_sec)
@@ -203,7 +200,6 @@ async def _tick(
     config: dict,
     fc: FishermanClient,
     memory: SessionMemory,
-    episode_tracker: next_step_mod.EpisodeTracker,
     last_push_at_ref: list[Optional[float]],
 ) -> None:
     user_pref = _user_pref_from_config(config)
@@ -259,6 +255,8 @@ async def _tick(
         "allowed_intents": config["intents"]["enabled"],
         "daily_goal": daily_goal,
         "sensitivity": sensitivity,
+        "policy_learner": config.get("policy_learner", {}),
+        "privacy": config.get("privacy", {}),
     }
     gate_cfg.update(policy_overrides)
     decision = gate_mod.decide(
@@ -277,23 +275,8 @@ async def _tick(
         decision.experiment = exp
     append_jsonl("decisions.jsonl", decision.to_dict() | {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
 
-    episode, episode_rows = episode_tracker.observe(event, decision)
-    for row in episode_rows:
-        append_jsonl("episodes.jsonl", row)
-    prediction = next_step_mod.predict_next_step(
-        event=event,
-        memory=mem_snap,
-        decision=decision,
-        episode=episode,
-        daily_goal=daily_goal,
-    )
-    append_jsonl("next_step_predictions.jsonl", prediction)
-    next_step_mod.score_due_predictions(limit=25)
-
     trace = Trace.new(event, mem_snap, recent_outcomes)
     trace.action = decision.to_dict()
-    trace.state["episode_id"] = episode.episode_id
-    trace.state["prediction_id"] = prediction.get("prediction_id")
 
     if decision.action == "no_ping":
         log.info("decision", action="no_ping", reasons=decision.reason_codes)

@@ -98,7 +98,6 @@ def build_report(
     metrics = metrics_mod.compute(window=window)
     variant_report = _variant_report(policy=policy, window=window)
     calibration = _calibration_report(window=window)
-    next_step_report = _next_step_report(window=window)
     pings = [row for row in decisions if row.get("action") == "notch_ping"]
     pings_with_outcome = sum(
         1 for row in pings if row.get("decision_id") in outcomes_by_decision
@@ -146,9 +145,8 @@ def build_report(
             "shadow": variant_report,
             "calibration": calibration,
         },
-        "next_step": next_step_report,
         "examples": example_rows,
-        "openadapt_style_gaps": _gap_checklist(metrics, variant_report, next_step_report, len(decisions)),
+        "openadapt_style_gaps": _gap_checklist(metrics, variant_report, len(decisions)),
     }
 
 
@@ -356,15 +354,6 @@ def _calibration_report(window: str) -> dict[str, Any]:
     }
 
 
-def _next_step_report(window: str) -> dict[str, Any]:
-    try:
-        from . import next_step as next_step_mod
-
-        return next_step_mod.build_report(window=window, max_examples=12, score_due=True)
-    except Exception as e:
-        return {"error": str(e), "window": window}
-
-
 def _compact_variant(row: dict[str, Any]) -> dict[str, Any]:
     implicit = row.get("implicit") or {}
     explicit = row.get("explicit") or {}
@@ -386,14 +375,12 @@ def _compact_variant(row: dict[str, Any]) -> dict[str, Any]:
 def _gap_checklist(
     metrics: dict[str, Any],
     variant_report: dict[str, Any],
-    next_step_report: dict[str, Any],
     n_decisions: int,
 ) -> list[dict[str, Any]]:
     labels = metrics.get("labels") or {}
     outcomes = metrics.get("outcomes") or {}
     implicit = metrics.get("implicit") or {}
     variants = variant_report.get("variants") or []
-    next_preds = (next_step_report.get("predictions") or {}) if isinstance(next_step_report, dict) else {}
     return [
         {
             "name": "outcome_capture",
@@ -424,12 +411,6 @@ def _gap_checklist(
             "status": "pass" if n_decisions >= 100 else "watch",
             "detail": "More decision moments make policy changes less noisy.",
             "value": n_decisions,
-        },
-        {
-            "name": "next_step_prediction_loop",
-            "status": "pass" if int(next_preds.get("scored") or 0) >= 50 else "insufficient_data",
-            "detail": "Predict-first eval needs delayed actual-behavior comparisons.",
-            "value": next_preds.get("scored") or 0,
         },
     ]
 

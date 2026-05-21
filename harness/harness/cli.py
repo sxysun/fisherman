@@ -207,9 +207,6 @@ def storage_backfill(reset: bool) -> None:
         "deliveries.jsonl",
         "model_calls.jsonl",
         "retro_labels.jsonl",
-        "episodes.jsonl",
-        "next_step_predictions.jsonl",
-        "prediction_errors.jsonl",
         "memory/session.jsonl",
     ]
     counts = sql_store.backfill_jsonl_files(filenames, reset=reset)
@@ -628,36 +625,6 @@ def eval_report(since: str, policy: str, out: Optional[str], as_json: bool) -> N
         click.echo("gaps:")
         for gap in gaps:
             click.echo(f"  {gap['status']:18s} {gap['name']:28s} value={gap.get('value')}")
-
-
-@main.command("next-steps")
-@click.option("--since", default="7d", help="Window: 24h, 7d, etc.")
-@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
-def next_steps(since: str, as_json: bool) -> None:
-    """Show predict-first next-step evaluation metrics."""
-    from . import next_step as next_step_mod
-
-    report = next_step_mod.build_report(window=since, score_due=True)
-    if as_json:
-        click.echo(json.dumps(report, indent=2))
-        return
-    episodes = report["episodes"]
-    preds = report["predictions"]
-    click.echo(
-        f"next_steps: {report['window']} since {report['since']}  "
-        f"episodes={episodes['n']} open={episodes['open']} "
-        f"predictions={preds['n']} scored={preds['scored']} pending={preds['pending']}"
-    )
-    click.echo(
-        "accuracy: "
-        f"top1={_fmt_pct(preds['accuracy_top1'])} "
-        f"top3={_fmt_pct(preds['accuracy_top3'])} "
-        f"unknown={_fmt_pct(preds['unknown_rate'])} "
-        f"avg_score={_fmt_num(preds['avg_score'])}"
-    )
-    click.echo("residuals:")
-    for name, n_rows in sorted((preds.get("residual_types") or {}).items(), key=lambda kv: (-kv[1], kv[0])):
-        click.echo(f"  {name:28s} {n_rows:5d}")
 
 
 @main.command("info-diet")

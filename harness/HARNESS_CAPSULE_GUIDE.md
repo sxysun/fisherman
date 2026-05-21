@@ -10,7 +10,6 @@ The capsule is backed by the local harness daemon at `http://127.0.0.1:7893`. It
 
 - `GET /dashboard/data?window=24h`
 - `GET /eval/report?window=24h&max_examples=4`
-- `GET /next-steps/report?window=24h&max_examples=4`
 - `GET /information-diet/report?window=24h&max_episodes=6`
 
 ## Capsule Controls
@@ -31,7 +30,7 @@ Native windows:
 
 ## Why It Sometimes Shows Loading
 
-The panel shows `loading...` while the Swift app is waiting for daemon reports. The slowest part is usually the eval report because it joins decisions, outcomes, delivery claims, implicit labels, traces, and next-step prediction residuals.
+The panel shows `loading...` while the Swift app is waiting for daemon reports. The slowest part is usually the eval report because it joins decisions, outcomes, delivery claims, implicit labels, compact traces, and policy calibration data.
 
 The current UI keeps the expanded view alive behind the compact capsule so it can cache results across hover open/close cycles. A normal hover should reuse already-fetched data after the first load. It may still show `loading...` after the harness app restarts, when switching to a tab for the first time, or after clicking refresh.
 
@@ -46,25 +45,6 @@ The first row shows the end-to-end intervention pipeline over the current 24-hou
 | `Ping` | Number of decisions where policy said a notification was warranted. This is the “eligible to interrupt” count. | `/eval/report`, `data.n_pings` |
 | `Claim` | Number of pings actually claimed/displayed by the Swift capsule app. This separates “daemon wanted to notify” from “UI actually showed it.” | `/eval/report`, `data.n_claimed_pings` |
 | `Outcome` | Number of reaction rows captured after pings, including clicks, dismisses, timeouts, hover/approach-derived summaries, etc. | `/eval/report`, `data.n_outcomes` |
-| `Replay` | Number of next-step predictions that have been scored against later observations. | `/next-steps/report`, `predictions.scored` |
-
-## Replay In Detail
-
-`Replay` is not replaying screenshots visually. It is the count of delayed next-step predictions that have become scoreable.
-
-The code path is `harness/harness/next_step.py`:
-
-1. During normal daemon operation, each candidate/decision gets a `NextStepPrediction` row in `next_step_predictions.jsonl`.
-2. The prediction contains `top_steps`, usually rank 1-3. Each step has a plain-English description plus expected app, expected scene, and expected keywords when available.
-3. The default scoring horizon is 300 seconds.
-4. Once the horizon has elapsed, `score_due_predictions()` finds predictions that do not yet have a row in `prediction_errors.jsonl`.
-5. `score_prediction()` gathers future candidates from after the prediction timestamp and before timestamp + horizon.
-6. `_actual_step()` compresses those future candidates into an actual behavior summary: app counts, scene counts, first/last app, first/last scene, app switches, scene switches, and outcome action/signal if there was a ping.
-7. `_step_match_score()` compares each predicted step against that actual summary.
-8. If a step scores at least `0.6`, the prediction is `matched`; otherwise it is `missed`. If there were no future candidates and no outcome, it is `unknown`.
-9. `predictions.scored` is the number of predictions with completed scoring rows.
-
-So `Replay = 4661 scored` means the harness has made many predict-first guesses and later compared 4661 of them against subsequent observations/outcomes.
 
 ## Eval Metric Row
 
@@ -74,8 +54,8 @@ These are quick health checks for whether the harness is producing usable traini
 | --- | --- | --- |
 | `Claimed capture` | Percentage of displayed pings that produced an outcome row. | Should be high. If low, the UI may be showing pings but not reporting reactions back. |
 | `Implicit usable` | Count of implicit weak labels considered usable for training/personalization. | Hover, approach, click, dismiss, and timeout reactions can become weak labels. More is better, but explicit labels are still cleaner. |
-| `Top-1 next` | How often the harness's first predicted next step matched later observed behavior, excluding unknown cases. | Higher means the workflow prediction loop is learning plausible next moves. |
-| `Unknown` | Fraction of scored next-step predictions that could not be confidently judged. | Lower is better. High unknown means the evaluator cannot map later observations back to predicted steps. |
+| `Explicit labels` | Count of human retro labels in the selected window. | The cleanest eval signal for the ping/not-ping classifier. |
+| `Label coverage` | Fraction of decisions that have explicit labels. | Low is normal early on; exploration and implicit labels fill part of the gap. |
 
 ## Implicit Usable In Detail
 
@@ -113,9 +93,10 @@ The core harness decision is binary:
 given current context, should the system ping or stay quiet?
 ```
 
-The code models that in two layers:
+The code models that in three layers:
 
 - `harness/policies/rule_v0.py` is the live gate. It still uses deterministic rules and reason codes, not a learned classifier.
+- `harness/policies/llm_icl_v0.py` is an optional LLM in-context policy learner. It runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible text model to choose `notch_ping` or `no_ping` from current context plus recent labeled examples.
 - `harness/harness/trainer.py` replays candidate contexts against alternative policy settings and scores them using explicit labels plus confidence-weighted implicit labels.
 
 For labels, the binary interpretation is:
@@ -130,71 +111,7 @@ For labels, the binary interpretation is:
 
 No-signal timeouts are treated as weak `would_annoy` examples because attention is conserved: if the system displayed a ping and there was no meaningful reaction before timeout, that context is evidence against interrupting again. The confidence is lower than an active dismiss because absence of signal is noisier than direct rejection.
 
-The current system is therefore not a fully learned online binary classifier yet. It is a rule gate plus a replay/calibration trainer that can propose safer canary settings once enough implicit and explicit signal exists. The data path now points in the right direction: ignored timeouts affect reward, implicit training, and live recent-negative-feedback backoff.
-
-## Top-1 Next In Detail
-
-`Top-1 next` is calculated in `harness/harness/next_step.py`.
-
-What is being predicted:
-
-- rank 1: the harness's best guess about your next behavioral step.
-- rank 2-3: fallback/alternate next steps.
-- each step contains a description plus expected app, expected scene group, expected keywords, and rationale.
-
-Examples of generated rank-1 predictions:
-
-- coding scene: “Continue editing or resolving the visible coding task.”
-- reading scene: “Continue reading or triaging the current research source.”
-- writing scene: “Continue drafting or editing the current written artifact.”
-- chat scene: “Send, revise, or close the current chat reply.”
-- rapid context switching: “Settle back into the goal-relevant work surface.”
-
-What it is compared against:
-
-- future candidates in the next 300 seconds by default.
-- dominant app and scene.
-- last app and scene.
-- app/scene switches.
-- OCR keyword matches.
-- outcome action/signal if there was an intervention.
-
-How the score works:
-
-- `_step_match_score()` scores app match, scene match, continuation/switch behavior, and keyword evidence.
-- if the best matching predicted step scores at least `0.6`, the prediction is a match.
-- if the matched step rank is 1, it counts toward `Top-1 next`.
-- if rank 2 or 3 matched, it counts as `topk_match` but not top-1.
-- predictions with `status == "unknown"` are excluded from the denominator.
-
-Formula:
-
-```text
-top_1_next = number_of_matched_predictions_with_matched_rank_1
-             / (number_of_scored_predictions - number_of_unknown_predictions)
-```
-
-The labels/residuals exist because raw accuracy is not enough. A miss caused by no future observation is different from a miss caused by an app switch, scene mismatch, rejection, or semantic mismatch.
-
-## Residuals
-
-Residuals explain how next-step prediction scoring came out.
-
-Common residuals:
-
-| Residual | Meaning |
-| --- | --- |
-| `top1_match` | The first predicted next step matched what happened later. This is the strongest positive prediction signal. |
-| `topk_match` | A predicted step matched, but not the top-ranked one. Useful, but weaker than `top1_match`. |
-| `no_future_observation` | The evaluator could not find enough later screen evidence to score the prediction. This often happens around idle time, laptop sleep, app shutdown, or insufficient future events. |
-| `missed_scene` | The predicted scene/work context did not match the later observed scene. |
-| `missed_app_switch` | The predicted app did not match the later active app. |
-| `semantic_mismatch` | App/scene may not be enough to judge the prediction as matched; the semantic next action differed. |
-| `accepted_intervention` | The user accepted/clicked the intervention. This can override normal next-step scoring because the intervention changed the path. |
-| `rejected_intervention` | The user dismissed or muted the intervention. |
-| `soft_rejected_intervention` | The user behavior suggested rejection/low value without a hard dismiss. |
-
-In the screenshot, `top1_match` dominating the residuals means most scored predictions in the window matched at rank 1. That is a good sign for the next-step evaluator, but it should still be interpreted carefully because the scoring task is approximate.
+The current system is therefore a rule baseline plus an optional ICL policy learner and calibration trainer. It is not yet a trained local classifier, but the data path now points in the right direction: ignored timeouts affect reward, implicit training, and live recent-negative-feedback backoff.
 
 ## Why N/A And Empty Recent Misses Happen
 
@@ -205,7 +122,6 @@ In the screenshot with `Ping = 0`, `Claim = 0`, and `Outcome = 0`:
 - `Claimed capture` is `n/a` because there were no claimed pings in that 24-hour window.
 - `Implicit usable` is `0` because there were no outcome-derived weak labels in that 24-hour window.
 - `Recent misses` is empty because there were no ping examples to classify in that 24-hour window.
-- `Replay` can still be high because next-step predictions are produced for many candidate moments, not only pings.
 
 The capsule now shows `no pings` and an explanatory banner for this state. Use the web dashboard or native Pipeline window if you want longer-window inspection.
 
@@ -318,11 +234,10 @@ Tabs:
 The Eval tab calls `loadEval()` in `dashboard_ui.py`, which fetches `/eval/report`. The renderer uses:
 
 - `r.data` for decisions, pings, claimed pings, outcome capture, labels, and implicit coverage.
-- `r.next_step.predictions` for next-step accuracy and residuals.
 - `r.variants.calibration.best_variant` for policy calibration state.
 - `r.taxonomy.by_type` for decision classification counts.
 - `r.examples` for recent non-green examples.
-- `r.openadapt_style_gaps` for readiness gaps such as outcome capture, explicit labels, implicit labels, variant comparison, decision volume, and next-step loop sufficiency.
+- `r.openadapt_style_gaps` for readiness gaps such as outcome capture, explicit labels, implicit labels, variant comparison, and decision volume.
 
 ### Dashboard Diet Tab
 
@@ -350,7 +265,7 @@ The Diet tab is meant to show what the harness thinks your information diet and 
 7. The Swift capsule claims pending pings and renders them.
 8. User reaction is captured: click, later, dismiss, timeout, hover, approach, leave.
 9. Outcomes become reward and implicit weak labels.
-10. Eval reports join decisions, deliveries, outcomes, labels, traces, and next-step prediction errors.
+10. Eval reports join decisions, deliveries, outcomes, labels, traces, and policy calibration.
 11. Capsule fetches those reports and visualizes the current 24-hour window.
 
 ## How To Manually Inspect The Same Data
@@ -361,7 +276,6 @@ From the repo root:
 cd harness
 .venv/bin/harness status
 .venv/bin/harness eval-report --since 24h
-.venv/bin/harness next-steps --since 24h
 .venv/bin/harness information-diet --since 24h
 ```
 
@@ -378,13 +292,12 @@ Good signs:
 - `Claimed capture` stays near 100%.
 - `Outcome` is close to `Claim` over time.
 - `Implicit usable` grows without many explicit labels.
-- `Top-1 next` is high and `Unknown` is low.
-- Residuals are mostly `top1_match` or `topk_match`.
+- Explicit labels and implicit usable examples cover both pings and silence.
+- Policy variants have enough labeled/implicit signal to compare.
 
 Watch signs:
 
 - Many pings but few claims: UI delivery issue.
 - Many claims but few outcomes: reaction capture issue.
-- High unknown residuals: next-step evaluator lacks enough future evidence.
 - Many `NOT_NOW` or `SOFT_REJECTION` examples: timing policy is too aggressive.
 - Many `FALSE_INTERRUPTION` examples: gate is too permissive.
