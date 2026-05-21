@@ -11,6 +11,8 @@ The capsule is backed by the local harness daemon at `http://127.0.0.1:7893`. It
 - `GET /dashboard/data?window=24h`
 - `GET /eval/report?window=24h&max_examples=4`
 - `GET /information-diet/report?window=24h&max_episodes=6`
+- `GET /dashboard/config`
+- `GET /status`
 
 ## Capsule Controls
 
@@ -22,12 +24,15 @@ The capsule is backed by the local harness daemon at `http://127.0.0.1:7893`. It
 - Use `Pipeline`, `Diet`, and `Settings` tabs to switch views.
 - When a live notification is pending, a `Ping` tab appears with `Yes`, `Later`, and dismiss controls.
 - The old Harness menubar item has been removed. Settings, snooze, labeler, and dashboard links now live in the floating capsule Settings tab.
+- The capsule is configured to join all macOS Spaces and fullscreen desktops. A visibility watchdog reasserts that placement after Space or display changes.
 
 ## Why It Sometimes Shows Loading
 
-The panel shows `loading...` while the Swift app is waiting for daemon reports. The slowest part is usually the eval report because it joins decisions, outcomes, delivery claims, implicit labels, compact traces, and policy calibration data.
+The panel shows `loading...` while the Swift app is waiting for daemon reports. The slowest part is usually the eval report because it joins decisions, outcomes, delivery claims, implicit labels, compact traces, and policy calibration data. The Diet report is also heavier than a normal status call because it groups research-like observations into episodes.
 
 The current UI keeps the expanded view alive behind the compact capsule so it can cache results across hover open/close cycles. A normal hover should reuse already-fetched data after the first load. It may still show `loading...` after the harness app restarts, when switching to a tab for the first time, or after clicking refresh.
+
+The Settings tab should be much faster than Pipeline or Diet. It fetches only `/dashboard/config` and `/status`; if Settings itself hangs for seconds, that points to the daemon being unavailable, a local HTTP problem, or the Swift app being restarted while the request is in flight.
 
 ## Pipeline Row
 
@@ -50,7 +55,24 @@ These are quick health checks for whether the harness is producing usable traini
 | `Claimed capture` | Percentage of displayed pings that produced an outcome row. | Should be high. If low, the UI may be showing pings but not reporting reactions back. |
 | `Implicit usable` | Count of implicit weak labels considered usable for training/personalization. | Hover, approach, click, dismiss, and timeout reactions can become weak labels. More is better, but explicit labels are still cleaner. |
 | `Explicit labels` | Count of human retro labels in the selected window. | The cleanest eval signal for the ping/not-ping classifier. |
-| `Label coverage` | Fraction of decisions that have explicit labels. | Low is normal early on; exploration and implicit labels fill part of the gap. |
+| `Label coverage` | Explicit retro labels divided by decisions in the selected window. | `0.0%` means no decisions in that window have human labels. It does not count implicit labels or hover/dismiss outcomes. |
+
+## Settings Tab
+
+The Settings tab edits local config and policy state. API key fields are masked in the collapsed view: the UI shows a small prefix/suffix preview so you can recognize the key without displaying the full value. Use the edit control beside a key field to reveal/edit it intentionally.
+
+`Learner endpoint` configures the LLM-ICL policy learner in `harness/policies/llm_icl_v0.py`, not the message realizer. The learner is the component that decides `notch_ping` versus `no_ping`.
+
+| Field | Config / Code | Meaning |
+| --- | --- | --- |
+| `Base URL` | `[policy_learner].base_url` | OpenAI-compatible endpoint used for the ping/not-ping learner. |
+| `Model` | `[policy_learner].model` | Model name sent to that endpoint. |
+| `API key` | `[policy_learner].api_key` | Local credential for the learner endpoint. Masked in the capsule. |
+| `Examples` | `[policy_learner].max_examples` | Maximum few-shot examples to include in each learner call. These examples are pulled from explicit retro labels plus usable implicit weak labels. This number is a cap, not the current label count. If the cap is 18 but only 6 usable examples exist, the learner gets 6. |
+| `Call gap` | `[policy_learner].min_interval_sec` | Minimum spacing between learner model calls. Within the gap, the policy falls back to the guarded baseline so the daemon does not call the LLM on every tick. |
+| `Min confidence` | `[policy_learner].min_confidence_to_ping` | The LLM must choose `notch_ping` with at least this confidence before the harness interrupts. Lower values explore more; higher values conserve attention. |
+
+The few-shot example builder reads `decisions.jsonl`, `traces.jsonl`, `retro_labels.jsonl`, and `outcomes.jsonl`. Explicit labels are preferred. Implicit labels are accepted only when the outcome can be mapped into a useful binary target, such as `would_help`, `would_annoy`, or `good_no_ping`.
 
 ## Implicit Usable In Detail
 
@@ -106,7 +128,7 @@ For labels, the binary interpretation is:
 
 No-signal timeouts are treated as weak `would_annoy` examples because attention is conserved: if the system displayed a ping and there was no meaningful reaction before timeout, that context is evidence against interrupting again. The confidence is lower than an active dismiss because absence of signal is noisier than direct rejection.
 
-The current system is therefore a rule baseline plus an optional ICL policy learner and calibration trainer. It is not yet a trained local classifier, but the data path now points in the right direction: ignored timeouts affect reward, implicit training, and live recent-negative-feedback backoff.
+The current system is therefore a rule baseline plus a default live ICL policy learner and calibration trainer. It is not yet a trained local classifier, but the data path now points in the right direction: ignored timeouts affect reward, implicit training, and live recent-negative-feedback backoff.
 
 ## Why N/A And Empty Recent Misses Happen
 
@@ -253,7 +275,7 @@ The Diet tab is meant to show what the harness thinks your information diet and 
 1. Fisherman captures local screen/activity context.
 2. Harness daemon polls Fisherman and creates candidate events.
 3. Optional vision/scene tagging enriches candidates.
-4. Policy gate decides whether to ping or skip.
+4. Policy gate applies `rule_v0` hard gates, then the default `llm_icl_v0` learner decides whether to ping or skip when eligible.
 5. Realizer writes a candidate notification message.
 6. Critic checks whether the message is safe/useful enough.
 7. The Swift capsule claims pending pings and renders them.

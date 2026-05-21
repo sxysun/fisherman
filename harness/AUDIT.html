@@ -200,9 +200,9 @@
   <section class="verdict">
     <div class="card">
       <h2 style="margin-top:0;border-top:0;padding-top:0;">Executive Verdict</h2>
-      <p><strong>The harness is architecturally coherent for a local research prototype.</strong> It has the right primitive loop: observe screen state, turn it into a candidate event, gate interventions, realize a goal-aware message, push it through a low-friction UI, capture outcomes, and replay policy decisions offline.</p>
-      <p><strong>It is now a serious local dogfood harness, but not yet a validated policy.</strong> The engineering gaps called out in the first audit now have concrete implementations: deterministic holdouts, endpoint trust boundaries, native metrics, launchd packaging, notch respawn, and SQLite-backed read paths. The remaining gap is evidence: enough labels, outcomes, and frozen evaluation slices to justify policy changes.</p>
-      <p><strong>Best current use:</strong> dogfood on one machine with explicit Today goals, collect labels, and use the trace data to harden the policy. Do not treat current ping quality as validated.</p>
+      <p><strong>The harness is architecturally coherent for a local research prototype.</strong> It has the right primitive loop: observe screen state, turn it into a candidate event, decide whether to ping, realize a goal-aware message, push it through a low-friction UI, capture outcomes, and audit policy behavior offline.</p>
+      <p><strong>It is now a serious local dogfood harness, but not yet a validated policy.</strong> The engineering gaps called out in the first audit now have concrete implementations: deterministic holdouts, endpoint trust boundaries, native metrics, launchd packaging, capsule respawn, masked settings keys, all-Spaces capsule behavior, and SQLite-backed read paths. The remaining gap is evidence: enough labels, outcomes, and frozen evaluation slices to justify policy changes.</p>
+      <p><strong>Best current use:</strong> dogfood on one machine with an explicit daily goal, collect labels, and use the trace data to harden the policy. Do not treat current ping quality as validated.</p>
     </div>
     <div class="score">
       <div class="num">7/10</div>
@@ -242,12 +242,12 @@
     <div class="node"><strong>2. Candidate synthesis</strong><small><code>candidate.py</code> snapshots screen context and current user prefs into a typed <code>CandidateEvent</code>.</small></div>
     <div class="node"><strong>3. Scene reading</strong><small>Rules tag coarse scenes. Optional VLM overlay adds specificity, sensitivity, and intent signals.</small></div>
     <div class="node"><strong>4. Short memory</strong><small><code>SessionMemory</code> tracks recent apps/scenes, switches, time on current app, and recent outcomes.</small></div>
-    <div class="node"><strong>5. Gate</strong><small><code>rule_v0</code> applies hard gates, cooldown, snooze, negative-feedback backoff, and goal/opportunity reasons.</small></div>
+    <div class="node"><strong>5. Policy</strong><small><code>rule_v0</code> applies hard gates and fallback behavior; the default <code>llm_icl_v0</code> learner chooses ping/not-ping from context plus labeled examples.</small></div>
     <div class="node"><strong>6. Realizer</strong><small>OpenAI-compatible chat endpoint receives daily goal, why-now, compact state, and optionally the current JPEG.</small></div>
     <div class="node"><strong>7. Critic</strong><small>Regex critic blocks obvious secrets, long quotes, verbose output, or empty/multi-paragraph messages. LLM critic is optional.</small></div>
-    <div class="node"><strong>8. Notch + reward</strong><small>Swift notch displays the pill, captures hover/approach/click/dismiss/timeout, and writes signal-derived reward.</small></div>
+    <div class="node"><strong>8. Capsule + reward</strong><small>Swift capsule displays the ping, captures hover/approach/click/dismiss/timeout, and writes signal-derived reward.</small></div>
   </div>
-  <p class="arrow">Fisherman -> CandidateEvent -> Scene/VLM -> Memory -> Gate -> Realizer -> Critic -> Pending pill -> Outcome -> Reward -> Trace -> Replay/labels</p>
+  <p class="arrow">Fisherman -> CandidateEvent -> Scene/VLM -> Memory -> Policy -> Realizer -> Critic -> Pending ping -> Outcome -> Reward -> Trace -> Labels/eval</p>
 
   <h2>What Is Strong</h2>
   <div class="grid three">
@@ -261,11 +261,11 @@
     </div>
     <div class="card risk-low">
       <h3>Feedback loop exists</h3>
-      <p>Outcomes, hover traces, retro labels, replay, score, and reward are in place. That is the right skeleton for improving intervention policy over time.</p>
+      <p>Outcomes, hover traces, retro labels, implicit labels, score, and reward are in place. That is the right skeleton for improving intervention policy over time.</p>
     </div>
     <div class="card risk-low">
       <h3>Native surface is appropriate</h3>
-      <p>The notch pill is less disruptive than a modal/chat UI and can capture richer intent signals than a notification alone.</p>
+      <p>The floating capsule is less disruptive than a modal/chat UI, can coexist with Fisherman's notch, and can capture richer intent signals than a notification alone.</p>
     </div>
     <div class="card risk-low">
       <h3>Local-first logs</h3>
@@ -296,7 +296,7 @@
       </tr>
       <tr>
         <td>Counterfactual policy eval</td>
-        <td>Replay can rerun the gate over candidates and live decisions now carry holdout/exploration assignment metadata, but replay still does not model realizer quality, user mood, or delayed outcomes.</td>
+        <td>Offline policy replay can rerun the ping/not-ping decision over candidates and live decisions now carry holdout/exploration assignment metadata, but replay still does not model realizer quality, user mood, or delayed outcomes.</td>
         <td>Calibrated propensities, IPS/doubly robust estimates where appropriate, and policy promotion criteria.</td>
         <td class="status-bad">P0</td>
       </tr>
@@ -314,13 +314,13 @@
       </tr>
       <tr>
         <td>Policy learning</td>
-        <td>Handwritten <code>rule_v0</code> with simple sensitivity settings.</td>
-        <td>Label-informed personalization, calibrated learned gate, exploration/exploitation discipline, and rollbackable policy versions.</td>
+        <td>Default live <code>llm_icl_v0</code> policy learner uses recent explicit and implicit examples as few-shot context, with <code>rule_v0</code> kept as hard gate and fallback. This is useful ICL personalization, not yet a trained calibrated classifier.</td>
+        <td>Stable labeled datasets, calibrated learned gate or promotion-tested ICL policy, exploration/exploitation discipline, and rollbackable policy versions.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>
         <td>State management</td>
-        <td>Config reload requires restart. Daemon is foreground-oriented. Policy state is a JSON file.</td>
+        <td>Launchd packaging exists, the daemon respawns the capsule, and goal/sensitivity/policy state update live. Endpoint/model/privacy TOML reload is still partial and should be completed.</td>
         <td>Launchd service, health probes, live config reload, crash recovery, and monotonic state transitions.</td>
         <td class="status-warn">P1</td>
       </tr>
@@ -332,7 +332,7 @@
       </tr>
       <tr>
         <td>UX semantics</td>
-        <td>Notch pill works and captures interactions. Approach geometry is approximate.</td>
+        <td>Floating capsule hover-expands, joins all Spaces/fullscreen desktops, exposes Pipeline/Diet/Settings, masks API-key previews, and captures interactions. Approach geometry is approximate.</td>
         <td>Measured display lifecycle, no lost pending messages, accessibility, multi-monitor correctness, and tested no-overlap states.</td>
         <td class="status-warn">P2</td>
       </tr>
@@ -344,7 +344,7 @@
     <div class="card">
       <h3>Correctness</h3>
       <ul>
-        <li>Removed hardcoded API key from repo defaults; Settings -> Model now owns local key entry.</li>
+        <li>Removed hardcoded API key from repo defaults; floating capsule Settings now owns local key entry with masked previews.</li>
         <li>Fixed cooldown persistence across daemon ticks.</li>
         <li>Made negative-feedback backoff time-bounded.</li>
         <li>Made expired snoozes inactive instead of permanent blockers.</li>
@@ -390,7 +390,7 @@
   </div>
   <div class="card risk-med">
     <h3>P1: Replay is still not the real system</h3>
-    <p>Replay now simulates memory and cooldown better than before, but it still excludes realizer quality, critic behavior, VLM nondeterminism, user context, and delayed action. Treat it as a gate-regression tool, not a full offline product metric.</p>
+    <p>Offline policy replay now simulates memory and cooldown better than before, but it still excludes realizer quality, critic behavior, VLM nondeterminism, user context, and delayed action. Treat it as a gate-regression tool, not a full offline product metric.</p>
   </div>
 
   <h2>Definition Of A Completely Working Harness</h2>
@@ -404,7 +404,7 @@
     <tbody>
       <tr>
         <td>Dogfood-ready</td>
-        <td>Daemon starts via launchd, survives notch restarts, no hardcoded secrets, no update-check leakage, and the labeler clearly shows how many retro labels remain before personalization.</td>
+        <td>Daemon starts via launchd, survives capsule restarts, keeps the capsule visible across Spaces, has no hardcoded secrets, has no update-check leakage, and the labeler clearly shows how many retro labels remain before personalization.</td>
       </tr>
       <tr>
         <td>Policy-eval-ready</td>
@@ -416,7 +416,7 @@
       </tr>
       <tr>
         <td>Personalization-ready</td>
-        <td>Few-shot realizer examples from accepted/rejected local labels, learned or calibrated gate features, and rollbackable policy configs.</td>
+        <td>Few-shot policy examples from accepted/rejected local labels, learned or calibrated gate features, and rollbackable policy configs.</td>
       </tr>
       <tr>
         <td>Production-grade</td>
@@ -430,9 +430,9 @@
     <div class="card">
       <h3>Next 24 hours</h3>
       <ul>
-        <li>Keep the model key in Settings -> Model or a local environment variable, not repo defaults.</li>
+        <li>Keep the model key in floating capsule Settings or a local environment variable, not repo defaults.</li>
         <li>Dogfood the path-scoped Harness CI after every harness-only push.</li>
-        <li>Dogfood with one clear Today goal.</li>
+        <li>Dogfood with one clear daily goal.</li>
         <li>Label 20-30 decisions in <code>:7893/label</code>; the queue now stays frozen to the session instead of chasing new live ticks.</li>
         <li>Watch <code>harness metrics --since 24h</code> after each labeling batch.</li>
         <li>Write down every annoying or missed intervention immediately.</li>
@@ -441,10 +441,10 @@
     <div class="card">
       <h3>Next engineering pass</h3>
       <ul>
-        <li>Add live config reload after Settings saves.</li>
+        <li>Finish live config reload for endpoint/model/privacy settings after Settings saves.</li>
         <li>Add explicit SQLite schema migrations and retention policy.</li>
         <li>Add token-level OCR boxes and sensitive-domain suppression.</li>
-        <li>Add confidence-weighted few-shot examples once there are enough labels.</li>
+        <li>Add decision drill-down from the capsule Pipeline view into raw candidate/decision/outcome rows.</li>
       </ul>
     </div>
     <div class="card">
@@ -459,7 +459,7 @@
     <div class="card">
       <h3>Model pass</h3>
       <ul>
-        <li>Feed accepted/rejected examples into the realizer.</li>
+        <li>Keep improving accepted/rejected examples for the live <code>llm_icl_v0</code> policy learner.</li>
         <li>Evaluate candidate VLMs against a small visual gold set.</li>
         <li>Keep the rule gate as baseline and compare learned gates against it.</li>
         <li>Log model prompt version, endpoint, and image bytes for every realization.</li>
@@ -470,7 +470,7 @@
   <h2>Bottom Line</h2>
   <div class="callout">
     <p>The core idea is sound: a proactive assistant should be evaluated as an intervention policy, not just as a chat prompt. This build has the right loop and enough instrumentation to start learning from real use.</p>
-    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is not more prompt cleverness; it is labeled data, replay quality, storage integrity, and policy evaluation.</p>
+    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is labeled data, implicit-signal calibration, storage integrity, and policy evaluation.</p>
   </div>
   <p class="print-note">Tip: use the browser print dialog to save this file as a PDF if a PDF artifact is needed.</p>
 </main>

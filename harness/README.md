@@ -1,6 +1,6 @@
 # Fisherman Harness
 
-Proactive presence harness for macOS. Decides *when* to ping the user and uses an LLM (hermes-agent or any OpenAI-compatible endpoint) to compose the message. Reads screen context from [Fisherman](../) over HTTP. Pings the user via a notch pill matching FishermanMenu's aesthetic (uses the same `DynamicNotchKit` library).
+Proactive presence harness for macOS. Decides *when* to ping the user and uses an LLM (hermes-agent or any OpenAI-compatible endpoint) to compose the message. Reads screen context from [Fisherman](../) over HTTP. Pings the user via a separate floating Harness capsule that can join all macOS Spaces while Fisherman keeps its own notch surface.
 
 For a complete picture, read [HANDOFF.md](HANDOFF.md) — it's the canonical doc for the system's current state. For a frontier-lab-style architecture audit and gap analysis, open [AUDIT.html](AUDIT.html).
 
@@ -17,7 +17,7 @@ cd notch && ./build.sh && cd ..
 # Configure
 .venv/bin/harness install        # writes ~/.harness/config.toml + builds notch
 # edit ~/.harness/config.toml to set [realizer] api_key + base_url
-# OR open Settings → Model after first start
+# OR use the floating capsule Settings tab after first start
 
 # Run
 .venv/bin/harness start --foreground
@@ -37,7 +37,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a binary gate that returns `{action, reason_codes, why_now}`, then applies deterministic experiment assignment. The default live policy is `llm_icl_v0`: it runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from the current context plus recent explicit/implicit examples. Low-rate holdouts are logged for counterfactual measurement; exploration pings default to 3% on eligible ambiguous moments so the harness can learn when it is too timid without becoming noisy. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift floating capsule claims the pending payload via HTTP polling and renders it; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, and the eval report prefer indexed read paths where available.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter when enabled), runs a binary gate that returns `{action, reason_codes, why_now}`, then applies deterministic experiment assignment. The default live policy is `llm_icl_v0`: it runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from the current context plus recent explicit/implicit examples. Low-rate holdouts are logged for counterfactual measurement; exploration pings default to 3% on eligible ambiguous moments so the harness can learn when it is too timid without becoming noisy. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift floating capsule claims the pending payload via HTTP polling and renders it; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, and the eval report prefer indexed read paths where available.
 
 ## Configuration
 
@@ -69,7 +69,7 @@ min_confidence_to_ping = 0.55
 [realizer]
 base_url = "http://3.82.134.133:8642"    # OpenAI-compatible
 model = "hermes-agent"
-api_key = ""                             # set in Settings → Model or HARNESS_REALIZER_KEY
+api_key = ""                             # set in floating capsule Settings or HARNESS_REALIZER_KEY
 include_vision = true                     # send screenshot
 skip_vision_on_sensitive_ocr = true       # do not attach image if OCR looks secret-like
 redact_sensitive_screenshots = true       # first try local OCR box masking
@@ -79,11 +79,13 @@ block_untrusted_model_hosts = true
 allowed_model_hosts = ["3.82.134.133:8642", "openrouter.ai", "localhost", "127.0.0.1", "::1"]
 
 [scene_tagger.llm]                        # per-candidate VLM
-enabled = true
+enabled = false                           # enable from capsule Settings when OpenRouter is configured
 base_url = "https://openrouter.ai/api/v1"
 model = "google/gemma-3-4b-it"
 min_interval_sec = 30
 ```
+
+The Settings tab also exposes learner controls. `Examples` is `[policy_learner].max_examples`: the maximum number of explicit/implicit few-shot examples sent to the LLM ping/not-ping learner. It is a cap, not the current label count. `Label coverage` in Pipeline/Eval is explicit retro labels divided by decisions in the selected window, so `0.0%` means no human labels in that window even if implicit hover/dismiss/timeout signal exists.
 
 ## File layout
 

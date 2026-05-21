@@ -1,6 +1,6 @@
 # Harness Hand-off
 
-You're picking up a proactive presence harness for macOS. The substrate is built. The system runs end-to-end. The next big work is **dogfooding** + **iterating on signal**, not more infrastructure.
+You're picking up a proactive presence harness for macOS. The substrate is built. The system runs end-to-end. The next big work is **dogfooding** + **iterating on signal**, with only targeted infrastructure work when it improves learning from real outcomes.
 
 Read this doc + skim `README.md` and you'll know the system.
 
@@ -8,7 +8,7 @@ Read this doc + skim `README.md` and you'll know the system.
 
 ## What the harness is
 
-A daemon that watches the user's screen via [Fisherman](../fisherman/) and decides, every ~5 seconds, whether **now is a good moment to interrupt them with a short message**. When it decides yes, an OpenAI-compatible LLM (the user has [Nous Hermes Agent](https://github.com/NousResearch/hermes-agent) running on their EC2 instance) composes the message, a critic vets it, and a macOS notch-pill renders it.
+A daemon that watches the user's screen via [Fisherman](../fisherman/) and decides, every ~5 seconds, whether **now is a good moment to interrupt them with a short message**. When it decides yes, an OpenAI-compatible LLM (the user has [Nous Hermes Agent](https://github.com/NousResearch/hermes-agent) running on their EC2 instance) composes the message, a critic vets it, and a separate macOS floating capsule renders it.
 
 The user wanted this to:
 1. Serve a daily intention they declare each morning
@@ -88,7 +88,7 @@ harness/
 │   ├── label_ui.py               rewind-style labeling web UI with frozen queue
 │   ├── metrics.py                live outcome + retro-label quality metrics
 │   ├── eval_report.py            joined OpenAdapt-style eval report
-│   └── dashboard_ui.py           settings/diag web UI (now superseded by native settings)
+│   └── dashboard_ui.py           dashboard/settings/diag web UI; capsule settings is primary
 │
 ├── policies/
 │   ├── rule_v0.py                deterministic safety/baseline policy
@@ -117,10 +117,10 @@ harness/
 │   │   ├── HarnessClient.swift   minimal client for /pending + /outcome
 │   │   ├── HarnessAPI.swift      richer client for settings: config/data/goal
 │   │   ├── SettingsModel         ObservableObject bridging HTTP ↔ capsule settings
-│   │   └── HarnessState.swift    ObservedObject for the live notch pill
+│   │   └── HarnessState.swift    ObservedObject for the live capsule/ping
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           44 tests; pytest passes
+└── tests/test_smoke.py           50 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -182,8 +182,9 @@ User flow once it's running:
    poll → scene → memory → gate → realizer → critic → push → outcome → trace
 
 ✅ Vision (VLM) in two places
-   - Per-candidate scene tagger (google/gemma-3-4b-it on OpenRouter, ~$1/mo)
-     Smart-triggered: only fires when app+OCR change and ≥30s since last call
+   - Per-candidate scene tagger (google/gemma-3-4b-it on OpenRouter when
+     enabled). Smart-triggered: only fires when app+OCR change and ≥30s since
+     last call. Default config keeps this off until configured.
    - Realizer (hermes-agent, multimodal): sees current JPEG when composing messages
      unless local OCR privacy preflight suppresses image attachment; sensitive
      JPEGs are locally masked first when Apple Vision can locate matching boxes
@@ -207,10 +208,12 @@ User flow once it's running:
 
 ✅ Floating capsule settings UI
    - DynamicNotchKit-based pill matches FishermanMenu aesthetic
+   - Joins all macOS Spaces/fullscreen desktops; a visibility watchdog
+     reasserts placement after Space/display changes
    - Harness menubar item removed; settings, labeler, dashboard, and snooze
      controls live in the floating capsule
    - Edit menu installed (Cmd+C/V/X/A work despite .accessory policy)
-   - SecureField swapped to TextField (avoids Passwords prompt + paste-block)
+   - API-key fields show masked previews and require explicit edit to reveal
 
 ✅ Retro labeling UI at :7893/label
    - Rewind-style: drag scrubber, ±2min window, ~60 thumbnails
@@ -330,10 +333,11 @@ User flow once it's running:
    in the response. We have nothing to surface beyond the final message.
    Tracking field `provider_reasoning` if hermes ever adds it (none right now).
 
-⚠ Daemon restart required after Save in Settings
-   Live config reload isn't wired. After changing settings + Save, you must
-   harness stop && harness start. Could be a small win to watch config.toml
-   mtime and reload key sections live.
+⚠ Settings reload is partial
+   Goal, sensitivity, policy state, and several capsule-facing controls update
+   live through HTTP. Some TOML-backed endpoint/model/privacy settings are still
+   read by the daemon at boot, so restart the launchd job/daemon after changing
+   those until config hot reload is complete.
 
 ⚠ Reward weights for v1 still in config.toml
    [reward.weights] section is dead code now — reward_v2 is signal-derived
@@ -344,10 +348,10 @@ User flow once it's running:
    A dismiss/mute now suppresses organic pings for
    gate.negative_feedback_backoff_min (default 15 min), not forever.
 
-⚠ ~3000 candidates collected, ~5 pings fired
-   The gate is conservative. Real organic pings are rare. The Today tab's
-   responsive sensitivity (2-min cooldown) should help but real-world testing
-   hasn't happened yet — only test --push pills.
+⚠ Ping volume may still be conservative
+   Check the current Pipeline/Eval window before tuning. The default policy is
+   now `llm_icl_v0` guarded by `rule_v0`, with low-rate exploration, but real
+   organic ping quality still needs dogfood data.
 
 ⚠ Retro labels still sparse
    The user has started labeling, but the current count is still below the
@@ -361,10 +365,9 @@ User flow once it's running:
 
 ### Tier 1 — actually use it
 
-1. **Dogfood for a day.** Set a Today goal in the morning. Let it run.
-   Pay attention to what fires (and what should have fired). The system has
-   ~3000 candidates today and only ~5 organic pings — the gate may be too
-   conservative even at "responsive."
+1. **Dogfood for a day.** Set a goal in the floating capsule Settings tab in
+   the morning. Let it run. Pay attention to what fires, what should have fired,
+   and whether ignored timeouts are correctly treated as attention-cost signal.
 
 2. **Label 20-30 retros.** Open `:7893/label`, drag, press 1-3. This is
    the single highest-leverage thing right now — it unlocks recall metrics
@@ -376,9 +379,10 @@ User flow once it's running:
    "would have helped" cases that didn't ping, lower the relevant threshold
    in `policies/rule_v0.py`. If "would have annoyed" cases pinged, raise it.
 
-4. **Live config reload.** When Settings → Save writes config.toml, the
-   daemon should pick up changes within 5s without restart. ~50 LOC.
-   Watch mtime; reload `[gate]`, `[realizer]`, `[intents]` blocks.
+4. **Finish live config reload.** When Settings saves config.toml, the daemon
+   should pick up endpoint/model/privacy changes within 5s without restart.
+   Watch mtime; reload `[gate]`, `[realizer]`, `[policy_learner]`,
+   `[scene_tagger]`, `[experiment]`, and `[privacy]` blocks.
 
 5. **Wire up few-shot exemplars in the realizer.** Once retro_labels.jsonl
    has 20+ rows, inject the top 5-8 most-confident "would_help" examples
@@ -398,12 +402,12 @@ User flow once it's running:
 
 ### Tier 4 — polish / nice-to-haves
 
-9. **Notch hover-to-expand.** Right now the pill is static once shown.
-   Could expand on hover to show more detail (memory snapshot, what hermes
-   pulled).
+9. **Capsule inspector mode.** The capsule already hover-expands and carries
+   Pipeline/Diet/Settings. The next useful UI pass is richer inspection of the
+   last decisions: context, reason codes, policy confidence, and outcome.
 
-10. **Inspector mode in the notch.** Cmd-click the pill while expanded
-    to see history of last 10 decisions with reason_codes. Useful debugging.
+10. **Decision drill-down.** Cmd-click a Pipeline row or recent example to see
+    the exact candidate, decision, delivery, outcome, and label rows.
 
 11. **Config hot reload.** The remaining operational papercut is restart
     after Save. Launchd handles process restart, but the daemon still reads
@@ -421,11 +425,13 @@ User flow once it's running:
 2. **Hermes is just a `base_url`.** The realizer talks OpenAI chat-
    completions. The user's hermes-agent is at `http://3.82.134.133:8642`
    but any OpenAI-compatible endpoint works. The API key is not shipped
-   in repo defaults; set it in Settings → Model or via `HARNESS_REALIZER_KEY`.
+   in repo defaults; set it in the floating capsule Settings tab or via
+   `HARNESS_REALIZER_KEY`.
 
-3. **VLM is on by default + smart-triggered.** Cost is bounded (~$1/mo)
-   because the call is skipped when neither the app nor the OCR has
-   changed since the last call.
+3. **VLM is available + smart-triggered.** The default config keeps the
+   per-candidate scene VLM disabled until configured. When enabled, cost is
+   bounded because the call is skipped when neither the app nor OCR has changed
+   since the last call and the minimum call gap has not elapsed.
 
 4. **DynamicNotchKit is vendored** at `../menubar/Packages/DynamicNotchKit/`
    — same library FishermanMenu uses. The harness path-depends on it.
@@ -456,10 +462,11 @@ These don't have answers yet — the next agent (or the user) should resolve the
    outcomes, check if the reward correlates with the user's after-the-fact
    "was this useful?"
 
-3. **Does the gate fire often enough?**
-   Even with sensitivity=responsive (2-min cooldown), only ~5 organic
-   pings/day in current usage. Either the user genuinely doesn't want
-   more, or rule_v0's thresholds are still too tight.
+3. **Does the policy fire often enough?**
+   Use current Pipeline/Eval data instead of old fixed counts. If ignored
+   timeouts and dismisses dominate, conserve attention. If labels show many
+   `would_help` no-ping moments, increase exploration or lower the confidence
+   threshold.
 
 4. **Should the notch app and the daemon be split as separate launchd jobs?**
    The daemon now respawns the notch subprocess, which is good enough for
