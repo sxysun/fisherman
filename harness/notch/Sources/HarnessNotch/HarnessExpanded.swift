@@ -191,16 +191,18 @@ struct HarnessFloatingSurface: View {
     @ObservedObject var state: HarnessState
 
     var body: some View {
-        Group {
-            if state.surfaceExpanded {
-                HarnessExpanded(state: state)
-                    .background(FloatingSurfaceBackground(radius: 18))
-                    .shadow(color: .black.opacity(0.35), radius: 18, x: 0, y: 8)
-            } else {
-                HarnessFloatingCompact(state: state)
-                    .background(FloatingSurfaceBackground(radius: 18))
-                    .shadow(color: .black.opacity(0.32), radius: 12, x: 0, y: 5)
-            }
+        ZStack(alignment: .topLeading) {
+            HarnessExpanded(state: state)
+                .background(FloatingSurfaceBackground(radius: 18))
+                .shadow(color: .black.opacity(0.35), radius: 18, x: 0, y: 8)
+                .opacity(state.surfaceExpanded ? 1 : 0)
+                .allowsHitTesting(state.surfaceExpanded)
+
+            HarnessFloatingCompact(state: state)
+                .background(FloatingSurfaceBackground(radius: 18))
+                .shadow(color: .black.opacity(0.32), radius: 12, x: 0, y: 5)
+                .opacity(state.surfaceExpanded ? 0 : 1)
+                .allowsHitTesting(!state.surfaceExpanded)
         }
         .onHover { state.surfaceHoverHandler?($0) }
     }
