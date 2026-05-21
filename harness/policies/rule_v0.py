@@ -59,8 +59,12 @@ def _has_recent_negative_feedback(
     for outcome in recent_outcomes:
         action = outcome.get("user_action")
         summary = outcome.get("interaction_summary") or {}
-        signal = summary.get("intent_signal")
-        negative = action in ("dismissed", "muted") or signal == "rejection_considered"
+        signal = summary.get("intent_signal") or ("ignored" if action == "timed_out" else None)
+        negative = (
+            action in ("dismissed", "muted")
+            or signal == "rejection_considered"
+            or (action == "timed_out" and signal in ("ignored", "approached"))
+        )
         if not negative:
             continue
         ts = _iso_to_unix(outcome.get("ts"))

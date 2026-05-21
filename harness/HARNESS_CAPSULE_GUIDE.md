@@ -92,17 +92,45 @@ Every outcome row can become a weak label if it has a `decision_id`. The convers
 | `timed_out` + `rejection_considered` | `would_annoy` | `negative` | `0.65` | yes |
 | `timed_out` + `snooze_considered` | `not_now` | `neutral` | `0.35` | yes |
 | `timed_out` + `approached` | `ignored_after_notice` | `weak_negative` | `0.25` | yes |
-| `timed_out` + no meaningful signal | `no_signal` | `ignored` | `0.0` | no |
+| `timed_out` + no meaningful signal | `would_annoy` | `weak_negative` | `0.40` | yes |
 | unknown action | `unknown` | `unknown` | `0.0` | no |
 
-This means `Implicit usable` can be lower than `Ping` or `Claim` because not every ping produces a usable behavioral label. Examples:
+This means `Implicit usable` can still be lower than `Ping` or `Claim` because not every ping produces a usable behavioral label. Examples:
 
 - A ping can be claimed but not yet have an outcome row in the selected window.
-- A ping can time out with no hover/approach/click signal; that becomes `no_signal` and is not usable.
+- A ping can be queued but not claimed/displayed by the Swift app.
+- A ping can have an unknown or malformed outcome action.
 - The panel uses a rolling 24-hour window, so older usable labels disappear from this view as time passes.
 - `Ping` is a policy decision count; `Implicit usable` is an outcome-derived training-signal count.
 
-If you see 27 pings and 16 implicit usable, that usually means 16 of those delivered/interacted moments produced a nonzero-confidence weak label, while the rest were either missing outcomes, no-signal timeouts, outside the window, or otherwise not useful enough for training.
+If you see 27 pings and 16 implicit usable, that usually means 16 of those pinged moments produced a usable outcome-derived weak label, while the rest were missing outcomes, outside the window, queued but not claimed, or malformed.
+
+## Binary Ping / Not-Ping Frame
+
+The core harness decision is binary:
+
+```text
+given current context, should the system ping or stay quiet?
+```
+
+The code models that in two layers:
+
+- `harness/policies/rule_v0.py` is the live gate. It still uses deterministic rules and reason codes, not a learned classifier.
+- `harness/harness/trainer.py` replays candidate contexts against alternative policy settings and scores them using explicit labels plus confidence-weighted implicit labels.
+
+For labels, the binary interpretation is:
+
+| Label | Binary target |
+| --- | --- |
+| `would_help` | should ping |
+| `would_annoy` | should not ping |
+| `good_no_ping` | should not ping |
+| `not_now` | timing was bad; useful as weak timing signal, not a clean binary target |
+| `ignored_after_notice` | weak should-not-ping signal |
+
+No-signal timeouts are treated as weak `would_annoy` examples because attention is conserved: if the system displayed a ping and there was no meaningful reaction before timeout, that context is evidence against interrupting again. The confidence is lower than an active dismiss because absence of signal is noisier than direct rejection.
+
+The current system is therefore not a fully learned online binary classifier yet. It is a rule gate plus a replay/calibration trainer that can propose safer canary settings once enough implicit and explicit signal exists. The data path now points in the right direction: ignored timeouts affect reward, implicit training, and live recent-negative-feedback backoff.
 
 ## Top-1 Next In Detail
 
@@ -222,7 +250,7 @@ The decision tree is:
    - `timed_out` + `positive_considered` → `soft_positive`
    - `timed_out` + `snooze_considered` → `soft_not_now`
    - `timed_out` + `approached` → `approached_then_ignored`
-   - `timed_out` + no clear signal → `ignored_ping`
+   - `timed_out` + no clear signal → `ignored_ping` (attention-cost negative)
 3. Else if there is a usable implicit weak label, classify by weak label.
    - `would_help` → `positive_implicit_only`
    - `would_annoy` → `negative_implicit_only`

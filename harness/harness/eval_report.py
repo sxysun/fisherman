@@ -273,7 +273,7 @@ def classify_decision(
                 return _cls("soft_not_now", "User considered snoozing the ping.", "low")
             if signal == "approached":
                 return _cls("approached_then_ignored", "User approached the ping and then ignored it.", "low")
-            return _cls("ignored_ping", "Ping timed out without clear interaction signal.", "low")
+            return _cls("ignored_ping", "Ping timed out without clear interaction signal; treat as attention-cost negative.", "medium")
 
     if weak_label and weak_label.get("usable_for_training"):
         value = weak_label.get("label")

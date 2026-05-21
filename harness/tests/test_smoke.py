@@ -484,6 +484,41 @@ def test_rule_v0_negative_feedback_backoff_uses_event_time_for_replay():
     assert rule_v0.decide(event, mem, replay_stale, cfg).action == "notch_ping"
 
 
+def test_rule_v0_ignored_timeout_counts_as_recent_negative_feedback():
+    from policies import rule_v0
+
+    event = schemas.CandidateEvent()
+    event.ts = "2026-05-19T12:10:00Z"
+    event.screen.frame_age_sec = 5.0
+    event.screen.ocr_snippet = "ship harness"
+    event.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
+    mem = schemas.MemorySnapshot.build(
+        recent_apps=["Chrome"],
+        recent_scenes=["reading_browser"],
+        recent_outcomes=[],
+        app_switches_last_15m=0,
+        minutes_on_current_app=95.0,
+    )
+    cfg = {
+        "cooldown_min": 5,
+        "negative_feedback_backoff_min": 15,
+        "quiet_hours_start": 3,
+        "quiet_hours_end": 4,
+        "sensitivity": "responsive",
+        "daily_goal": "ship harness",
+        "allowed_intents": [],
+    }
+    ignored_timeout = [{
+        "user_action": "timed_out",
+        "ts": "2026-05-19T12:00:00Z",
+        "interaction_summary": {"intent_signal": "ignored"},
+    }]
+
+    blocked = rule_v0.decide(event, mem, ignored_timeout, cfg)
+    assert blocked.action == "no_ping"
+    assert "recent_negative_feedback" in blocked.reason_codes
+
+
 def test_session_memory_breaks_continuity_across_sleep_gap(tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path
@@ -1028,12 +1063,14 @@ def test_implicit_outcomes_become_confidence_weighted_weak_labels():
         {"decision_id": "pd_implicit", "user_action": "timed_out"},
         decision,
     )
-    assert ignored["usable_for_training"] is False
+    assert ignored["label"] == "would_annoy"
+    assert ignored["direction"] == "weak_negative"
+    assert ignored["usable_for_training"] is True
 
     summary = implicit_mod.summarize([positive, weak_negative, ignored])
-    assert summary["usable"] == 2
+    assert summary["usable"] == 3
     assert summary["positive"] == 1
-    assert summary["negative"] == 1
+    assert summary["negative"] == 2
 
 
 def test_implicit_endpoint_returns_joined_examples(tmp_path):

@@ -56,8 +56,11 @@ def weak_label_for_outcome(outcome: dict, decision: dict | None = None) -> dict[
         elif signal == "approached":
             label, direction, confidence = "ignored_after_notice", "weak_negative", 0.25
         else:
-            label, direction, confidence = "no_signal", "ignored", 0.0
-            usable = False
+            # In this harness, attention is conserved: a delivered ping that
+            # receives no meaningful signal is still evidence that this context
+            # should be quieter next time. Keep the confidence below active
+            # dismissals/rejection hovers because absence of signal is noisier.
+            label, direction, confidence = "would_annoy", "weak_negative", 0.40
     else:
         label, direction, confidence = "unknown", "unknown", 0.0
         usable = False
