@@ -19,14 +19,9 @@ The capsule is backed by the local harness daemon at `http://127.0.0.1:7893`. It
 - Release after dragging to snap it to the nearest screen edge.
 - Click the pin icon to keep it open.
 - Click the refresh icon inside a panel to refetch that report.
-- Use `Pipeline` and `Diet` tabs to switch views.
+- Use `Pipeline`, `Diet`, and `Settings` tabs to switch views.
 - When a live notification is pending, a `Ping` tab appears with `Yes`, `Later`, and dismiss controls.
-
-Native windows:
-
-- Fish menu → `Open Pipeline Window` opens the native Swift Pipeline view.
-- Fish menu → `Open Diet Window` opens the native Swift Diet view.
-- Fish menu → `Open Dashboard (Web)` opens the browser dashboard at `http://127.0.0.1:7893/dashboard`.
+- The old Harness menubar item has been removed. Settings, snooze, labeler, and dashboard links now live in the floating capsule Settings tab.
 
 ## Why It Sometimes Shows Loading
 
@@ -95,8 +90,8 @@ given current context, should the system ping or stay quiet?
 
 The code models that in three layers:
 
-- `harness/policies/rule_v0.py` is the live gate. It still uses deterministic rules and reason codes, not a learned classifier.
-- `harness/policies/llm_icl_v0.py` is an optional LLM in-context policy learner. It runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible text model to choose `notch_ping` or `no_ping` from current context plus recent labeled examples.
+- `harness/policies/rule_v0.py` is the deterministic safety/baseline gate. It owns hard suppressions such as quiet hours, snooze, calls, sleep/resume boundaries, cooldown, and recent negative feedback.
+- `harness/policies/llm_icl_v0.py` is the default live LLM in-context policy learner. It runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible text model to choose `notch_ping` or `no_ping` from current context plus recent labeled examples.
 - `harness/harness/trainer.py` replays candidate contexts against alternative policy settings and scores them using explicit labels plus confidence-weighted implicit labels.
 
 For labels, the binary interpretation is:
@@ -210,7 +205,6 @@ The Diet tab is not a truth source. It is an instrumentation layer for understan
 Where to see it:
 
 - In the capsule, use the visible `Diet` switch in the header.
-- In the native app, fish menu → `Open Diet Window`.
 - In the browser, open `http://127.0.0.1:7893/dashboard` and click `Diet`.
 
 ## Web Dashboard
@@ -276,7 +270,7 @@ From the repo root:
 cd harness
 .venv/bin/harness status
 .venv/bin/harness eval-report --since 24h
-.venv/bin/harness information-diet --since 24h
+.venv/bin/harness info-diet --since 24h
 ```
 
 Or open the web dashboard:

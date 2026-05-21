@@ -76,7 +76,7 @@ def install(force: bool, build_notch: bool) -> None:
     cfg_path = config_mod.write_default(force=force)
     state = read_policy_state()
     if "active_policy" not in state:
-        state["active_policy"] = "rule_v0"
+        state["active_policy"] = "llm_icl_v0"
     if "muted_intents" not in state:
         state["muted_intents"] = []
     state.setdefault("snoozed_until", None)

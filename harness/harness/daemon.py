@@ -130,7 +130,11 @@ async def run_loop(config: dict) -> None:
     last_push_at_ref: list[Optional[float]] = [None]
 
     app = build_app(fisherman_url=fisherman_url)
-    runner = web.AppRunner(app)
+    # Python 3.14 on macOS can raise OSError(22) when aiohttp enables TCP
+    # keepalive on the transport wrapper. This server is localhost-only and
+    # polled frequently, so disabling socket keepalive avoids noisy callback
+    # errors without changing harness semantics.
+    runner = web.AppRunner(app, tcp_keepalive=False)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", harness_port)
     await site.start()

@@ -19,8 +19,7 @@ enum HarnessNotchMain {
 private func installEditMenu() {
     let mainMenu = NSMenu()
 
-    // App menu (mostly empty, just so the menubar isn't totally bare when
-    // the settings window is key).
+    // Minimal app menu for when the floating capsule owns keyboard focus.
     let appItem = NSMenuItem()
     let appMenu = NSMenu()
     appItem.submenu = appMenu
@@ -45,7 +44,7 @@ private func installEditMenu() {
     editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)),   keyEquivalent: "a")
     mainMenu.addItem(editItem)
 
-    // Window menu — gives Cmd+W close, Cmd+M minimize for the settings window.
+    // Window menu — gives standard window shortcuts when text fields are active.
     let windowItem = NSMenuItem()
     let windowMenu = NSMenu(title: "Window")
     windowItem.submenu = windowMenu
@@ -62,7 +61,6 @@ private func installEditMenu() {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var coordinator: NotchCoordinator?
-    private var menuBar: MenuBarController?
 
     func applicationDidFinishLaunching(_: Notification) {
         let baseURL = ProcessInfo.processInfo.environment["HARNESS_URL"]
@@ -71,10 +69,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let c = NotchCoordinator(baseURL: baseURL)
             c.start()
             self.coordinator = c
-
-            let mb = MenuBarController()
-            mb.install()
-            self.menuBar = mb
         }
     }
 

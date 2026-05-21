@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Expanded content (shown when the harness surface is open)
@@ -48,6 +49,8 @@ struct HarnessExpanded: View {
                     refreshedAt: refreshedAt,
                     refresh: { Task { await refreshActivePanel(force: true) } }
                 )
+            case .settings:
+                SettingsNotchPanel()
             }
         }
         .padding(.horizontal, 18)
@@ -79,7 +82,7 @@ struct HarnessExpanded: View {
                 selected: state.activePanel,
                 select: { state.activePanel = $0 }
             )
-            .frame(width: state.current == nil ? 198 : 282)
+            .frame(width: state.current == nil ? 282 : 360)
 
             Button(action: { state.togglePinHandler?() }) {
                 Image(systemName: state.surfacePinned ? "pin.fill" : "pin")
@@ -94,7 +97,7 @@ struct HarnessExpanded: View {
     }
 
     private var availablePanels: [HarnessNotchPanel] {
-        state.current == nil ? [.pipeline, .diet] : HarnessNotchPanel.allCases
+        state.current == nil ? [.pipeline, .diet, .settings] : HarnessNotchPanel.allCases
     }
 
     private var headerSubtitle: String {
@@ -175,6 +178,8 @@ struct HarnessExpanded: View {
             if diet == nil { loadError = "Diet data unavailable" }
             refreshedAt = Date()
             loadingPanel = nil
+        case .settings:
+            return
         }
     }
 }
@@ -315,6 +320,299 @@ private struct PipelineNotchPanel: View {
 
     private var exampleRows: [[String: Any]] {
         (eval?["examples"].list ?? []).compactMap { $0 as? [String: Any] }
+    }
+}
+
+private struct SettingsNotchPanel: View {
+    @StateObject private var model = SettingsModel()
+    @State private var loading = true
+    @State private var saving = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            panelToolbar(title: "Settings", detail: detailText, loading: loading || saving, refresh: {
+                Task { await refresh() }
+            })
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    SettingsBand(title: "Today") {
+                        TextEditor(text: $model.dailyGoal)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .scrollContentBackground(.hidden)
+                            .padding(8)
+                            .frame(minHeight: 74, maxHeight: 94)
+                            .background(NotchInputBackground())
+
+                        HStack(spacing: 6) {
+                            ForEach(["gentle", "balanced", "responsive"], id: \.self) { value in
+                                SettingsChip(
+                                    title: value.capitalized,
+                                    selected: model.sensitivity == value,
+                                    action: { model.sensitivity = value }
+                                )
+                            }
+                        }
+                    }
+
+                    SettingsBand(title: "Policy") {
+                        HStack(spacing: 8) {
+                            SettingsChip(
+                                title: "LLM learner",
+                                selected: model.activePolicy == "llm_icl_v0" && model.policyLearnerEnabled,
+                                action: {
+                                    model.activePolicy = "llm_icl_v0"
+                                    model.policyLearnerEnabled = true
+                                }
+                            )
+                            SettingsChip(
+                                title: "Rule baseline",
+                                selected: model.activePolicy == "rule_v0",
+                                action: {
+                                    model.activePolicy = "rule_v0"
+                                    model.policyLearnerEnabled = false
+                                }
+                            )
+                            Spacer(minLength: 8)
+                            NotchMutedText(model.activePolicy)
+                        }
+
+                        SettingsSlider(
+                            title: "Explore ping rate",
+                            value: $model.explorePingRate,
+                            range: 0...0.12,
+                            step: 0.01,
+                            format: { "\(Int($0 * 100))%" }
+                        )
+                        SettingsSlider(
+                            title: "Min confidence to ping",
+                            value: $model.policyLearnerMinConfidence,
+                            range: 0.35...0.90,
+                            step: 0.05,
+                            format: { "\(Int($0 * 100))%" }
+                        )
+                    }
+
+                    SettingsBand(title: "Learner endpoint") {
+                        SettingsTextField(title: "Base URL", text: $model.policyLearnerBaseURL)
+                        SettingsTextField(title: "Model", text: $model.policyLearnerModel)
+                        SettingsTextField(title: "API key", text: $model.policyLearnerApiKey)
+                        HStack(spacing: 10) {
+                            Stepper("Examples \(model.policyLearnerMaxExamples)", value: $model.policyLearnerMaxExamples, in: 0...64, step: 2)
+                            Stepper("Call gap \(model.policyLearnerMinInterval)s", value: $model.policyLearnerMinInterval, in: 0...120, step: 5)
+                        }
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.72))
+                    }
+
+                    SettingsBand(title: "Message model") {
+                        SettingsTextField(title: "Base URL", text: $model.realizerBaseURL)
+                        SettingsTextField(title: "Model", text: $model.realizerModel)
+                        SettingsTextField(title: "API key", text: $model.realizerApiKey)
+                        HStack(spacing: 8) {
+                            SettingsToggle(title: "Vision", isOn: $model.includeVision)
+                            SettingsToggle(title: "Secret OCR guard", isOn: $model.skipVisionOnSensitiveOCR)
+                            SettingsToggle(title: "Screenshot redaction", isOn: $model.redactSensitiveScreenshots)
+                        }
+                    }
+
+                    SettingsBand(title: "Scene reader") {
+                        HStack(spacing: 8) {
+                            SettingsToggle(title: "Enabled", isOn: $model.vlmEnabled)
+                            SettingsTextField(title: "Model", text: $model.vlmModel)
+                        }
+                        SettingsTextField(title: "Base URL", text: $model.vlmBaseURL)
+                        SettingsTextField(title: "API key", text: $model.vlmApiKey)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button(saving ? "Saving..." : "Save") {
+                            Task { await save() }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(saving || loading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Color(hex: 0xE8D8A8)))
+                        .foregroundStyle(Color(hex: 0x1a1408))
+
+                        Button("Labeler") { openLocal("/label") }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+
+                        Button("Dashboard") { openLocal("/dashboard") }
+                            .buttonStyle(.plain)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+
+                        Button("Snooze 30m") {
+                            Task {
+                                await HarnessAPI.snooze(duration: "30m")
+                                await refresh()
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Color.white.opacity(0.08)))
+
+                        Spacer()
+                    }
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                }
+                .padding(.trailing, 6)
+            }
+            .frame(height: 492)
+        }
+        .task { await refresh() }
+    }
+
+    private var detailText: String {
+        if saving { return "saving config" }
+        if loading { return "loading config" }
+        return model.statusLine.isEmpty ? "LLM ICL policy controls" : model.statusLine
+    }
+
+    private func refresh() async {
+        loading = true
+        await model.refresh()
+        loading = false
+    }
+
+    private func save() async {
+        saving = true
+        if model.activePolicy == "llm_icl_v0" {
+            model.policyLearnerEnabled = true
+            if model.policyLearnerBaseURL.isEmpty { model.policyLearnerBaseURL = model.realizerBaseURL }
+            if model.policyLearnerModel.isEmpty { model.policyLearnerModel = model.realizerModel }
+            if model.policyLearnerApiKey.isEmpty { model.policyLearnerApiKey = model.realizerApiKey }
+        }
+        await HarnessAPI.setGoal(model.dailyGoal, sensitivity: model.sensitivity)
+        await model.save()
+        await model.refresh()
+        saving = false
+    }
+
+    private func openLocal(_ path: String) {
+        if let url = URL(string: "http://127.0.0.1:7893\(path)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+private struct SettingsBand<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title.uppercased())
+                .font(.system(size: 8.8, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.44))
+            content()
+        }
+        .padding(10)
+        .background(NotchCardBackground())
+    }
+}
+
+private struct SettingsChip: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11.2, weight: .semibold))
+                .foregroundStyle(selected ? Color(hex: 0x1a1408) : .white.opacity(0.74))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(selected ? Color(hex: 0xE8D8A8) : Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SettingsSlider: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let format: (Double) -> String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.68))
+                .frame(width: 150, alignment: .leading)
+            Slider(value: $value, in: range, step: step)
+            Text(format(value))
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color(hex: 0xE8D8A8))
+                .frame(width: 42, alignment: .trailing)
+        }
+    }
+}
+
+private struct SettingsTextField: View {
+    let title: String
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.58))
+                .frame(width: 70, alignment: .leading)
+            TextField("", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.88))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(NotchInputBackground())
+        }
+    }
+}
+
+private struct SettingsToggle: View {
+    let title: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button(action: { isOn.toggle() }) {
+            HStack(spacing: 6) {
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 11, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 10.8, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            .foregroundStyle(isOn ? Color(hex: 0xE8D8A8) : .white.opacity(0.60))
+            .padding(.horizontal, 9)
+            .frame(height: 30)
+            .background(Capsule().fill(Color.white.opacity(0.07)))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct NotchInputBackground: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(Color.white.opacity(0.07))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.10), lineWidth: 0.5)
+            )
     }
 }
 

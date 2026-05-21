@@ -13,6 +13,11 @@ private enum SurfaceSide: String {
     case right
 }
 
+final class HarnessFloatingPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
 @MainActor
 final class NotchCoordinator {
     private let client: HarnessClient
@@ -88,9 +93,9 @@ final class NotchCoordinator {
         let host = NSHostingView(rootView: view)
         hostingView = host
 
-        let panel = NSPanel(
+        let panel = HarnessFloatingPanel(
             contentRect: frameForCurrentState(),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
@@ -168,6 +173,8 @@ final class NotchCoordinator {
             return CGSize(width: 780, height: 384)
         case .diet:
             return CGSize(width: 780, height: 418)
+        case .settings:
+            return CGSize(width: 780, height: 618)
         }
     }
 

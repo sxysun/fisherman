@@ -18,7 +18,7 @@ http_port = 7893
 fisherman_url = "http://localhost:7892"
 
 [gate]
-active_policy = "rule_v0"
+active_policy = "llm_icl_v0"
 cooldown_min = 5
 negative_feedback_backoff_min = 15
 resume_suppression_sec = 90
@@ -29,12 +29,12 @@ frequency = "medium"
 [experiment]
 # Deterministic live assignment for counterfactual measurement. Holdout is
 # safe: a small fraction of would-ping decisions are intentionally silent and
-# logged with counterfactual_action="notch_ping". Exploration pings are
-# supported but default to 0 because random interruptions should be explicit.
+# logged with counterfactual_action="notch_ping". Exploration pings stay low,
+# but nonzero, so the harness can learn when it is being too timid.
 enabled = true
 salt = "local_v1"
 holdout_rate = 0.02
-explore_ping_rate = 0.0
+explore_ping_rate = 0.03
 respect_hard_gates = true
 explore_eligible_reasons = ["no_clear_help"]
 
@@ -50,10 +50,9 @@ min_implicit_usable = 20
 min_explicit_labels = 0
 
 [policy_learner]
-# Optional LLM in-context policy. To use it live, set [gate].active_policy to
-# "llm_icl_v0" and enabled=true. rule_v0 still runs first for hard safety gates
-# and fallback.
-enabled = false
+# LLM in-context policy. rule_v0 still runs first for hard safety gates and
+# fallback; the model only chooses ping/not-ping after those guardrails pass.
+enabled = true
 base_url = "http://3.82.134.133:8642"
 model = "hermes-agent"
 api_key = ""

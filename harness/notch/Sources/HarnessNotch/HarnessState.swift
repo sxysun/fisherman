@@ -5,6 +5,7 @@ enum HarnessNotchPanel: String, CaseIterable, Identifiable {
     case ping = "Ping"
     case pipeline = "Pipeline"
     case diet = "Diet"
+    case settings = "Settings"
 
     var id: String { rawValue }
 }

@@ -15,7 +15,7 @@ The user wanted this to:
 2. Surface information that helps the current task (silent research, open threads, focus drift)
 3. Never feel ad-hoc or "AI-assistant warm" — terse, direct, like a colleague
 
-The harness produces **traces**: structured logs of (state, decision, message, outcome) per tick. These traces are RL-friendly and will eventually train a learned gate. For now the gate is a small rule policy.
+The harness produces **traces**: structured logs of (state, decision, message, outcome) per tick. These traces are RL-friendly. The current live policy is an LLM in-context binary classifier (`llm_icl_v0`) guarded by the deterministic `rule_v0` safety baseline.
 
 ---
 
@@ -40,9 +40,9 @@ The harness produces **traces**: structured logs of (state, decision, message, o
                               │  google/gemma-3-4b  │    │  HarnessNotch    │
                               │  per-candidate VLM  │    │  (Swift, native) │
                               │  scene tagger       │    │                  │
-                              └─────────────────────┘    │  notch pill +    │
-                                                         │  menubar item +  │
-                                  HTTPS to user's EC2    │  Settings window │
+                              └─────────────────────┘    │  floating pill + │
+                                                         │  capsule tabs    │
+                                  HTTPS to user's EC2    │  Settings/Diet   │
                               ┌─────────────────────┐    │                  │
                               │  hermes-agent       │◀───┤  uses Dynamic-   │
                               │  (their LLM)        │    │  NotchKit (same  │
@@ -92,7 +92,7 @@ harness/
 │
 ├── policies/
 │   ├── rule_v0.py                deterministic safety/baseline policy
-│   └── llm_icl_v0.py             optional LLM ICL ping/not-ping policy learner
+│   └── llm_icl_v0.py             default LLM ICL ping/not-ping policy learner
 │
 ├── prompts/
 │   ├── realizer/goal_aware_v1.md ONLY realizer prompt. Goal-driven.
@@ -109,7 +109,6 @@ harness/
 │   ├── Sources/HarnessNotch/
 │   │   ├── App.swift             entry; installs Edit menu (for Cmd+C/V/X/A in
 │   │   │                          .accessory app — non-obvious requirement)
-│   │   ├── MenuBarController     menubar icon + Settings/Labeler/Snooze/Quit
 │   │   ├── NotchCoordinator      polls /pending, drives DynamicNotch.expand/hide,
 │   │   │                          tracks mouse approach + hover events
 │   │   ├── NotchWindow           (now obsolete after DynamicNotchKit refactor —
@@ -117,9 +116,7 @@ harness/
 │   │   ├── HarnessExpanded.swift expanded pill content (status dot + msg + buttons)
 │   │   ├── HarnessClient.swift   minimal client for /pending + /outcome
 │   │   ├── HarnessAPI.swift      richer client for settings: config/data/goal
-│   │   ├── SettingsView          tabbed settings (Today / Status / Behavior / Model
-│   │   │                          / Scene Reader / Diagnostics)
-│   │   ├── SettingsModel         ObservableObject bridging HTTP ↔ form state
+│   │   ├── SettingsModel         ObservableObject bridging HTTP ↔ capsule settings
 │   │   └── HarnessState.swift    ObservedObject for the live notch pill
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
@@ -169,9 +166,9 @@ cd ~/Desktop/suapp/fisherman/harness
 ```
 
 User flow once it's running:
-1. Click the fish icon in the menu bar → Open Settings
-2. **Today** tab → write what you're trying to do, pick sensitivity
-3. Let the harness run; pings appear in the notch when conditions match
+1. Hover the Harness floating capsule → Settings
+2. Write what you're trying to do, pick sensitivity/policy, save
+3. Let the harness run; pings appear in the floating capsule when conditions match
 4. Click [Yes] / [Later] / [×] on the pill, or just ignore
 5. Periodically: `harness label` → open browser, drag the scrubber, label past decisions
 6. Weekly: `harness collect`, `harness replay`, `harness score` to compare policies
@@ -193,7 +190,7 @@ User flow once it's running:
    Together: VLM can compensate when Fisherman's frontmost_app metadata is stale
 
 ✅ Goal-driven model
-   - Daily goal field in Today tab
+   - Daily goal field in the floating capsule Settings tab
    - Sensitivity (gentle/balanced/responsive) → cooldown_min mapping
    - Single goal_aware_v1.md prompt; no fixed intent catalog
    - reason_codes from gate flow directly to the realizer
@@ -208,9 +205,10 @@ User flow once it's running:
      so a brief brush over Dismiss no longer overrides a longer Later/Yes hover
    - Replaces the ad-hoc 3/-5/-8/-1 weights
 
-✅ Native settings UI
+✅ Floating capsule settings UI
    - DynamicNotchKit-based pill matches FishermanMenu aesthetic
-   - Menubar item with Settings / Labeler / Snooze / Quit
+   - Harness menubar item removed; settings, labeler, dashboard, and snooze
+     controls live in the floating capsule
    - Edit menu installed (Cmd+C/V/X/A work despite .accessory policy)
    - SecureField swapped to TextField (avoids Passwords prompt + paste-block)
 
@@ -240,7 +238,7 @@ User flow once it's running:
    - `harness eval-report --since 7d` includes intervention taxonomy,
      binary policy calibration, and compact non-green examples
    - `/metrics?window=24h` exposes the same JSON from the daemon
-   - Native Settings -> Status now shows the live lab counters and label
+   - Capsule Pipeline tab now shows the live lab counters and label
      readiness, so the user can tell whether the harness is learning or only
      collecting sparse anecdotes
 
@@ -255,10 +253,10 @@ User flow once it's running:
    - `[experiment]` config is merged into old local configs automatically
    - 2% default holdout suppresses a small fraction of would-ping decisions
      and logs `counterfactual_action="notch_ping"`
-   - Exploration pings are implemented and logged but default to 0 because
-     random interruptions should be explicitly opted into
-   - Settings -> Behavior exposes enabled, salt, holdout rate, and exploration
-     rate
+   - Exploration pings default to 3% on eligible ambiguous moments, enough to
+     learn without making random interruption the dominant behavior
+   - Capsule Settings exposes the live policy choice, holdout, confidence, and
+     exploration rate
 
 ✅ Outcome capture rich enough for RL
    - Per outcome: clicked/dismissed/snoozed/timed_out
@@ -280,7 +278,8 @@ User flow once it's running:
    - `[privacy]` config has an allowlist for model hosts
    - Realizer, scene VLM, and LLM critic block untrusted endpoints before
      fetching screenshots or making network calls
-   - Settings -> Model exposes the block toggle and allowed-host list
+   - Capsule Settings exposes model endpoints and API keys for the learner,
+     realizer, and scene reader
 
 ✅ Model-call audit ledger
    - `~/.harness/model_calls.jsonl` records realizer, scene VLM, and LLM critic

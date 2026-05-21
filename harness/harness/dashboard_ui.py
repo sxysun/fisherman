@@ -22,7 +22,7 @@ from aiohttp import web
 
 from . import config as config_mod
 from . import sql_store
-from .store import HARNESS_DIR, iter_jsonl
+from .store import HARNESS_DIR, iter_jsonl, read_policy_state, write_policy_state
 
 
 CONFIG_PATH = HARNESS_DIR / "config.toml"
@@ -1041,6 +1041,12 @@ async def post_dashboard_config(request: web.Request) -> web.Response:
         tmp = CONFIG_PATH.with_suffix(".toml.tmp")
         tmp.write_text(toml_text)
         os.replace(tmp, CONFIG_PATH)
+        gate_cfg = body.get("gate") if isinstance(body.get("gate"), dict) else {}
+        active_policy = gate_cfg.get("active_policy")
+        if active_policy in {"rule_v0", "llm_icl_v0"}:
+            state = read_policy_state()
+            state["active_policy"] = active_policy
+            write_policy_state(state)
         return web.json_response({"ok": True})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)

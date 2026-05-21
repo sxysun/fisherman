@@ -24,9 +24,9 @@ cd notch && ./build.sh && cd ..
 # Optional: install as a restartable LaunchAgent
 .venv/bin/harness install-launchd
 
-# Click the 🐟 in the menu bar → Open Settings → Today
-# Write what you're trying to do today. Set sensitivity.
-# Pings will appear in the notch.
+# Hover the Harness floating capsule → Settings.
+# Write what you're trying to do today, set sensitivity, and save.
+# Pings will appear in the floating capsule.
 
 # Force a test ping (skips the gate, calls the LLM directly)
 .venv/bin/harness test --intent focus_nudge --push
@@ -37,7 +37,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a binary gate that returns `{action, reason_codes, why_now}`, then applies deterministic experiment assignment. The default gate is `rule_v0`; the optional `llm_icl_v0` policy runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from the current context plus recent explicit/implicit examples. Low-rate holdouts are logged for counterfactual measurement; exploration pings are available but default to 0. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift notch app claims the pending payload via HTTP polling and renders a pill; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, and the eval report prefer indexed read paths where available.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter, smart-triggered for ~$1/mo), runs a binary gate that returns `{action, reason_codes, why_now}`, then applies deterministic experiment assignment. The default live policy is `llm_icl_v0`: it runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from the current context plus recent explicit/implicit examples. Low-rate holdouts are logged for counterfactual measurement; exploration pings default to 3% on eligible ambiguous moments so the harness can learn when it is too timid without becoming noisy. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift floating capsule claims the pending payload via HTTP polling and renders it; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, and the eval report prefer indexed read paths where available.
 
 ## Configuration
 
@@ -50,17 +50,17 @@ http_port = 7893
 fisherman_url = "http://localhost:7892"
 
 [gate]
-active_policy = "rule_v0"
+active_policy = "llm_icl_v0"
 cooldown_min = 5
 negative_feedback_backoff_min = 15
 
 [experiment]
 enabled = true
 holdout_rate = 0.02                      # safe counterfactuals
-explore_ping_rate = 0.0                   # opt-in random pings
+explore_ping_rate = 0.03                  # low-rate exploration on eligible ambiguous moments
 
 [policy_learner]                         # used when active_policy="llm_icl_v0"
-enabled = false
+enabled = true
 base_url = "http://3.82.134.133:8642"
 model = "hermes-agent"
 max_examples = 16

@@ -23,7 +23,7 @@ final class SettingsModel: ObservableObject {
     // Settings, deep-copied from /dashboard/config on refresh, edited in place
     @Published var pollInterval: Int = 5
     @Published var fishermanURL: String = "http://localhost:7892"
-    @Published var activePolicy: String = "rule_v0"
+    @Published var activePolicy: String = "llm_icl_v0"
     @Published var cooldownMin: Double = 5
     @Published var negativeFeedbackBackoffMin: Double = 15
     @Published var quietStart: Int = 22
@@ -31,9 +31,9 @@ final class SettingsModel: ObservableObject {
     @Published var experimentEnabled: Bool = true
     @Published var experimentSalt: String = "local_v1"
     @Published var holdoutRate: Double = 0.02
-    @Published var explorePingRate: Double = 0.0
+    @Published var explorePingRate: Double = 0.03
 
-    @Published var policyLearnerEnabled: Bool = false
+    @Published var policyLearnerEnabled: Bool = true
     @Published var policyLearnerBaseURL: String = "http://3.82.134.133:8642"
     @Published var policyLearnerModel: String = "hermes-agent"
     @Published var policyLearnerApiKey: String = ""
@@ -430,7 +430,7 @@ final class SettingsModel: ObservableObject {
         if ok {
             rawConfig = c
             dirty = false
-            statusLine = "saved · restart daemon to apply"
+            statusLine = "saved · policy active, restart daemon for endpoint changes"
         } else {
             statusLine = "save failed"
         }
