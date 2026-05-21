@@ -26,6 +26,9 @@ final class NotchCoordinator {
     private var panel: NSPanel?
     private var hostingView: NSHostingView<HarnessFloatingSurface>?
     private var pollTimer: Timer?
+    private var visibilityTimer: Timer?
+    private var spaceObserver: Any?
+    private var screenObserver: Any?
     private var collapseTask: Task<Void, Never>?
 
     private var surfaceSide: SurfaceSide
@@ -72,6 +75,7 @@ final class NotchCoordinator {
 
     func start() {
         showPanel()
+        startSurfaceVisibilityWatchdog()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -79,6 +83,7 @@ final class NotchCoordinator {
 
     func stop() {
         pollTimer?.invalidate()
+        stopSurfaceVisibilityWatchdog()
         collapseTask?.cancel()
         autoDismissTask?.cancel()
         stopMouseTracking()
@@ -97,7 +102,7 @@ final class NotchCoordinator {
 
         let panel = HarnessFloatingPanel(
             contentRect: initialFrame,
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless],
             backing: .buffered,
             defer: false
         )
@@ -105,13 +110,84 @@ final class NotchCoordinator {
         panel.hasShadow = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
+        self.panel = panel
+        configurePersistentSurface(panel)
+        ensureSurfaceVisible(repositionIfNeeded: true)
+    }
+
+    private func configurePersistentSurface(_ panel: NSPanel) {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.level = .floating
-        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .stationary,
+            .ignoresCycle,
+        ]
+    }
+
+    private func startSurfaceVisibilityWatchdog() {
+        stopSurfaceVisibilityWatchdog()
+        visibilityTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.ensureSurfaceVisible(repositionIfNeeded: false) }
+        }
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.ensureSurfaceVisible(repositionIfNeeded: false) }
+        }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.ensureSurfaceVisible(repositionIfNeeded: true) }
+        }
+    }
+
+    private func stopSurfaceVisibilityWatchdog() {
+        visibilityTimer?.invalidate()
+        visibilityTimer = nil
+        if let spaceObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver)
+            self.spaceObserver = nil
+        }
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+            self.screenObserver = nil
+        }
+    }
+
+    private func ensureSurfaceVisible(repositionIfNeeded: Bool) {
+        guard let panel else {
+            showPanel()
+            return
+        }
+        let size = currentSurfaceSize()
+        hostingView?.frame = NSRect(origin: .zero, size: size)
+        configurePersistentSurface(panel)
+
+        let screen = screenForPanel() ?? primaryScreen()
+        let frame = panel.frame
+        let sizeChanged = abs(frame.width - size.width) > 1 || abs(frame.height - size.height) > 1
+        if repositionIfNeeded || sizeChanged || !hasUsableVisibleArea(frame, on: screen) {
+            let next = hasUsableVisibleArea(frame, on: screen)
+                ? clampedFrame(NSRect(origin: frame.origin, size: size), screen: screen)
+                : frameForCurrentState()
+            panel.setFrame(next, display: true, animate: false)
+        }
         panel.setIsVisible(true)
         panel.orderFrontRegardless()
-        self.panel = panel
+    }
+
+    private func hasUsableVisibleArea(_ frame: NSRect, on screen: NSScreen?) -> Bool {
+        let visible = screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? frame
+        let intersection = frame.intersection(visible)
+        return intersection.width >= min(64, frame.width * 0.5)
+            && intersection.height >= min(24, frame.height * 0.5)
     }
 
     private func setSurfaceExpanded(_ expanded: Bool) {

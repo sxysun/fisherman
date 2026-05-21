@@ -498,7 +498,7 @@ private struct SettingsNotchPanel: View {
 
     private func refresh() async {
         loading = true
-        await model.refresh()
+        await model.refreshSettings()
         loading = false
     }
 
@@ -512,7 +512,7 @@ private struct SettingsNotchPanel: View {
         }
         await HarnessAPI.setGoal(model.dailyGoal, sensitivity: model.sensitivity)
         await model.save()
-        await model.refresh()
+        await model.refreshSettings()
         saving = false
     }
 

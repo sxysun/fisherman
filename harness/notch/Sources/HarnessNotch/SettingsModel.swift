@@ -153,12 +153,7 @@ final class SettingsModel: ObservableObject {
         self.informationDietData = dietData
         self.rawConfig = config
         if let p = policy {
-            self.snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
-            self.intentsMuted = Set(p["muted_intents"].list.compactMap { $0 as? String })
-            self.dailyGoal = p["daily_goal"].string
-            let s = p["sensitivity"].string
-            self.sensitivity = s.isEmpty ? "balanced" : s
-            self.goalSetAt = p["goal_set_at"].string.isEmpty ? nil : p["goal_set_at"].string
+            applyPolicyState(p)
         }
         if let c = config {
             applyConfig(c)
@@ -173,6 +168,23 @@ final class SettingsModel: ObservableObject {
         let implicitUsable = implicit?["summary"]["usable"].int ?? 0
         self.statusLine = "daemon ok · \(data?["n_candidates"].int ?? 0) candidates / \(data?["n_decisions"].int ?? 0) decisions · \(labelCount) labels · \(implicitUsable) implicit"
         self.dirty = false
+    }
+
+    func refreshSettings() async {
+        async let c = HarnessAPI.fetchConfig()
+        async let p = HarnessAPI.fetchPolicyState()
+        let (config, policy) = await (c, p)
+        rawConfig = config
+        if let p = policy {
+            applyPolicyState(p)
+        }
+        if let c = config {
+            applyConfig(c)
+        }
+        let statusPolicy = activePolicy.isEmpty ? "unknown" : activePolicy
+        let goalState = dailyGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "no goal" : "goal set"
+        statusLine = "ready · \(statusPolicy) · \(goalState)"
+        dirty = false
     }
 
     func refreshImplicit() async {
@@ -341,6 +353,15 @@ final class SettingsModel: ObservableObject {
 
         intentsEnabled = Set(c["intents"]["enabled"].list.compactMap { $0 as? String })
         dirty = false
+    }
+
+    private func applyPolicyState(_ p: JSON) {
+        snoozedUntil = p["snoozed_until"].string.isEmpty ? nil : p["snoozed_until"].string
+        intentsMuted = Set(p["muted_intents"].list.compactMap { $0 as? String })
+        dailyGoal = p["daily_goal"].string
+        let s = p["sensitivity"].string
+        sensitivity = s.isEmpty ? "balanced" : s
+        goalSetAt = p["goal_set_at"].string.isEmpty ? nil : p["goal_set_at"].string
     }
 
     private func applyImplicit(_ implicit: JSON?) {
