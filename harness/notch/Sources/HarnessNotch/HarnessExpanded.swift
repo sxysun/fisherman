@@ -415,7 +415,7 @@ private struct SettingsNotchPanel: View {
                     SettingsBand(title: "Learner endpoint") {
                         SettingsTextField(title: "Base URL", text: $model.policyLearnerBaseURL)
                         SettingsTextField(title: "Model", text: $model.policyLearnerModel)
-                        SettingsTextField(title: "API key", text: $model.policyLearnerApiKey)
+                        SettingsSecretField(title: "API key", text: $model.policyLearnerApiKey)
                         HStack(spacing: 10) {
                             Stepper("Examples \(model.policyLearnerMaxExamples)", value: $model.policyLearnerMaxExamples, in: 0...64, step: 2)
                             Stepper("Call gap \(model.policyLearnerMinInterval)s", value: $model.policyLearnerMinInterval, in: 0...120, step: 5)
@@ -427,7 +427,7 @@ private struct SettingsNotchPanel: View {
                     SettingsBand(title: "Message model") {
                         SettingsTextField(title: "Base URL", text: $model.realizerBaseURL)
                         SettingsTextField(title: "Model", text: $model.realizerModel)
-                        SettingsTextField(title: "API key", text: $model.realizerApiKey)
+                        SettingsSecretField(title: "API key", text: $model.realizerApiKey)
                         HStack(spacing: 8) {
                             SettingsToggle(title: "Vision", isOn: $model.includeVision)
                             SettingsToggle(title: "Secret OCR guard", isOn: $model.skipVisionOnSensitiveOCR)
@@ -441,7 +441,7 @@ private struct SettingsNotchPanel: View {
                             SettingsTextField(title: "Model", text: $model.vlmModel)
                         }
                         SettingsTextField(title: "Base URL", text: $model.vlmBaseURL)
-                        SettingsTextField(title: "API key", text: $model.vlmApiKey)
+                        SettingsSecretField(title: "API key", text: $model.vlmApiKey)
                     }
 
                     HStack(spacing: 8) {
@@ -597,6 +597,114 @@ private struct SettingsTextField: View {
                 .padding(.vertical, 7)
                 .background(NotchInputBackground())
         }
+    }
+}
+
+private struct SettingsSecretField: View {
+    let title: String
+    @Binding var text: String
+    @State private var editing = false
+    @State private var draft = ""
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.58))
+                .frame(width: 70, alignment: .leading)
+
+            if editing {
+                TextField("", text: $draft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .background(NotchInputBackground())
+
+                SettingsIconButton(systemName: "checkmark", help: "Apply API key") {
+                    text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    draft = text
+                    editing = false
+                }
+                SettingsIconButton(systemName: "xmark", help: "Cancel editing") {
+                    draft = text
+                    editing = false
+                }
+            } else {
+                HStack(spacing: 2) {
+                    secretPreview
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(NotchInputBackground())
+
+                SettingsIconButton(systemName: "pencil", help: "Edit API key") {
+                    draft = text
+                    editing = true
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var secretPreview: some View {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty {
+            Text("not set")
+                .font(.system(size: 11.5, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.38))
+        } else {
+            let parts = previewParts(for: value)
+            Text(parts.prefix)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.84))
+            Text(parts.mask)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.46))
+                .blur(radius: 1.2)
+            Text(parts.suffix)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Color(hex: 0xE8D8A8).opacity(0.88))
+        }
+    }
+
+    private func previewParts(for value: String) -> (prefix: String, mask: String, suffix: String) {
+        if value.count <= 10 {
+            let suffixCount = min(2, value.count)
+            let suffix = String(value.suffix(suffixCount))
+            let maskCount = max(4, value.count - suffixCount)
+            return ("", String(repeating: "*", count: maskCount), suffix)
+        }
+
+        let prefixCount = min(6, max(0, value.count - 4))
+        let suffixCount = min(4, max(0, value.count - prefixCount))
+        let hiddenCount = max(4, min(14, value.count - prefixCount - suffixCount))
+        return (
+            String(value.prefix(prefixCount)),
+            String(repeating: "*", count: hiddenCount),
+            String(value.suffix(suffixCount))
+        )
+    }
+}
+
+private struct SettingsIconButton: View {
+    let systemName: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.72))
+                .frame(width: 28, height: 28)
+                .background(Capsule().fill(Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 }
 
