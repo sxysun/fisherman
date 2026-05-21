@@ -75,17 +75,13 @@ struct HarnessExpanded: View {
             .help("Drag to move the harness capsule")
 
             Spacer(minLength: 12)
-            Picker("", selection: Binding(
-                get: { state.activePanel },
-                set: { state.activePanel = $0 }
-            )) {
-                ForEach(availablePanels) { panel in
-                    Text(panel.rawValue).tag(panel)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: state.current == nil ? 190 : 270)
+
+            HarnessPanelSwitcher(
+                panels: availablePanels,
+                selected: state.activePanel,
+                select: { state.activePanel = $0 }
+            )
+            .frame(width: state.current == nil ? 198 : 282)
 
             Button(action: { state.togglePinHandler?() }) {
                 Image(systemName: state.surfacePinned ? "pin.fill" : "pin")
@@ -187,6 +183,35 @@ struct HarnessExpanded: View {
     }
 }
 
+private struct HarnessPanelSwitcher: View {
+    let panels: [HarnessNotchPanel]
+    let selected: HarnessNotchPanel
+    let select: (HarnessNotchPanel) -> Void
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(panels) { panel in
+                Button(action: { select(panel) }) {
+                    Text(panel.rawValue)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(panel == selected ? Color(hex: 0x1a1408) : .white.opacity(0.68))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 24)
+                        .background(
+                            Capsule()
+                                .fill(panel == selected ? Color(hex: 0xE8D8A8) : Color.white.opacity(0.075))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Show \(panel.rawValue)")
+            }
+        }
+        .padding(3)
+        .background(Capsule().fill(Color.white.opacity(0.055)))
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.5))
+    }
+}
+
 struct HarnessFloatingSurface: View {
     @ObservedObject var state: HarnessState
 
@@ -252,6 +277,7 @@ private struct PipelineNotchPanel: View {
     var body: some View {
         let evalData = eval?["data"]
         let preds = next?["predictions"]
+        let nPings = evalData?["n_pings"].int ?? 0
         VStack(alignment: .leading, spacing: 12) {
             panelToolbar(title: "Pipeline and eval", detail: updatedText, loading: loading, refresh: refresh)
             NotchRail(stages: [
@@ -264,10 +290,14 @@ private struct PipelineNotchPanel: View {
             ])
 
             HStack(spacing: 8) {
-                NotchMetric(label: "claimed capture", value: notchPct(evalData?["outcome_capture_rate_for_claimed_pings"]))
+                NotchMetric(label: "claimed capture", value: nPings == 0 ? "no pings" : notchPct(evalData?["outcome_capture_rate_for_claimed_pings"]))
                 NotchMetric(label: "implicit usable", value: "\(evalData?["n_implicit_usable"].int ?? 0)")
                 NotchMetric(label: "top-1 next", value: notchPct(preds?["accuracy_top1"]))
                 NotchMetric(label: "unknown", value: notchPct(preds?["unknown_rate"]))
+            }
+
+            if nPings == 0 {
+                NotchBanner("No pings were delivered in this 24h window, so ping capture, implicit ping labels, and recent ping examples are empty.")
             }
 
             HStack(alignment: .top, spacing: 10) {
@@ -280,7 +310,7 @@ private struct PipelineNotchPanel: View {
                             NotchExampleRow(row: row)
                         }
                         if exampleRows.isEmpty {
-                            NotchMutedText(error ?? "No non-green examples in this window.")
+                            NotchMutedText(error ?? (nPings == 0 ? "No ping examples because Ping/Claim are 0 in this window." : "No non-green examples in this window."))
                         }
                     }
                 }
@@ -540,6 +570,27 @@ private struct NotchMutedText: View {
             .font(.system(size: 10.5, design: .monospaced))
             .foregroundStyle(.white.opacity(0.36))
             .lineLimit(2)
+    }
+}
+
+private struct NotchBanner: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color(hex: 0xE8D8A8).opacity(0.9))
+            Text(text)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.white.opacity(0.55))
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(NotchCardBackground())
     }
 }
 

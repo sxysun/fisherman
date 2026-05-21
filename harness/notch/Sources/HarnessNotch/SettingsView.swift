@@ -6,6 +6,10 @@ struct SettingsRoot: View {
     @StateObject var model = SettingsModel()
     @State var selectedTab: SettingsTab = .today
 
+    init(initialTab: SettingsTab = .today) {
+        _selectedTab = State(initialValue: initialTab)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             TabBar(selected: $selectedTab)

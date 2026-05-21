@@ -6,6 +6,7 @@ import SwiftUI
 final class MenuBarController: NSObject, NSWindowDelegate {
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
+    private var settingsTab: SettingsTab = .today
 
     func install() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -20,6 +21,16 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             title: "Open Settings…",
             action: #selector(openSettings),
             keyEquivalent: ","
+        ).withTarget(self))
+        menu.addItem(NSMenuItem(
+            title: "Open Pipeline Window",
+            action: #selector(openPipelineWindow),
+            keyEquivalent: "p"
+        ).withTarget(self))
+        menu.addItem(NSMenuItem(
+            title: "Open Diet Window",
+            action: #selector(openDietWindow),
+            keyEquivalent: "i"
         ).withTarget(self))
         menu.addItem(NSMenuItem(
             title: "Open Retro Labeler (Web)",
@@ -53,10 +64,26 @@ final class MenuBarController: NSObject, NSWindowDelegate {
     }
 
     @objc func openSettings() {
-        if let w = settingsWindow {
+        openSettingsWindow(tab: .today, title: "Harness Settings")
+    }
+
+    @objc func openPipelineWindow() {
+        openSettingsWindow(tab: .pipeline, title: "Harness Pipeline")
+    }
+
+    @objc func openDietWindow() {
+        openSettingsWindow(tab: .diet, title: "Harness Diet")
+    }
+
+    private func openSettingsWindow(tab: SettingsTab, title: String) {
+        if let w = settingsWindow, settingsTab == tab {
             w.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
+        }
+        if let w = settingsWindow {
+            w.close()
+            settingsWindow = nil
         }
         let w = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 640),
@@ -64,11 +91,12 @@ final class MenuBarController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        w.title = "Harness Settings"
+        w.title = title
         w.center()
         w.delegate = self
-        w.contentView = NSHostingView(rootView: SettingsRoot())
+        w.contentView = NSHostingView(rootView: SettingsRoot(initialTab: tab))
         w.isReleasedWhenClosed = false
+        settingsTab = tab
         settingsWindow = w
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
