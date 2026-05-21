@@ -91,11 +91,13 @@ final class NotchCoordinator {
     private func showPanel() {
         let view = HarnessFloatingSurface(state: state)
         let host = NSHostingView(rootView: view)
+        let initialFrame = frameForCurrentState()
+        host.frame = NSRect(origin: .zero, size: initialFrame.size)
         hostingView = host
 
         let panel = HarnessFloatingPanel(
-            contentRect: frameForCurrentState(),
-            styleMask: [.borderless],
+            contentRect: initialFrame,
+            styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -103,8 +105,11 @@ final class NotchCoordinator {
         panel.hasShadow = false
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.level = .screenSaver
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.level = .floating
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
+        panel.setIsVisible(true)
         panel.orderFrontRegardless()
         self.panel = panel
     }
@@ -150,6 +155,7 @@ final class NotchCoordinator {
         guard let panel else { return }
         let old = panel.frame
         let size = currentSurfaceSize()
+        hostingView?.frame = NSRect(origin: .zero, size: size)
         let screen = screenForPanel() ?? primaryScreen()
         let x: CGFloat
         if surfaceSide == .right {

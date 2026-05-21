@@ -230,7 +230,25 @@ struct HarnessFloatingSurface: View {
                 .opacity(state.surfaceExpanded ? 0 : 1)
                 .allowsHitTesting(!state.surfaceExpanded)
         }
+        .frame(width: surfaceSize.width, height: surfaceSize.height, alignment: .topLeading)
+        .clipped()
         .onHover { state.surfaceHoverHandler?($0) }
+    }
+
+    private var surfaceSize: CGSize {
+        if !state.surfaceExpanded {
+            return CGSize(width: 132, height: 38)
+        }
+        switch state.activePanel {
+        case .ping:
+            return CGSize(width: 620, height: 176)
+        case .pipeline:
+            return CGSize(width: 780, height: 384)
+        case .diet:
+            return CGSize(width: 780, height: 418)
+        case .settings:
+            return CGSize(width: 780, height: 618)
+        }
     }
 }
 
