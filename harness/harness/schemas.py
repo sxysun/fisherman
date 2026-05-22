@@ -91,6 +91,9 @@ class WorkflowEvent:
     n_candidates: int = 0
     candidate_ids: list[str] = field(default_factory=list)
     ocr_preview: str = ""
+    first_ocr_preview: str = ""
+    last_ocr_preview: str = ""
+    window_title_samples: list[str] = field(default_factory=list)
     close_reason: Optional[str] = None
     quality_flags: list[str] = field(default_factory=list)
 

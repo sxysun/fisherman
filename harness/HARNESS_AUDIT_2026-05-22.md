@@ -87,14 +87,16 @@ Status: fixed first pass.
 
 ### 6. Frozen eval needed clearer temporal protocol
 
-`harness freeze-eval` wrote a time split, but the manifest did not state the no-future-leakage rule strongly enough and had no event-level export.
+`harness freeze-eval` wrote a time split, but the manifest did not state the no-future-leakage rule strongly enough and had no event-level export or manifest replay command.
 
-Status: fixed first pass.
+Status: fixed.
 
 - `examples.jsonl` contains candidate-level examples.
 - `event_examples.jsonl` contains workflow-event examples.
+- `source_candidates.jsonl`, `source_workflow_events.jsonl`, and `source_outcomes.jsonl` make the bundle replayable without reading live state.
 - manifest includes candidate/event split bounds.
 - manifest states the memory rule: replay may only use candidates, outcomes, labels, priors, and workflow events with timestamps at or before the example timestamp.
+- `harness eval-manifest` replays a policy chronologically over the source stream and reports candidate/event metrics, bootstrap confidence intervals, and app/scene/example-type slices.
 
 ### 7. Old next-step prediction files remain local state
 
@@ -107,10 +109,11 @@ Status: not deleted automatically. They are historical local artifacts, not repo
 - Added workflow context reconstruction to offline replay/shadow eval.
 - Added workflow-event example mining in `dataset.py`.
 - Balanced hard-example sampling so hard negatives and missed-help rows survive truncation.
-- Extended frozen eval manifests with event examples and no-future-leak metadata.
+- Extended frozen eval manifests with source streams, event examples, no-future-leak metadata, and manifest replay.
 - Added `/label/events` workflow-event review UI and submit/curate endpoints.
 - Added event-label metrics separate from candidate-label metrics.
 - Linked event review from the dashboard Eval tab and decision labeler.
+- Added event quality fields: first/last OCR previews, title samples, and event-level flags.
 - Updated README, capsule guide, and ProAgentBench rigor plan.
 
 ## Current Gaps
@@ -122,6 +125,7 @@ The remaining important gaps are now narrower:
 - Curation is available for workflow events from event review, but arbitrary candidate/trace deletion still needs a fuller review panel.
 - The dashboard can show low trace completeness until pre-fix historical rows age out of the selected window.
 - The LLM ICL learner still depends on endpoint latency and quality; keep `rule_v0` hard gates and recent-negative-feedback backoff as non-negotiable safety rails.
+- RAG/similar-event retrieval is still intentionally absent. Add it only with a temporal retrieval test proving no future examples can be retrieved.
 
 ## Verification Commands
 
@@ -129,6 +133,6 @@ The remaining important gaps are now narrower:
 .venv/bin/python -m compileall harness eval policies
 .venv/bin/harness event-examples --since 7d --limit 20
 .venv/bin/harness freeze-eval --since 7d --limit 40 --out /tmp/harness-freeze-test
+.venv/bin/harness eval-manifest /tmp/harness-freeze-test/manifest.json --policy rule_v0
 .venv/bin/python -m pytest tests/test_smoke.py -q
 ```
-

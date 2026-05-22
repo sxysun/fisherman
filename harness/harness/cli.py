@@ -757,6 +757,80 @@ def freeze_eval(since: str, limit: int, out: Optional[str]) -> None:
     click.echo(json.dumps(manifest.get("event_summary") or {}, indent=2))
 
 
+@main.command("eval-manifest")
+@click.argument("manifest", type=click.Path(exists=True, dir_okay=False))
+@click.option("--policy", default="rule_v0", help="Policy module to replay, e.g. rule_v0.")
+@click.option("--overrides", default=None, help="JSON dict merged into gate config.")
+@click.option("--bootstrap", default=400, help="Bootstrap samples for confidence intervals.")
+@click.option("--out", default=None, help="Write full JSON report to this path.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def eval_manifest(
+    manifest: str,
+    policy: str,
+    overrides: Optional[str],
+    bootstrap: int,
+    out: Optional[str],
+    as_json: bool,
+) -> None:
+    """Evaluate a policy against a frozen candidate+event manifest."""
+    from . import frozen_eval as frozen_eval_mod
+
+    config_overrides = json.loads(overrides) if overrides else None
+    report = frozen_eval_mod.evaluate_manifest(
+        Path(manifest),
+        policy=policy,
+        config_overrides=config_overrides,
+        bootstrap_samples=max(0, int(bootstrap)),
+    )
+    serialized = json.dumps(report, indent=2)
+    if out:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        Path(out).write_text(serialized)
+        click.echo(f"wrote {out}")
+    if as_json:
+        click.echo(serialized)
+        return
+
+    cand = report["candidate"]["overall"]
+    event = report["event"]["overall"]
+    click.echo(
+        f"eval_manifest: policy={policy} source={report['source']['n_candidates']} candidates "
+        f"manifest={Path(manifest).name}"
+    )
+    click.echo(
+        "candidate: "
+        f"n={cand['n']} precision={_fmt_pct(cand.get('precision'))} "
+        f"recall={_fmt_pct(cand.get('recall'))} f1={_fmt_num(cand.get('f1'))} "
+        f"false_int={_fmt_pct(cand.get('false_interruption_rate'))} "
+        f"missed={_fmt_pct(cand.get('missed_help_rate'))}"
+    )
+    click.echo(
+        "event:     "
+        f"n={event['n']} precision={_fmt_pct(event.get('precision'))} "
+        f"recall={_fmt_pct(event.get('recall'))} f1={_fmt_num(event.get('f1'))} "
+        f"false_int={_fmt_pct(event.get('false_interruption_rate'))} "
+        f"missed={_fmt_pct(event.get('missed_help_rate'))}"
+    )
+    leakage = report.get("leakage_checks") or {}
+    click.echo(f"leakage_check: {'pass' if leakage.get('pass') else 'watch'}")
+    click.echo("candidate by split:")
+    for row in report["candidate"]["by_split"]:
+        click.echo(
+            f"  {row['slice']:10s} n={row['n']:4d} "
+            f"p={_fmt_pct(row.get('precision')):>6s} "
+            f"r={_fmt_pct(row.get('recall')):>6s} "
+            f"f1={_fmt_num(row.get('f1'))}"
+        )
+    click.echo("event by split:")
+    for row in report["event"]["by_split"]:
+        click.echo(
+            f"  {row['slice']:10s} n={row['n']:4d} "
+            f"p={_fmt_pct(row.get('precision')):>6s} "
+            f"r={_fmt_pct(row.get('recall')):>6s} "
+            f"f1={_fmt_num(row.get('f1'))}"
+        )
+
+
 @main.command("curate")
 @click.argument("target_type", type=click.Choice(["candidate", "decision", "workflow_event", "trace", "outcome"]))
 @click.argument("target_id")

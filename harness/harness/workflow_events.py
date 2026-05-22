@@ -80,6 +80,7 @@ class WorkflowEventBuilder:
         closed.end_ts = closed.last_ts
         closed.ts = closed.last_ts
         closed.close_reason = reason
+        closed.quality_flags = sorted(set(closed.quality_flags + _event_quality_flags(closed)))
         self._recent_closed.append(closed)
         if len(self._recent_closed) > self.max_recent_closed:
             self._recent_closed = self._recent_closed[-self.max_recent_closed:]
@@ -178,11 +179,18 @@ def _extend_workflow_event(
         workflow_event.duration_sec = round(max(0.0, end - start), 2)
     preview = _preview(event.screen.ocr_snippet, max_ocr_preview_chars)
     if preview:
+        if not workflow_event.first_ocr_preview:
+            workflow_event.first_ocr_preview = preview[:max_ocr_preview_chars]
+        workflow_event.last_ocr_preview = preview[:max_ocr_preview_chars]
         workflow_event.ocr_preview = _merge_preview(
             workflow_event.ocr_preview,
             preview,
             max_ocr_preview_chars,
         )
+    title = privacy.redact_text((event.screen.window_title or "").strip())
+    if title and title not in workflow_event.window_title_samples:
+        workflow_event.window_title_samples.append(title[:180])
+        workflow_event.window_title_samples = workflow_event.window_title_samples[-12:]
 
 
 def _compact(event: WorkflowEvent) -> dict:
@@ -198,6 +206,9 @@ def _compact(event: WorkflowEvent) -> dict:
         "n_candidates": event.n_candidates,
         "close_reason": event.close_reason,
         "ocr_preview": event.ocr_preview[:240],
+        "first_ocr_preview": event.first_ocr_preview[:160],
+        "last_ocr_preview": event.last_ocr_preview[:160],
+        "window_title_samples": event.window_title_samples[-6:],
         "quality_flags": event.quality_flags,
     }
 
@@ -234,6 +245,21 @@ def _quality_flags(event: CandidateEvent) -> list[str]:
         flags.append("capture_gap")
     if event.screen.sensitive_scene or event.scene.label == "sensitive":
         flags.append("sensitive")
+    return flags
+
+
+def _event_quality_flags(event: WorkflowEvent) -> list[str]:
+    flags: list[str] = []
+    if event.duration_sec < 10:
+        flags.append("too_short")
+    if event.duration_sec > 45 * 60:
+        flags.append("too_long")
+    if event.n_candidates <= 0:
+        flags.append("no_valid_frame")
+    if not (event.ocr_preview or event.first_ocr_preview or event.last_ocr_preview):
+        flags.append("no_ocr")
+    if not (event.window_title or "").strip() and not event.window_title_samples:
+        flags.append("window_unknown")
     return flags
 
 

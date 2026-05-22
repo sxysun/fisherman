@@ -7,6 +7,7 @@ import calendar
 import io
 import json
 import time
+from pathlib import Path
 
 from harness import candidate as candidate_mod
 from harness import config as config_mod
@@ -18,6 +19,7 @@ from harness import eval_report as eval_report_mod
 from harness import fisherman_client as fc_mod
 from harness import experiments as experiments_mod
 from harness import gate as gate_mod
+from harness import frozen_eval as frozen_eval_mod
 from harness import image_redaction as image_redaction_mod
 from harness import implicit as implicit_mod
 from harness import information_diet as information_diet_mod
@@ -56,6 +58,7 @@ def test_imports():
     assert scene_mod
     assert memory_mod
     assert gate_mod
+    assert frozen_eval_mod
     assert realizer_mod
     assert critic_mod
     assert push_mod
@@ -262,6 +265,94 @@ def test_event_examples_mine_workflow_level_review_rows(tmp_path):
         targets = {row["workflow_event_id"]: row["target"] for row in report["examples"]}
         assert targets["wev_negative"] == "no_ping"
         assert targets["wev_missed"] == "notch_ping"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_freeze_eval_manifest_is_self_contained_and_evaluable(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path / "state"
+    try:
+        for idx, (cid, action, label) in enumerate([
+            ("cand_eval_pos", "notch_ping", "would_help"),
+            ("cand_eval_neg", "no_ping", "good_no_ping"),
+        ]):
+            ts = f"2026-05-19T12:0{idx}:00Z"
+            wev = f"wev_eval_{idx}"
+            store_mod.append_jsonl("workflow_events.jsonl", {
+                "workflow_event_id": wev,
+                "ts": ts,
+                "start_ts": ts,
+                "last_ts": ts,
+                "status": "closed",
+                "app": "Chrome",
+                "window_title": "Harness eval",
+                "scene_label": "coding_with_todo_in_view" if idx == 0 else "reading_browser",
+                "duration_sec": 60,
+                "n_candidates": 1,
+                "ocr_preview": "TODO ship harness" if idx == 0 else "read notes",
+            })
+            store_mod.append_jsonl("candidates.jsonl", {
+                "candidate_id": cid,
+                "ts": ts,
+                "workflow_event_id": wev,
+                "screen": {
+                    "active": True,
+                    "frontmost_app": "Chrome",
+                    "window_title": "Harness eval",
+                    "ocr_snippet": "TODO ship harness" if idx == 0 else "read notes",
+                    "frame_age_sec": 1,
+                    "capture_gap_sec": 0,
+                },
+                "scene": {
+                    "label": "coding_with_todo_in_view" if idx == 0 else "reading_browser",
+                    "strength": "strong",
+                    "source": "rule",
+                },
+                "context": {"minutes_since_last_push": 9999},
+                "user_pref": {"allowed_intents": []},
+            })
+            store_mod.append_jsonl("decisions.jsonl", {
+                "decision_id": f"pd_eval_{idx}",
+                "candidate_id": cid,
+                "workflow_event_id": wev,
+                "ts": ts,
+                "policy_version": "fixture",
+                "action": action,
+                "reason_codes": ["fixture"],
+            })
+            if action == "notch_ping":
+                store_mod.append_jsonl("outcomes.jsonl", {
+                    "decision_id": f"pd_eval_{idx}",
+                    "user_action": "clicked",
+                    "ts": ts,
+                    "interaction_summary": {"intent_signal": "committed"},
+                })
+            store_mod.append_jsonl("retro_labels.jsonl", {
+                "label_id": f"lab_eval_{idx}",
+                "candidate_id": cid,
+                "decision_id": f"pd_eval_{idx}",
+                "label": label,
+                "confidence": 1.0,
+                "ts": ts,
+            })
+
+        manifest = dataset_mod.freeze_eval_dataset(
+            window="365d",
+            out_dir=tmp_path / "frozen",
+            limit=10,
+        )
+        assert Path(manifest["source_candidates_path"]).exists()
+        assert Path(manifest["event_examples_path"]).exists()
+        report = frozen_eval_mod.evaluate_manifest(
+            Path(tmp_path / "frozen" / "manifest.json"),
+            policy="rule_v0",
+            bootstrap_samples=20,
+        )
+        assert report["source"]["n_candidates"] == 2
+        assert report["candidate"]["overall"]["n"] >= 2
+        assert report["leakage_checks"]["pass"] is True
+        assert "by_app" in report["candidate"]
     finally:
         store_mod.HARNESS_DIR = old_dir
 

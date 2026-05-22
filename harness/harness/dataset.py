@@ -289,7 +289,37 @@ def freeze_eval_dataset(
 ) -> dict[str, Any]:
     report = hard_examples(window=window, limit=limit)
     event_report = event_examples(window=window, limit=max(50, limit // 3))
+    since = report["since"]
+    source_candidates = [
+        _sanitized_candidate_payload(row)
+        for row in iter_jsonl("candidates.jsonl")
+        if row.get("ts", "") >= since
+    ]
+    source_workflow_events = [
+        _sanitized_workflow_event_payload(row)
+        for row in _latest_workflow_events([
+            row for row in iter_jsonl("workflow_events.jsonl")
+            if row.get("ts", "") >= since or row.get("last_ts", "") >= since
+        ])
+    ]
+    source_outcomes = [
+        _sanitized_outcome_payload(row)
+        for row in iter_jsonl("outcomes.jsonl")
+        if row.get("ts", "") >= since
+    ]
     out_dir.mkdir(parents=True, exist_ok=True)
+    source_candidates_path = out_dir / "source_candidates.jsonl"
+    with open(source_candidates_path, "w") as f:
+        for row in source_candidates:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    source_workflow_events_path = out_dir / "source_workflow_events.jsonl"
+    with open(source_workflow_events_path, "w") as f:
+        for row in source_workflow_events:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    source_outcomes_path = out_dir / "source_outcomes.jsonl"
+    with open(source_outcomes_path, "w") as f:
+        for row in source_outcomes:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
     examples_path = out_dir / "examples.jsonl"
     with open(examples_path, "w") as f:
         for row in _annotate_split(report["examples"]):
@@ -303,10 +333,18 @@ def freeze_eval_dataset(
         "created_at": report["generated_at"],
         "window": window,
         "since": report["since"],
+        "source_candidates_path": str(source_candidates_path),
+        "source_workflow_events_path": str(source_workflow_events_path),
+        "source_outcomes_path": str(source_outcomes_path),
         "examples_path": str(examples_path),
         "event_examples_path": str(event_examples_path),
         "summary": report["summary"],
         "event_summary": event_report["summary"],
+        "source_summary": {
+            "n_candidates": len(source_candidates),
+            "n_workflow_events": len(source_workflow_events),
+            "n_outcomes": len(source_outcomes),
+        },
         "split": _time_split(report["examples"]),
         "event_split": _time_split(event_report["examples"]),
         "temporal_protocol": {
@@ -457,6 +495,53 @@ def _event_example_row(
             "user_actions": _counts(row.get("user_action") for row in outcomes),
         },
     }
+
+
+def _sanitized_candidate_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = json.loads(json.dumps(row, default=str))
+    screen = payload.setdefault("screen", {})
+    if isinstance(screen, dict):
+        screen["window_title"] = privacy.redact_text(str(screen.get("window_title") or ""))[:180]
+        screen["ocr_snippet"] = privacy.redact_text(str(screen.get("ocr_snippet") or ""))[:1200]
+    scene = payload.setdefault("scene", {})
+    if isinstance(scene, dict):
+        for key in ("specificity", "load_bearing_text"):
+            if scene.get(key):
+                scene[key] = privacy.redact_text(str(scene.get(key)))[:240]
+    payload.setdefault("privacy_export", {})
+    payload["privacy_export"].update({
+        "raw_ocr_exported": False,
+        "screenshots_exported": False,
+        "text_redacted": True,
+    })
+    return payload
+
+
+def _sanitized_workflow_event_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = json.loads(json.dumps(row, default=str))
+    payload["window_title"] = privacy.redact_text(str(payload.get("window_title") or ""))[:180]
+    payload["ocr_preview"] = privacy.redact_text(str(payload.get("ocr_preview") or ""))[:800]
+    payload["first_ocr_preview"] = privacy.redact_text(str(payload.get("first_ocr_preview") or ""))[:400]
+    payload["last_ocr_preview"] = privacy.redact_text(str(payload.get("last_ocr_preview") or ""))[:400]
+    samples = payload.get("window_title_samples")
+    if isinstance(samples, list):
+        payload["window_title_samples"] = [
+            privacy.redact_text(str(sample or ""))[:180]
+            for sample in samples[-8:]
+        ]
+    payload["privacy_export"] = {
+        "raw_ocr_exported": False,
+        "screenshots_exported": False,
+        "text_redacted": True,
+    }
+    return payload
+
+
+def _sanitized_outcome_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = json.loads(json.dumps(row, default=str))
+    if payload.get("explicit_feedback"):
+        payload["explicit_feedback"] = privacy.redact_text(str(payload.get("explicit_feedback")))[:240]
+    return payload
 
 
 def _event_signature(event: dict) -> tuple[str, str]:

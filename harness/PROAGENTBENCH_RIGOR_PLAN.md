@@ -502,13 +502,16 @@ The first paper-style rigor pass is now implemented in code:
 - `dataset.py` mines useful pings, behavioral negatives, context-matched hard negatives, and missed-help candidates. It now also mines workflow-event review rows, and `harness freeze-eval` writes sanitized candidate and event eval files with time-ordered split bounds.
 - `/label/events` adds a browser event-level labeling UI for whole workflow runs. Event labels are stored separately from decision labels via `label_scope="workflow_event"` and feed event-level precision/recall/F1 metrics.
 - Replay/shadow evaluation now preserves `workflow_event_id` and reconstructs a no-future-leak recent workflow context for offline memory snapshots.
+- `harness freeze-eval` now exports sanitized source candidates, source workflow events, and source outcomes alongside candidate/event examples, so frozen datasets are replayable without reading live JSONL state.
+- `harness eval-manifest` replays a policy chronologically over a frozen manifest and reports candidate/event precision, recall, F1, missed-help rate, false-interruption rate, bootstrap confidence intervals, train/validation/test splits, and slices by app/scene/example type.
+- Workflow events now carry first/last OCR previews, window-title samples, and event-level quality flags such as `too_short`, `too_long`, and `no_valid_frame`.
 - The per-candidate VLM scene tagger now has explicit error/rate-limit backoff, so a failing VLM endpoint cannot repeatedly spend calls on every eligible tick.
-- Smoke coverage is 60 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, workflow-event review mining, VLM backoff, and precision/recall metrics.
+- Smoke coverage is 61 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, workflow-event review mining, frozen manifest replay, VLM backoff, and precision/recall metrics.
 
 Still not done:
 
 - The event-level labeling UI is browser-backed, not yet surfaced inside the native capsule.
-- The frozen eval protocol records strict temporal split bounds and replay now avoids future workflow context, but policy-specific memory/RAG retrievers still need explicit tests before they are allowed into offline comparison.
+- The frozen eval protocol now has a manifest replay command with leakage checks. Policy-specific RAG retrievers still need explicit tests before they are allowed into offline comparison.
 - KG priors are simple count priors; RAG similar-event retrieval and ablation reports are still future work.
 - The curation ledger is CLI-backed and event-review-backed for workflow events; there is still no full capsule review panel for arbitrary candidate/trace deletion.
 
