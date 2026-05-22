@@ -152,6 +152,7 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
             minutes_on_current_app=0.0,
             last_event_gap_sec=_last_gap_sec(recent_2h),
             session_boundary=_session_boundary(recent_2h),
+            recent_workflow_events=_workflow_context_for_recent(recent_2h, now_ts),
         )
 
     current_app = recent_2h[-1].screen.frontmost_app
@@ -179,7 +180,100 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
         minutes_on_current_app=max(0.0, (now_ts - start_ts) / 60.0),
         last_event_gap_sec=_last_gap_sec(recent_2h),
         session_boundary=_session_boundary(recent_2h),
+        recent_workflow_events=_workflow_context_for_recent(recent_2h, now_ts),
     )
+
+
+def _workflow_context_for_recent(
+    recent_2h: list[Any],
+    now_ts: float | None,
+    *,
+    window_sec: float = 300.0,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    """Reconstruct the live recent_workflow_events input without future rows."""
+    if not recent_2h:
+        return []
+    now_ts = now_ts or replay_mod._iso_to_unix(recent_2h[-1].ts) or 0.0
+    cutoff = now_ts - window_sec
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    try:
+        from harness import privacy
+    except Exception:
+        privacy = None
+
+    for event in recent_2h:
+        event_ts = replay_mod._iso_to_unix(event.ts)
+        if event_ts is None or event_ts < cutoff:
+            continue
+        key = (
+            getattr(event, "workflow_event_id", None)
+            or f"{event.screen.frontmost_app or 'unknown'}|{event.screen.window_title or ''}|{int(event_ts // 90)}"
+        )
+        if key not in groups:
+            order.append(key)
+            groups[key] = {
+                "workflow_event_id": getattr(event, "workflow_event_id", None),
+                "status": "open",
+                "start_ts": event.ts,
+                "last_ts": event.ts,
+                "duration_sec": 0.0,
+                "app": event.screen.frontmost_app or "unknown",
+                "window_title": _redact(privacy, event.screen.window_title or "")[:180],
+                "scene_label": event.scene.label,
+                "n_candidates": 0,
+                "close_reason": None,
+                "ocr_preview": "",
+                "quality_flags": [],
+                "_start_unix": event_ts,
+                "_last_unix": event_ts,
+            }
+        row = groups[key]
+        row["last_ts"] = event.ts
+        row["_last_unix"] = event_ts
+        row["duration_sec"] = round(max(0.0, float(row["_last_unix"]) - float(row["_start_unix"])), 2)
+        row["scene_label"] = event.scene.label or row.get("scene_label")
+        row["n_candidates"] = int(row.get("n_candidates") or 0) + 1
+        row["quality_flags"] = sorted(set([*row.get("quality_flags", []), *_quality_flags(event)]))
+        preview = _redact(privacy, event.screen.ocr_snippet or "")
+        if preview and preview not in str(row.get("ocr_preview") or ""):
+            merged = " / ".join([p for p in [row.get("ocr_preview"), preview] if p])
+            row["ocr_preview"] = merged[:240]
+
+    out = []
+    for key in order[-max(1, limit):]:
+        row = dict(groups[key])
+        row.pop("_start_unix", None)
+        row.pop("_last_unix", None)
+        out.append(row)
+    return out
+
+
+def _quality_flags(event: Any) -> list[str]:
+    flags: list[str] = []
+    if not (event.screen.frontmost_app or event.screen.bundle_id):
+        flags.append("app_unknown")
+    if not (event.screen.window_title or "").strip():
+        flags.append("window_unknown")
+    if not (event.screen.ocr_snippet or "").strip():
+        flags.append("no_ocr")
+    if float(getattr(event.screen, "frame_age_sec", 0.0) or 0.0) > 60:
+        flags.append("stale_frame")
+    if float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0) > 90:
+        flags.append("capture_gap")
+    if event.screen.sensitive_scene or event.scene.label == "sensitive":
+        flags.append("sensitive")
+    return flags
+
+
+def _redact(privacy_mod: Any, value: str) -> str:
+    if privacy_mod is None:
+        return value
+    try:
+        return privacy_mod.redact_text(value)
+    except Exception:
+        return value
 
 
 def _is_valid_work_event(event: Any) -> bool:

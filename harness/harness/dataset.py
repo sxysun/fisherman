@@ -96,10 +96,183 @@ def hard_examples(window: str = "30d", *, limit: int = 200) -> dict[str, Any]:
 
     rows.extend(_missed_help_candidates(candidates, decision_by_candidate, excluded, existing_ids=labeled_ids))
 
-    rows.sort(key=lambda row: _rank(row), reverse=True)
-    rows = rows[: max(0, limit)]
+    rows = _balanced_limit(rows, max(0, limit))
     return {
         "version": DATASET_VERSION,
+        "window": window,
+        "since": since,
+        "generated_at": _now_iso(),
+        "summary": _summary(rows),
+        "examples": rows,
+    }
+
+
+def event_examples(window: str = "30d", *, limit: int = 120) -> dict[str, Any]:
+    """Mine workflow-event examples for event-level review and eval.
+
+    Candidate labels answer "was this exact tick correct?" Event labels answer
+    "across this app/window run, did the harness interrupt appropriately?" That
+    is the unit needed for missed-help recall and false-interruption auditing.
+    """
+    since = metrics_mod.since_iso(window)
+    events = _latest_workflow_events([
+        row for row in iter_jsonl("workflow_events.jsonl")
+        if row.get("ts", "") >= since or row.get("last_ts", "") >= since
+    ])
+    candidates = [row for row in iter_jsonl("candidates.jsonl") if row.get("ts", "") >= since]
+    decisions = [row for row in iter_jsonl("decisions.jsonl") if row.get("ts", "") >= since]
+    outcomes = [row for row in iter_jsonl("outcomes.jsonl") if row.get("ts", "") >= since]
+    labels = metrics_mod.latest_label_rows([
+        row for row in iter_jsonl("retro_labels.jsonl") if row.get("ts", "") >= since
+    ])
+    excluded = excluded_targets()
+
+    candidates_by_id = {row.get("candidate_id"): row for row in candidates if row.get("candidate_id")}
+    candidates_by_event: dict[str, list[dict]] = {}
+    for row in candidates:
+        event_id = row.get("workflow_event_id")
+        if event_id:
+            candidates_by_event.setdefault(str(event_id), []).append(row)
+
+    decisions_by_event: dict[str, list[dict]] = {}
+    for decision in decisions:
+        event_id = decision.get("workflow_event_id")
+        if not event_id:
+            candidate = candidates_by_id.get(decision.get("candidate_id") or "") or {}
+            event_id = candidate.get("workflow_event_id")
+        if event_id:
+            decisions_by_event.setdefault(str(event_id), []).append(decision)
+
+    outcomes_by_decision = {
+        row.get("decision_id"): row
+        for row in outcomes
+        if row.get("decision_id")
+    }
+    labels_by_event = {
+        row.get("workflow_event_id"): row
+        for row in labels
+        if row.get("workflow_event_id")
+    }
+    labels_by_decision = {
+        row.get("decision_id"): row
+        for row in labels
+        if row.get("decision_id")
+    }
+    labels_by_candidate = {
+        row.get("candidate_id"): row
+        for row in labels
+        if row.get("candidate_id")
+    }
+
+    positive_signatures: set[tuple[str, str]] = set()
+    for event in events:
+        event_id = str(event.get("workflow_event_id") or "")
+        if not event_id or ("workflow_event", event_id) in excluded:
+            continue
+        if _event_has_positive_signal(
+            event_id,
+            decisions_by_event,
+            outcomes_by_decision,
+            labels_by_decision,
+            labels_by_candidate,
+        ):
+            positive_signatures.add(_event_signature(event))
+
+    rows: list[dict[str, Any]] = []
+    for event in events:
+        event_id = str(event.get("workflow_event_id") or "")
+        if not event_id or ("workflow_event", event_id) in excluded:
+            continue
+        event_candidates = candidates_by_event.get(event_id, [])
+        event_decisions = decisions_by_event.get(event_id, [])
+        if any(_excluded(excluded, candidate, {}) for candidate in event_candidates):
+            continue
+
+        label = labels_by_event.get(event_id)
+        if label:
+            target = _target_from_label(label.get("label"))
+            if target is None:
+                example_type = "ambiguous_event"
+                target = "unknown"
+            else:
+                example_type = "explicit_event_label"
+            rows.append(_event_example_row(
+                event=event,
+                candidates=event_candidates,
+                decisions=event_decisions,
+                outcomes_by_decision=outcomes_by_decision,
+                target=target,
+                source="explicit",
+                example_type=example_type,
+                label=label,
+            ))
+            continue
+
+        if _event_has_positive_signal(
+            event_id,
+            decisions_by_event,
+            outcomes_by_decision,
+            labels_by_decision,
+            labels_by_candidate,
+        ):
+            rows.append(_event_example_row(
+                event=event,
+                candidates=event_candidates,
+                decisions=event_decisions,
+                outcomes_by_decision=outcomes_by_decision,
+                target="notch_ping",
+                source="implicit",
+                example_type="positive_event",
+                label={"label": "would_help", "confidence": 0.65},
+            ))
+            continue
+
+        if _event_has_negative_signal(event_id, decisions_by_event, outcomes_by_decision):
+            rows.append(_event_example_row(
+                event=event,
+                candidates=event_candidates,
+                decisions=event_decisions,
+                outcomes_by_decision=outcomes_by_decision,
+                target="no_ping",
+                source="implicit",
+                example_type="negative_event",
+                label={"label": "should_not_ping", "confidence": 0.55},
+            ))
+            continue
+
+        if _event_followed_by_help_seek(event, candidates):
+            rows.append(_event_example_row(
+                event=event,
+                candidates=event_candidates,
+                decisions=event_decisions,
+                outcomes_by_decision=outcomes_by_decision,
+                target="notch_ping",
+                source="mined",
+                example_type="missed_help_event",
+                label={"label": "should_ping_review", "confidence": 0.35},
+            ))
+            continue
+
+        if (
+            not any(decision.get("action") == "notch_ping" for decision in event_decisions)
+            and _event_signature(event) in positive_signatures
+            and _valid_hard_negative_event(event, event_candidates)
+        ):
+            rows.append(_event_example_row(
+                event=event,
+                candidates=event_candidates,
+                decisions=event_decisions,
+                outcomes_by_decision=outcomes_by_decision,
+                target="no_ping",
+                source="mined",
+                example_type="hard_negative_event",
+                label={"label": "should_not_ping", "confidence": 0.4},
+            ))
+
+    rows = _balanced_limit(rows, max(0, limit))
+    return {
+        "version": DATASET_VERSION,
+        "unit": "workflow_event",
         "window": window,
         "since": since,
         "generated_at": _now_iso(),
@@ -115,10 +288,15 @@ def freeze_eval_dataset(
     limit: int = 500,
 ) -> dict[str, Any]:
     report = hard_examples(window=window, limit=limit)
+    event_report = event_examples(window=window, limit=max(50, limit // 3))
     out_dir.mkdir(parents=True, exist_ok=True)
     examples_path = out_dir / "examples.jsonl"
     with open(examples_path, "w") as f:
-        for row in report["examples"]:
+        for row in _annotate_split(report["examples"]):
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    event_examples_path = out_dir / "event_examples.jsonl"
+    with open(event_examples_path, "w") as f:
+        for row in _annotate_split(event_report["examples"]):
             f.write(json.dumps(row, sort_keys=True) + "\n")
     manifest = {
         "version": DATASET_VERSION,
@@ -126,8 +304,18 @@ def freeze_eval_dataset(
         "window": window,
         "since": report["since"],
         "examples_path": str(examples_path),
+        "event_examples_path": str(event_examples_path),
         "summary": report["summary"],
+        "event_summary": event_report["summary"],
         "split": _time_split(report["examples"]),
+        "event_split": _time_split(event_report["examples"]),
+        "temporal_protocol": {
+            "method": "time_ordered_70_15_15",
+            "no_future_leakage": True,
+            "memory_rule": "policy replay may use only candidates, outcomes, labels, priors, and workflow events with ts <= example.ts",
+            "candidate_split_bounds": _split_bounds(report["examples"]),
+            "event_split_bounds": _split_bounds(event_report["examples"]),
+        },
         "privacy": {
             "raw_ocr_exported": False,
             "screenshots_exported": False,
@@ -137,6 +325,145 @@ def freeze_eval_dataset(
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
+
+
+def _latest_workflow_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in sorted(rows, key=lambda r: r.get("ts") or r.get("last_ts") or ""):
+        event_id = row.get("workflow_event_id")
+        if event_id:
+            by_id[str(event_id)] = row
+    return sorted(by_id.values(), key=lambda r: r.get("last_ts") or r.get("ts") or "")
+
+
+def _event_has_positive_signal(
+    event_id: str,
+    decisions_by_event: dict[str, list[dict]],
+    outcomes_by_decision: dict[str, dict],
+    labels_by_decision: dict[str, dict],
+    labels_by_candidate: dict[str, dict],
+) -> bool:
+    for decision in decisions_by_event.get(event_id, []):
+        label = (
+            labels_by_decision.get(decision.get("decision_id") or "")
+            or labels_by_candidate.get(decision.get("candidate_id") or "")
+        )
+        if label and _target_from_label(label.get("label")) == "notch_ping":
+            return True
+        outcome = outcomes_by_decision.get(decision.get("decision_id") or "")
+        if not outcome:
+            continue
+        if outcome.get("user_action") == "clicked":
+            return True
+        summary = outcome.get("interaction_summary") or {}
+        if outcome.get("user_action") == "timed_out" and summary.get("intent_signal") == "positive_considered":
+            return True
+    return False
+
+
+def _event_has_negative_signal(
+    event_id: str,
+    decisions_by_event: dict[str, list[dict]],
+    outcomes_by_decision: dict[str, dict],
+) -> bool:
+    for decision in decisions_by_event.get(event_id, []):
+        outcome = outcomes_by_decision.get(decision.get("decision_id") or "")
+        if not outcome:
+            continue
+        if outcome.get("user_action") in {"dismissed", "muted"}:
+            return True
+        if outcome.get("user_action") == "timed_out":
+            signal = (outcome.get("interaction_summary") or {}).get("intent_signal")
+            if signal in {"ignored", "rejection_considered", "approached"}:
+                return True
+    return False
+
+
+def _event_followed_by_help_seek(event: dict, candidates: list[dict]) -> bool:
+    end_ts = _to_unix(event.get("end_ts") or event.get("last_ts") or event.get("ts"))
+    if end_ts is None:
+        return False
+    for candidate in candidates:
+        ts = _to_unix(candidate.get("ts"))
+        if ts is None:
+            continue
+        if 0 < ts - end_ts <= 20 * 60 and _looks_like_help_seek(candidate):
+            return True
+    return False
+
+
+def _valid_hard_negative_event(event: dict, candidates: list[dict]) -> bool:
+    if not candidates:
+        return False
+    duration = float(event.get("duration_sec") or 0.0)
+    if duration < 10 or duration > 45 * 60:
+        return False
+    flags = set(event.get("quality_flags") or [])
+    if flags & {"sensitive", "stale_frame"}:
+        return False
+    return bool(str(event.get("app") or "").strip() and str(event.get("scene_label") or "").strip())
+
+
+def _event_example_row(
+    *,
+    event: dict,
+    candidates: list[dict],
+    decisions: list[dict],
+    outcomes_by_decision: dict[str, dict],
+    target: str,
+    source: str,
+    example_type: str,
+    label: dict,
+) -> dict[str, Any]:
+    outcomes = [
+        outcomes_by_decision.get(decision.get("decision_id") or "")
+        for decision in decisions
+        if outcomes_by_decision.get(decision.get("decision_id") or "")
+    ]
+    pings = [decision for decision in decisions if decision.get("action") == "notch_ping"]
+    candidate_ids = [row.get("candidate_id") for row in candidates if row.get("candidate_id")]
+    decision_ids = [row.get("decision_id") for row in decisions if row.get("decision_id")]
+    return {
+        "unit": "workflow_event",
+        "example_id": f"ex_{event.get('workflow_event_id')}_{example_type}",
+        "workflow_event_id": event.get("workflow_event_id"),
+        "candidate_id": candidate_ids[-1] if candidate_ids else None,
+        "candidate_ids": candidate_ids[-20:],
+        "decision_id": decision_ids[-1] if decision_ids else None,
+        "decision_ids": decision_ids[-20:],
+        "ts": event.get("last_ts") or event.get("ts"),
+        "memory_cutoff_ts": event.get("last_ts") or event.get("ts"),
+        "target": target,
+        "example_type": example_type,
+        "source": source,
+        "confidence": float(label.get("confidence") or 0.0),
+        "label": label.get("label"),
+        "policy_action": "notch_ping" if pings else "no_ping",
+        "context": {
+            "app": event.get("app"),
+            "scene": event.get("scene_label"),
+            "window_title": privacy.redact_text(str(event.get("window_title") or ""))[:160],
+            "ocr_snippet": privacy.redact_text(str(event.get("ocr_preview") or ""))[:300],
+            "duration_sec": event.get("duration_sec"),
+            "n_candidates": event.get("n_candidates") or len(candidates),
+            "quality_flags": event.get("quality_flags") or [],
+            "close_reason": event.get("close_reason"),
+        },
+        "joins": {
+            "n_candidates": len(candidates),
+            "n_decisions": len(decisions),
+            "n_pings": len(pings),
+            "n_outcomes": len(outcomes),
+            "user_actions": _counts(row.get("user_action") for row in outcomes),
+        },
+    }
+
+
+def _event_signature(event: dict) -> tuple[str, str]:
+    return (
+        str(event.get("app") or "").strip().lower(),
+        str(event.get("scene_label") or "").strip().lower(),
+    )
 
 
 def _missed_help_candidates(
@@ -186,11 +513,13 @@ def _example_row(
     scene = candidate.get("scene") or {}
     summary = ((outcome or {}).get("interaction_summary") or {})
     return {
+        "unit": "candidate",
         "example_id": f"ex_{candidate.get('candidate_id')}_{example_type}",
         "candidate_id": candidate.get("candidate_id"),
         "decision_id": decision.get("decision_id"),
         "workflow_event_id": candidate.get("workflow_event_id") or decision.get("workflow_event_id"),
         "ts": candidate.get("ts") or decision.get("ts"),
+        "memory_cutoff_ts": candidate.get("ts") or decision.get("ts"),
         "target": target,
         "example_type": example_type,
         "source": source,
@@ -215,7 +544,7 @@ def _example_row(
 def _target_from_label(label: str | None) -> str | None:
     if label in {"would_help", "should_ping", "should_ping_review"}:
         return "notch_ping"
-    if label in {"would_annoy", "good_no_ping", "should_not_ping"}:
+    if label in {"would_annoy", "good_no_ping", "should_not_ping", "not_now"}:
         return "no_ping"
     return None
 
@@ -287,20 +616,97 @@ def _keywords(text: str) -> list[str]:
 def _rank(row: dict[str, Any]) -> tuple[float, str]:
     base = {
         "positive": 3.0,
+        "positive_event": 3.0,
         "missed_help_candidate": 2.5,
+        "missed_help_event": 2.5,
         "hard_negative": 2.0,
+        "hard_negative_event": 2.0,
         "negative": 1.0,
+        "negative_event": 1.0,
+        "explicit_event_label": 3.5,
     }.get(str(row.get("example_type") or ""), 0.0)
     return (base + float(row.get("confidence") or 0.0), str(row.get("ts") or ""))
+
+
+def _balanced_limit(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        buckets.setdefault(str(row.get("example_type") or "unknown"), []).append(row)
+    for bucket in buckets.values():
+        bucket.sort(key=_rank, reverse=True)
+
+    order = [
+        "explicit_event_label",
+        "missed_help_event",
+        "missed_help_candidate",
+        "hard_negative_event",
+        "hard_negative",
+        "negative_event",
+        "negative",
+        "positive_event",
+        "positive",
+        "ambiguous_event",
+    ]
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    while len(out) < limit and any(buckets.values()):
+        progressed = False
+        for name in order:
+            bucket = buckets.get(name) or []
+            while bucket and _example_key(bucket[0]) in seen:
+                bucket.pop(0)
+            if not bucket:
+                continue
+            row = bucket.pop(0)
+            seen.add(_example_key(row))
+            out.append(row)
+            progressed = True
+            if len(out) >= limit:
+                break
+        if not progressed:
+            break
+
+    if len(out) < limit:
+        leftovers = [
+            row for row in rows
+            if _example_key(row) not in seen
+        ]
+        leftovers.sort(key=_rank, reverse=True)
+        out.extend(leftovers[: limit - len(out)])
+    return out[:limit]
+
+
+def _example_key(row: dict[str, Any]) -> str:
+    return str(row.get("example_id") or row.get("workflow_event_id") or row.get("candidate_id") or id(row))
 
 
 def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_type: dict[str, int] = {}
     by_target: dict[str, int] = {}
+    by_unit: dict[str, int] = {}
     for row in rows:
         by_type[str(row.get("example_type") or "unknown")] = by_type.get(str(row.get("example_type") or "unknown"), 0) + 1
         by_target[str(row.get("target") or "unknown")] = by_target.get(str(row.get("target") or "unknown"), 0) + 1
-    return {"n": len(rows), "by_type": by_type, "by_target": by_target}
+        by_unit[str(row.get("unit") or "candidate")] = by_unit.get(str(row.get("unit") or "candidate"), 0) + 1
+    return {"n": len(rows), "by_type": by_type, "by_target": by_target, "by_unit": by_unit}
+
+
+def _annotate_split(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    split = _time_split(rows)
+    by_id: dict[str, str] = {}
+    for name in ("train", "validation", "test"):
+        for example_id in split.get(name) or []:
+            by_id[str(example_id)] = name
+    annotated = []
+    for row in rows:
+        next_row = dict(row)
+        next_row.setdefault("unit", "candidate")
+        next_row.setdefault("memory_cutoff_ts", next_row.get("ts"))
+        next_row["split"] = by_id.get(str(next_row.get("example_id")), "unassigned")
+        annotated.append(next_row)
+    return annotated
 
 
 def _time_split(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -314,6 +720,39 @@ def _time_split(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "validation": [row.get("example_id") for row in ordered[train_end:val_end]],
         "test": [row.get("example_id") for row in ordered[val_end:]],
     }
+
+
+def _split_bounds(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    ordered = sorted(rows, key=lambda row: row.get("ts") or "")
+    if not ordered:
+        return {"train": None, "validation": None, "test": None}
+    split = _time_split(ordered)
+    by_id = {row.get("example_id"): row for row in ordered}
+
+    def _bounds(name: str) -> dict[str, Any] | None:
+        ids = split.get(name) or []
+        subset = [by_id.get(example_id) for example_id in ids if by_id.get(example_id)]
+        if not subset:
+            return None
+        return {
+            "start_ts": subset[0].get("ts"),
+            "end_ts": subset[-1].get("ts"),
+            "n": len(subset),
+        }
+
+    return {
+        "train": _bounds("train"),
+        "validation": _bounds("validation"),
+        "test": _bounds("test"),
+    }
+
+
+def _counts(values) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for value in values:
+        key = str(value or "unknown")
+        out[key] = out.get(key, 0) + 1
+    return out
 
 
 def _excluded(excluded: set[tuple[str, str]], candidate: dict, decision: dict) -> bool:

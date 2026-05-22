@@ -64,12 +64,12 @@ def build_report(
     labels_by_decision = {
         row.get("decision_id"): row
         for row in labels
-        if row.get("decision_id")
+        if row.get("decision_id") and row.get("label_scope") != "workflow_event" and not row.get("workflow_event_id")
     }
     labels_by_candidate = {
         row.get("candidate_id"): row
         for row in labels
-        if row.get("candidate_id")
+        if row.get("candidate_id") and row.get("label_scope") != "workflow_event" and not row.get("workflow_event_id")
     }
     traces_by_decision = _traces_by_decision(traces)
     weak_labels = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
@@ -137,6 +137,10 @@ def build_report(
             "n_outcomes": len(outcomes),
             "n_traces": n_traces,
             "n_explicit_labels": len(labels),
+            "n_event_labels": sum(
+                1 for row in labels
+                if row.get("label_scope") == "workflow_event" or row.get("workflow_event_id")
+            ),
             "n_implicit_labels": len(weak_labels),
             "n_implicit_usable": sum(1 for row in weak_labels if row.get("usable_for_training")),
             "trace_completeness_for_pings": _ratio(pings_with_trace, len(pings)),
@@ -436,6 +440,12 @@ def _gap_checklist(
             "status": "pass" if int(labels.get("determinate") or 0) >= 20 else "insufficient_data",
             "detail": "Need enough human labels for trusted precision/recall.",
             "value": labels.get("determinate") or 0,
+        },
+        {
+            "name": "event_level_eval_set",
+            "status": "pass" if int((labels.get("event") or {}).get("determinate") or 0) >= 20 else "insufficient_data",
+            "detail": "Need whole-workflow labels to measure missed-help recall without overcounting ticks.",
+            "value": (labels.get("event") or {}).get("determinate") or 0,
         },
         {
             "name": "implicit_eval_set",

@@ -716,6 +716,30 @@ def hard_examples(since: str, limit: int, as_json: bool) -> None:
         )
 
 
+@main.command("event-examples")
+@click.option("--since", default="30d", help="Window: 7d, 30d, etc.")
+@click.option("--limit", default=80, help="Max examples.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def event_examples(since: str, limit: int, as_json: bool) -> None:
+    """Mine workflow-event examples for event-level review."""
+    from . import dataset as dataset_mod
+
+    report = dataset_mod.event_examples(window=since, limit=limit)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    click.echo(f"event_examples: {report['window']} since {report['since']}")
+    click.echo(json.dumps(report["summary"], indent=2))
+    for row in report.get("examples", [])[:12]:
+        ctx = row.get("context") or {}
+        joins = row.get("joins") or {}
+        click.echo(
+            f"  {row['example_type']:22s} target={row['target']:10s} "
+            f"action={row.get('policy_action') or 'n/a':10s} app={ctx.get('app') or '?'} "
+            f"scene={ctx.get('scene') or '?'} pings={joins.get('n_pings', 0)}"
+        )
+
+
 @main.command("freeze-eval")
 @click.option("--since", default="30d", help="Window: 7d, 30d, etc.")
 @click.option("--limit", default=500, help="Max examples.")
@@ -729,6 +753,8 @@ def freeze_eval(since: str, limit: int, out: Optional[str]) -> None:
     click.echo(f"dataset: {out_dir}")
     click.echo(f"manifest: {out_dir / 'manifest.json'}")
     click.echo(json.dumps(manifest["summary"], indent=2))
+    click.echo("event_summary:")
+    click.echo(json.dumps(manifest.get("event_summary") or {}, indent=2))
 
 
 @main.command("curate")

@@ -126,14 +126,15 @@ harness test --intent X [--push --message TEXT --app APP]
 harness snooze 30m | harness unsnooze
 harness mute INTENT | harness unmute INTENT [--all]
 harness label                               open retro labeler in browser
+harness event-examples [--since 30d]        mined workflow-event review rows
 harness dashboard                           open web dashboard (settings duplicates this)
 harness metrics [--since 24h --json]        live outcome + retro-label metrics
 harness implicit [--since 7d --json]         weak labels from notification behavior
 harness eval-report [--since 7d --json]      joined eval report + failure taxonomy
 harness info-diet [--since 7d --json]        research episodes + workflow hypotheses
 harness kg-priors [--since 30d --json]       local app/scene/keyword priors
-harness hard-examples [--since 30d --json]   mined positives, hard negatives, misses
-harness freeze-eval [--since 30d]            write frozen time-split eval dataset
+harness hard-examples [--since 30d --json]   balanced candidate positives, hard negatives, misses
+harness freeze-eval [--since 30d]            write frozen candidate + event eval dataset
 harness curate TYPE ID --action exclude      curation ledger for eval/training rows
 harness train-policy [--since 30d]           propose a canary policy from labels/outcomes
 harness activate-canary | harness rollback-canary
@@ -152,7 +153,11 @@ The report includes trace completeness, data coverage, claimed-ping outcome capt
 
 `workflow_events.jsonl` is the local LifeTrace-style event layer. It groups candidate ticks into closed workflow runs whenever the active app/window changes, the frame goes stale, the screen becomes sensitive/inactive, or a capture gap suggests laptop sleep/resume. The LLM ICL learner sees the recent compact workflow sequence, so the binary policy can reason about trajectory rather than one isolated frame.
 
-`harness hard-examples --since 30d` mines a cleaner timing dataset from real dogfood data: useful pings, dismissed/ignored pings, context-matched hard negatives, and missed-help candidates where a no-ping context is followed by help-seeking behavior. `harness freeze-eval` writes those examples into a time-ordered train/validation/test manifest under `harness/datasets/`. The export omits raw screenshots and raw OCR by default and respects `curation.jsonl` exclusions.
+`harness hard-examples --since 30d` mines a cleaner timing dataset from real dogfood data: useful pings, dismissed/ignored pings, context-matched hard negatives, and missed-help candidates where a no-ping context is followed by help-seeking behavior. The sampler is balanced so positives do not crowd out hard negatives. `harness event-examples --since 30d` performs the same review mining at the workflow-event level, where a whole app/window run can be labeled as missed help, good silence, not-now, or false interruption.
+
+The browser labeler now has two scopes: `/label` for exact decision moments and `/label/events` for workflow-event review. Event labels are stored in `retro_labels.jsonl` with `label_scope="workflow_event"` and are reported separately from candidate labels, so event-level recall does not corrupt tick-level precision.
+
+`harness freeze-eval` writes both `examples.jsonl` and `event_examples.jsonl` into a time-ordered train/validation/test manifest under `harness/datasets/`. The manifest includes split timestamp bounds and a no-future-leakage rule: policy replay may use only candidates, outcomes, labels, priors, and workflow events whose timestamps are at or before the example timestamp. The export omits raw screenshots and raw OCR by default and respects `curation.jsonl` exclusions.
 
 `harness info-diet --since 7d` builds a conservative research/workflow report from the same candidate stream. It groups browser-like reading episodes, inferred domains, query-like phrases, dwell patterns, and tentative workflow hypotheses. Treat it as an evidence panel, not a trusted skill compiler yet: current source attribution is OCR-derived until Fisherman exposes browser URL/title ground truth.
 

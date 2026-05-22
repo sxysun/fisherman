@@ -70,8 +70,17 @@ def compute(window: str = "24h") -> dict[str, Any]:
     claimed_with_outcome = sum(1 for did in claimed_ping_ids if did in outcomes_by_decision)
     pings_with_trace = sum(1 for did in ping_decision_ids if did in traced_decision_ids)
 
+    candidate_labels = [
+        label for label in labels
+        if label.get("label_scope") != "workflow_event" and not label.get("workflow_event_id")
+    ]
+    event_labels = [
+        label for label in labels
+        if label.get("label_scope") == "workflow_event" or label.get("workflow_event_id")
+    ]
+
     joined_labels: list[tuple[dict, dict | None]] = []
-    for label in labels:
+    for label in candidate_labels:
         decision = None
         did = label.get("decision_id")
         cid = label.get("candidate_id")
@@ -82,6 +91,7 @@ def compute(window: str = "24h") -> dict[str, Any]:
         joined_labels.append((label, decision))
 
     label_quality = _label_quality(joined_labels)
+    event_label_quality = _event_label_quality(event_labels, all_decisions)
     weak_labels = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
     implicit_summary = implicit_mod.summarize(weak_labels)
     reward_summary = reward_mod.aggregate_rewards(outcomes)
@@ -110,7 +120,8 @@ def compute(window: str = "24h") -> dict[str, Any]:
         "n_no_pings": n_no_pings,
         "n_claimed_pings": len(claimed_ping_ids),
         "ping_rate": _ratio(n_pings, len(decisions)),
-        "explicit_label_coverage": _ratio(len(labels), len(decisions)),
+        "explicit_label_coverage": _ratio(len(candidate_labels), len(decisions)),
+        "event_label_coverage": _ratio(len(event_labels), len(decisions)),
         "outcomes": {
             "n": len(outcomes),
             "capture_rate_for_pings": _ratio(pings_with_outcome, n_pings),
@@ -129,9 +140,12 @@ def compute(window: str = "24h") -> dict[str, Any]:
             "claimed_capture_rate": _ratio(claimed_with_outcome, len(claimed_ping_ids)),
         },
         "labels": {
-            "n": len(labels),
+            "n": len(candidate_labels),
+            "event_n": len(event_labels),
+            "total_n": len(labels),
             "counts": dict(label_counts),
             **label_quality,
+            "event": event_label_quality,
         },
         "implicit": implicit_summary,
         "data_readiness": data_readiness,
@@ -209,6 +223,65 @@ def _label_quality(joined_labels: list[tuple[dict, dict | None]]) -> dict[str, A
     }
 
 
+def _event_label_quality(event_labels: list[dict], decisions: list[dict]) -> dict[str, Any]:
+    decisions_by_event: dict[str, list[dict]] = {}
+    for decision in decisions:
+        event_id = decision.get("workflow_event_id")
+        if event_id:
+            decisions_by_event.setdefault(str(event_id), []).append(decision)
+
+    determinate = 0
+    tp = fp = tn = fn = 0
+    unknown_event = 0
+    for label in event_labels:
+        event_id = label.get("workflow_event_id")
+        if not event_id:
+            unknown_event += 1
+            continue
+        event_decisions = decisions_by_event.get(str(event_id), [])
+        if not event_decisions:
+            unknown_event += 1
+            continue
+        value = label.get("label")
+        should_ping = _label_should_ping(value)
+        if should_ping is None:
+            continue
+        determinate += 1
+        did_ping = any(decision.get("action") == "notch_ping" for decision in event_decisions)
+        if did_ping and should_ping:
+            tp += 1
+        elif did_ping and not should_ping:
+            fp += 1
+        elif not did_ping and should_ping:
+            fn += 1
+        else:
+            tn += 1
+
+    precision = _ratio(tp, tp + fp)
+    recall = _ratio(tp, tp + fn)
+    return {
+        "determinate": determinate,
+        "unknown_event": unknown_event,
+        "tp": tp,
+        "fp": fp,
+        "tn": tn,
+        "fn": fn,
+        "precision_labeled": precision,
+        "recall_labeled": recall,
+        "f1_labeled": _f1(precision, recall),
+        "false_interruption_rate_labeled": _ratio(fp, fp + tn),
+        "missed_help_rate_labeled": _ratio(fn, tp + fn),
+    }
+
+
+def _label_should_ping(value: object) -> bool | None:
+    if value == "would_help":
+        return True
+    if value in {"would_annoy", "good_no_ping", "not_now"}:
+        return False
+    return None
+
+
 def latest_label_rows(rows: list[dict]) -> list[dict]:
     """Return one current retro label per decision/candidate.
 
@@ -218,7 +291,10 @@ def latest_label_rows(rows: list[dict]) -> list[dict]:
     keyed: dict[str, dict] = {}
     unkeyed: list[dict] = []
     for row in sorted(rows, key=lambda r: r.get("ts") or ""):
-        key = row.get("decision_id") or row.get("candidate_id")
+        if row.get("label_scope") == "workflow_event" or row.get("workflow_event_id"):
+            key = f"workflow_event:{row.get('workflow_event_id')}"
+        else:
+            key = row.get("decision_id") or row.get("candidate_id")
         if not key:
             unkeyed.append(row)
             continue

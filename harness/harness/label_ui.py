@@ -469,6 +469,7 @@ function render() {
         </select>
         <button onclick="loadNext({skipCurrent:true})" title="Skip this decision in the current session">skip</button>
         <button onclick="resetSession()" title="Use current time as a new frozen cutoff">reset</button>
+        <button onclick="location.href='/label/events'" title="Review whole workflow events">events</button>
       </div>
       <div class="keys">
         <kbd>←</kbd><kbd>→</kbd> scrub
@@ -773,6 +774,206 @@ loadNext();
 """
 
 
+EVENT_LABELING_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>harness · event review</title>
+<style>
+  :root { color-scheme: dark; --bg:#0a0a0c; --panel:#131318; --panel-2:#1a1a20; --border:#25252c; --text:#ececef; --text-2:#a0a0a8; --text-3:#6c6c74; --accent:#d0c08f; --green:#7eb37e; --red:#c4848c; --blue:#7d9ec4; --amber:#c4a87d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif; }
+  .app { max-width:1180px; margin:0 auto; padding:20px 24px 40px; }
+  header { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding-bottom:14px; border-bottom:1px solid var(--border); margin-bottom:18px; }
+  h1 { margin:0 0 6px; font:650 17px/1.2 -apple-system; }
+  .sub { color:var(--text-3); font:12px ui-monospace; }
+  .controls { display:flex; gap:8px; align-items:center; }
+  select, button, input[type="text"] { background:var(--panel); border:1px solid var(--border); color:var(--text-2); border-radius:7px; padding:8px 10px; font:12px ui-monospace; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); color:var(--text); }
+  .layout { display:grid; grid-template-columns: minmax(0,1fr) 330px; gap:18px; }
+  .list { display:flex; flex-direction:column; gap:12px; }
+  .row { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; cursor:pointer; }
+  .row.active { border-color:rgba(208,192,143,.65); box-shadow:0 0 0 1px rgba(208,192,143,.15); }
+  .top { display:flex; justify-content:space-between; gap:12px; font:12px ui-monospace; color:var(--text-2); }
+  .pill { display:inline-block; padding:2px 7px; border-radius:999px; border:1px solid var(--border); color:var(--accent); font:11px ui-monospace; }
+  .title { margin-top:8px; font:600 14px/1.35 -apple-system; color:var(--text); }
+  .meta { margin-top:6px; color:var(--text-3); font:11.5px ui-monospace; }
+  .preview { margin-top:8px; color:var(--text-2); font:12px/1.45 ui-monospace; max-height:76px; overflow:hidden; }
+  aside { position:sticky; top:16px; align-self:start; background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  aside h2 { margin:0 0 8px; font:650 13px/1.2 -apple-system; }
+  .rubric { color:var(--text-2); font-size:12px; margin-bottom:12px; }
+  .buttons { display:grid; gap:8px; margin-top:12px; }
+  .label-btn { text-align:left; background:var(--panel-2); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:11px 12px; font:12.5px/1.35 -apple-system; }
+  .label-btn.help { border-color:rgba(126,179,126,.45); }
+  .label-btn.quiet { border-color:rgba(125,158,196,.45); }
+  .label-btn.annoy { border-color:rgba(196,132,140,.45); }
+  .label-btn.cant { color:var(--text-2); }
+  .small { color:var(--text-3); font:11px ui-monospace; margin-top:3px; }
+  .field { margin-top:10px; }
+  .field label { display:block; color:var(--text-3); font:11px ui-monospace; margin-bottom:5px; }
+  .field input[type="range"] { width:100%; accent-color:var(--accent); }
+  .empty { padding:60px; color:var(--text-3); text-align:center; border:1px solid var(--border); border-radius:10px; background:var(--panel); }
+  a { color:var(--accent); text-decoration:none; }
+</style>
+</head><body>
+<div class="app">
+  <header>
+    <div>
+      <h1>Event Review</h1>
+      <div class="sub">Label whole workflow runs. Judge whether Hermes should have interrupted at least once during the run, not whether a single frame looks interesting.</div>
+    </div>
+    <div class="controls">
+      <select id="window" onchange="loadQueue(true)">
+        <option value="24h">24h</option>
+        <option value="7d" selected>7d</option>
+        <option value="30d">30d</option>
+      </select>
+      <select id="kind" onchange="loadQueue(true)">
+        <option value="all">all</option>
+        <option value="missed">missed help</option>
+        <option value="hard_negative">hard negatives</option>
+        <option value="negative">negative pings</option>
+        <option value="positive">positive pings</option>
+      </select>
+      <button onclick="loadQueue(true)">refresh</button>
+      <a href="/label">decision labeler</a>
+    </div>
+  </header>
+  <div class="layout">
+    <section class="list" id="list"><div class="empty">loading…</div></section>
+    <aside>
+      <h2 id="side-title">No event selected</h2>
+      <div class="rubric">
+        <strong>Should ping</strong>: at least one timely, brief interruption would likely help progress.<br>
+        <strong>Should stay quiet</strong>: a ping would mostly cost attention or duplicate obvious next steps.<br>
+        <strong>Not now</strong>: useful topic, wrong moment.<br>
+        <strong>Can't tell</strong>: event lacks enough context.
+      </div>
+      <div id="side-meta" class="small">Pick an event from the queue.</div>
+      <div class="field">
+        <label>confidence <span id="conf-text">0.7</span></label>
+        <input id="confidence" type="range" min="0.1" max="1.0" step="0.1" value="0.7" oninput="document.getElementById('conf-text').textContent=this.value">
+      </div>
+      <div class="field">
+        <label>optional note</label>
+        <input id="notes" type="text" placeholder="why this event label?">
+      </div>
+      <div class="buttons">
+        <button class="label-btn help" onclick="submitLabel('would_help')">Should ping<div class="small">missed opportunity or useful ping</div></button>
+        <button class="label-btn quiet" onclick="submitLabel('good_no_ping')">Should stay quiet<div class="small">silence was correct</div></button>
+        <button class="label-btn annoy" onclick="submitLabel('would_annoy')">Would annoy<div class="small">interruption was actively bad</div></button>
+        <button class="label-btn cant" onclick="submitLabel('not_now')">Not now<div class="small">maybe useful later, bad timing</div></button>
+        <button class="label-btn cant" onclick="submitLabel('cant_tell')">Can't tell<div class="small">not enough context</div></button>
+        <button class="label-btn cant" onclick="curate('exclude')">Exclude event<div class="small">remove from training/eval builders</div></button>
+      </div>
+    </aside>
+  </div>
+</div>
+<script>
+let queue = [];
+let selected = null;
+let labeled = new Set();
+
+async function loadQueue(reset=false) {
+  if (reset) { selected = null; }
+  const params = new URLSearchParams({
+    window: document.getElementById('window').value,
+    kind: document.getElementById('kind').value,
+    limit: '120',
+  });
+  const data = await fetch('/label/events/queue?' + params.toString()).then(r => r.json());
+  queue = data.examples || [];
+  renderList();
+  if (!selected && queue.length) select(queue[0].example_id);
+}
+
+function renderList() {
+  const list = document.getElementById('list');
+  const rows = queue.filter(row => !labeled.has(row.workflow_event_id));
+  if (!rows.length) {
+    list.innerHTML = '<div class="empty">queue empty for this filter</div>';
+    return;
+  }
+  list.innerHTML = rows.map(row => {
+    const ctx = row.context || {};
+    const joins = row.joins || {};
+    return `<div class="row ${selected && selected.example_id === row.example_id ? 'active' : ''}" onclick="select('${escapeAttr(row.example_id)}')">
+      <div class="top"><span><span class="pill">${escapeHTML(row.example_type || '?')}</span> target=${escapeHTML(row.target || '?')}</span><span>${escapeHTML((row.ts || '').slice(0,19))}</span></div>
+      <div class="title">${escapeHTML(ctx.app || 'unknown')} · ${escapeHTML(ctx.scene || 'unknown')} · ${escapeHTML(ctx.window_title || '(untitled)')}</div>
+      <div class="meta">duration=${escapeHTML(num(ctx.duration_sec))}s candidates=${escapeHTML(ctx.n_candidates ?? 0)} decisions=${escapeHTML(joins.n_decisions ?? 0)} pings=${escapeHTML(joins.n_pings ?? 0)} outcomes=${escapeHTML(joins.n_outcomes ?? 0)}</div>
+      ${ctx.ocr_snippet ? `<div class="preview">${escapeHTML(ctx.ocr_snippet)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function select(exampleID) {
+  selected = queue.find(row => row.example_id === exampleID) || null;
+  renderList();
+  renderSide();
+}
+
+function renderSide() {
+  if (!selected) return;
+  const ctx = selected.context || {};
+  const joins = selected.joins || {};
+  document.getElementById('side-title').textContent = `${ctx.app || 'unknown'} · ${selected.example_type || 'event'}`;
+  document.getElementById('side-meta').innerHTML =
+    `event=${escapeHTML(selected.workflow_event_id || '?')}<br>` +
+    `target suggestion=${escapeHTML(selected.target || '?')} confidence=${escapeHTML(num(selected.confidence))}<br>` +
+    `duration=${escapeHTML(num(ctx.duration_sec))}s pings=${escapeHTML(joins.n_pings ?? 0)} outcomes=${escapeHTML(joins.n_outcomes ?? 0)} actions=${escapeHTML(JSON.stringify(joins.user_actions || {}))}<br>` +
+    `flags=${escapeHTML((ctx.quality_flags || []).join(', ') || 'none')}`;
+}
+
+async function submitLabel(label) {
+  if (!selected) return;
+  const resp = await fetch('/label/events/submit', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      workflow_event_id: selected.workflow_event_id,
+      candidate_id: selected.candidate_id,
+      decision_id: selected.decision_id,
+      decision_action: selected.policy_action,
+      label,
+      confidence: parseFloat(document.getElementById('confidence').value || '0.7'),
+      notes: document.getElementById('notes').value || '',
+      example_type: selected.example_type,
+      source: selected.source,
+      target_suggestion: selected.target,
+      rubric_version: 'workflow_event_v1',
+    }),
+  });
+  if (!resp.ok) return;
+  labeled.add(selected.workflow_event_id);
+  selected = null;
+  renderList();
+  const next = queue.find(row => !labeled.has(row.workflow_event_id));
+  if (next) select(next.example_id);
+}
+
+async function curate(action) {
+  if (!selected) return;
+  const reason = document.getElementById('notes').value || 'event_review';
+  const resp = await fetch('/label/events/curate', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({workflow_event_id: selected.workflow_event_id, action, reason}),
+  });
+  if (!resp.ok) return;
+  labeled.add(selected.workflow_event_id);
+  selected = null;
+  renderList();
+}
+
+function num(v) { return v === null || v === undefined || v === '' ? 'n/a' : Number(v).toFixed(1); }
+function escapeHTML(s) { return String(s).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
+function escapeAttr(s) { return String(s).replace(/['"\\]/g, '_'); }
+loadQueue();
+</script>
+</body></html>
+"""
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
@@ -905,6 +1106,10 @@ def _parse_exclude(raw: str | None) -> set[str]:
 
 async def get_label_page(_: web.Request) -> web.Response:
     return web.Response(text=LABELING_HTML, content_type="text/html")
+
+
+async def get_event_label_page(_: web.Request) -> web.Response:
+    return web.Response(text=EVENT_LABELING_HTML, content_type="text/html")
 
 
 async def get_label_queue(request: web.Request) -> web.Response:
@@ -1070,6 +1275,121 @@ async def get_label_timeline(request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+def _already_labeled_events() -> set[str]:
+    out: set[str] = set()
+    for row in iter_jsonl("retro_labels.jsonl"):
+        event_id = row.get("workflow_event_id")
+        if event_id:
+            out.add(str(event_id))
+    return out
+
+
+def _matches_event_kind(row: dict, kind: str) -> bool:
+    if kind in ("", "all", None):
+        return True
+    example_type = str(row.get("example_type") or "")
+    if kind == "missed":
+        return "missed_help" in example_type
+    if kind == "hard_negative":
+        return "hard_negative" in example_type
+    if kind == "negative":
+        return row.get("target") == "no_ping" or "negative" in example_type
+    if kind == "positive":
+        return row.get("target") == "notch_ping" or "positive" in example_type
+    return True
+
+
+async def get_event_label_queue(request: web.Request) -> web.Response:
+    from . import dataset as dataset_mod
+
+    window = request.query.get("window") or "7d"
+    kind = request.query.get("kind") or "all"
+    try:
+        limit = int(request.query.get("limit") or 80)
+    except ValueError:
+        limit = 80
+    include_labeled = request.query.get("include_labeled") in {"1", "true", "yes"}
+    report = dataset_mod.event_examples(window=window, limit=max(1, min(limit, 300)))
+    labeled = _already_labeled_events()
+    examples = [
+        row for row in report.get("examples", [])
+        if _matches_event_kind(row, kind)
+        and (include_labeled or str(row.get("workflow_event_id") or "") not in labeled)
+    ]
+    return web.json_response({
+        "window": window,
+        "kind": kind,
+        "summary": report.get("summary") or {},
+        "labeled_events": len(labeled),
+        "examples": examples[:limit],
+    })
+
+
+async def post_event_label_submit(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected object"}, status=400)
+    workflow_event_id = str(body.get("workflow_event_id") or "").strip()
+    if not workflow_event_id:
+        return web.json_response({"error": "missing workflow_event_id"}, status=400)
+    label = body.get("label")
+    if label not in {"would_help", "would_annoy", "good_no_ping", "not_now", "cant_tell"}:
+        return web.json_response({"error": "bad label"}, status=400)
+    try:
+        confidence = float(body.get("confidence", 1.0))
+    except (TypeError, ValueError):
+        confidence = 1.0
+    confidence = max(0.0, min(1.0, confidence))
+    row = {
+        "label_id": f"event_{workflow_event_id}_{int(time.time() * 1000)}",
+        "label_scope": "workflow_event",
+        "workflow_event_id": workflow_event_id,
+        "candidate_id": body.get("candidate_id"),
+        "decision_id": body.get("decision_id"),
+        "decision_action": body.get("decision_action"),
+        "label": label,
+        "confidence": confidence,
+        "intent_category": body.get("intent_category"),
+        "example_type": body.get("example_type"),
+        "target_suggestion": body.get("target_suggestion"),
+        "source": "event_review_ui",
+        "example_source": body.get("source"),
+        "rubric_version": body.get("rubric_version") or "workflow_event_v1",
+        "notes": body.get("notes") or "",
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    append_jsonl("retro_labels.jsonl", row)
+    return web.json_response({"ok": True, "label": row})
+
+
+async def post_event_curate(request: web.Request) -> web.Response:
+    from . import curation as curation_mod
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected object"}, status=400)
+    workflow_event_id = str(body.get("workflow_event_id") or "").strip()
+    if not workflow_event_id:
+        return web.json_response({"error": "missing workflow_event_id"}, status=400)
+    action = str(body.get("action") or "exclude")
+    if action not in {"retain", "exclude", "delete", "blur"}:
+        return web.json_response({"error": "bad action"}, status=400)
+    row = curation_mod.record(
+        target_type="workflow_event",
+        target_id=workflow_event_id,
+        action=action,
+        reason=str(body.get("reason") or ""),
+        source="event_review_ui",
+    )
+    return web.json_response({"ok": True, "curation": row})
+
+
 def _sample_with_anchor(items: list[dict], *, anchor_idx: int, target: int) -> list[dict]:
     n = len(items)
     if n <= target:
@@ -1147,7 +1467,11 @@ async def post_label_submit(request: web.Request) -> web.Response:
 def attach_routes(app: web.Application, fisherman_url: str) -> None:
     app["fisherman_url"] = fisherman_url
     app.router.add_get("/label", get_label_page)
+    app.router.add_get("/label/events", get_event_label_page)
     app.router.add_get("/label/queue", get_label_queue)
+    app.router.add_get("/label/events/queue", get_event_label_queue)
     app.router.add_get("/label/timeline/{candidate_id}", get_label_timeline)
     app.router.add_get("/label/frame/{ts_ms}", get_label_frame)
     app.router.add_post("/label/submit", post_label_submit)
+    app.router.add_post("/label/events/submit", post_event_label_submit)
+    app.router.add_post("/label/events/curate", post_event_curate)

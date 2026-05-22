@@ -306,6 +306,15 @@ DASHBOARD_HTML = """<!doctype html>
       <h2>Recent non-green examples</h2>
       <div class="example-list" id="eval-examples"></div>
     </div>
+    <div class="panel">
+      <h2>Event-level review</h2>
+      <div class="example-list">
+        <div class="example-row">
+          <div class="topline"><span>Workflow labels measure recall at the task-run level.</span><span><a href="/label/events" style="color:var(--accent);text-decoration:none;">open event review</a></span></div>
+          <div class="meta">Use this for hard negatives and missed-help candidates; use the decision labeler for exact tick labels.</div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="tab-content" id="tab-diet">
@@ -574,12 +583,14 @@ function renderActivity(d) {
 function renderEval(r) {
   const data = r.data || {};
   const labels = ((r.quality || {}).labels || {});
+  const eventLabels = labels.event || {};
   const best = (((r.variants || {}).calibration || {}).best_variant || {});
   const stats = [
     {label: 'Decisions', val: data.n_decisions ?? 0, sub: `${data.n_pings ?? 0} pings · ${data.n_claimed_pings ?? 0} claimed`},
     {label: 'Trace complete', val: pctMaybe(data.trace_completeness_for_pings), sub: `${data.n_traces ?? 0} traces`},
     {label: 'Claimed capture', val: pctMaybe(data.outcome_capture_rate_for_claimed_pings), sub: `${pctMaybe(data.outcome_capture_rate_for_pings)} all pings`},
     {label: 'P/R/F1 labels', val: `${pctMaybe(labels.precision_labeled)} / ${pctMaybe(labels.recall_labeled)} / ${pctMaybe(labels.f1_labeled)}`, sub: `${data.n_explicit_labels ?? 0} labels`},
+    {label: 'Event F1', val: pctMaybe(eventLabels.f1_labeled), sub: `${data.n_event_labels ?? 0} event labels`},
     {label: 'Best variant', val: best.variant || 'n/a', sub: `score ${numMaybe(best.score)}`},
   ];
   document.getElementById('eval-stats').innerHTML = stats.map(s => `

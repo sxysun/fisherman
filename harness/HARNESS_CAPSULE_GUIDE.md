@@ -60,6 +60,8 @@ These are quick health checks for whether the harness is producing usable traini
 | `Label coverage` | Explicit retro labels divided by decisions in the selected window. | `0.0%` means no decisions in that window have human labels. It does not count implicit labels or hover/dismiss outcomes. |
 | `Labeled F1` | F1 of the binary ping/not-ping policy on explicit labels. | `n/a` until there are both positive and negative labeled examples. |
 
+Decision labels and event labels are intentionally separate. `/label` labels one decision moment. `/label/events` labels a whole workflow run, such as a browser research pass or a coding/debugging run. Event labels are useful for recall because one missed opportunity can span many candidate ticks.
+
 ## Settings Tab
 
 The Settings tab edits local config and policy state. API key fields are masked in the collapsed view: the UI shows a small prefix/suffix preview so you can recognize the key without displaying the full value. Use the edit control beside a key field to reveal/edit it intentionally.

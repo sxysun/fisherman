@@ -169,6 +169,103 @@ def test_workflow_events_close_on_capture_gap_and_memory_snapshot(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_replay_preserves_workflow_event_id():
+    from eval import replay as replay_mod
+
+    event = replay_mod._to_event({
+        "candidate_id": "cand_replay_wev",
+        "ts": "2026-05-19T12:00:00Z",
+        "workflow_event_id": "wev_replay",
+        "screen": {"frontmost_app": "Chrome", "frame_age_sec": 1},
+        "scene": {"label": "reading_browser", "source": "rule"},
+    })
+    assert event.workflow_event_id == "wev_replay"
+
+
+def test_event_examples_mine_workflow_level_review_rows(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.append_jsonl("workflow_events.jsonl", {
+            "workflow_event_id": "wev_negative",
+            "ts": "2026-05-19T12:01:00Z",
+            "start_ts": "2026-05-19T12:00:00Z",
+            "last_ts": "2026-05-19T12:01:00Z",
+            "status": "closed",
+            "app": "Chrome",
+            "window_title": "Harness notes",
+            "scene_label": "reading_browser",
+            "duration_sec": 60,
+            "n_candidates": 2,
+            "ocr_preview": "reading harness notes",
+        })
+        store_mod.append_jsonl("candidates.jsonl", {
+            "candidate_id": "cand_negative",
+            "ts": "2026-05-19T12:00:30Z",
+            "workflow_event_id": "wev_negative",
+            "screen": {"frontmost_app": "Chrome", "window_title": "Harness notes", "ocr_snippet": "reading harness notes"},
+            "scene": {"label": "reading_browser"},
+        })
+        store_mod.append_jsonl("decisions.jsonl", {
+            "decision_id": "pd_negative",
+            "candidate_id": "cand_negative",
+            "workflow_event_id": "wev_negative",
+            "ts": "2026-05-19T12:00:35Z",
+            "action": "notch_ping",
+        })
+        store_mod.append_jsonl("outcomes.jsonl", {
+            "decision_id": "pd_negative",
+            "user_action": "dismissed",
+            "ts": "2026-05-19T12:00:40Z",
+            "interaction_summary": {"intent_signal": "rejection_considered"},
+        })
+
+        store_mod.append_jsonl("workflow_events.jsonl", {
+            "workflow_event_id": "wev_missed",
+            "ts": "2026-05-19T12:10:00Z",
+            "start_ts": "2026-05-19T12:08:00Z",
+            "last_ts": "2026-05-19T12:10:00Z",
+            "status": "closed",
+            "app": "Chrome",
+            "window_title": "Error page",
+            "scene_label": "reading_browser",
+            "duration_sec": 120,
+            "n_candidates": 2,
+            "ocr_preview": "debugging an error",
+        })
+        store_mod.append_jsonl("candidates.jsonl", {
+            "candidate_id": "cand_missed",
+            "ts": "2026-05-19T12:09:00Z",
+            "workflow_event_id": "wev_missed",
+            "screen": {"frontmost_app": "Chrome", "window_title": "Error page", "ocr_snippet": "debugging an error"},
+            "scene": {"label": "reading_browser"},
+        })
+        store_mod.append_jsonl("decisions.jsonl", {
+            "decision_id": "pd_missed",
+            "candidate_id": "cand_missed",
+            "workflow_event_id": "wev_missed",
+            "ts": "2026-05-19T12:09:05Z",
+            "action": "no_ping",
+        })
+        store_mod.append_jsonl("candidates.jsonl", {
+            "candidate_id": "cand_help_seek",
+            "ts": "2026-05-19T12:15:00Z",
+            "workflow_event_id": "wev_help_seek",
+            "screen": {"frontmost_app": "ChatGPT", "window_title": "ChatGPT", "ocr_snippet": "help me debug this error"},
+            "scene": {"label": "knowledge_qa"},
+        })
+
+        report = dataset_mod.event_examples(window="365d", limit=10)
+        by_type = report["summary"]["by_type"]
+        assert by_type["negative_event"] == 1
+        assert by_type["missed_help_event"] == 1
+        targets = {row["workflow_event_id"]: row["target"] for row in report["examples"]}
+        assert targets["wev_negative"] == "no_ping"
+        assert targets["wev_missed"] == "notch_ping"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_config_load_merges_new_defaults(tmp_path):
     old_path = config_mod.CONFIG_PATH
     config_mod.CONFIG_PATH = tmp_path / "config.toml"
