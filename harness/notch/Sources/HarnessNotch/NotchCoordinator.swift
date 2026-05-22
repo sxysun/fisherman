@@ -118,7 +118,7 @@ final class NotchCoordinator {
     private func configurePersistentSurface(_ panel: NSPanel) {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
-        panel.level = .floating
+        panel.level = currentDecisionID == nil ? .floating : .statusBar
         panel.collectionBehavior = [
             .canJoinAllSpaces,
             .fullScreenAuxiliary,
@@ -330,6 +330,7 @@ final class NotchCoordinator {
         state.activePanel = .ping
         state.current = pending
         setSurfaceExpanded(true)
+        ensureSurfaceVisible(repositionIfNeeded: true)
         startMouseTracking()
 
         autoDismissTask?.cancel()
@@ -376,6 +377,9 @@ final class NotchCoordinator {
 
         state.current = nil
         state.activePanel = .pipeline
+        if let panel {
+            configurePersistentSurface(panel)
+        }
         if !state.surfacePinned {
             collapseTask?.cancel()
             collapseTask = Task { [weak self] in

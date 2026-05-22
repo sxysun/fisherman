@@ -331,16 +331,49 @@ async def _tick(
     log.info("decision", action="notch_ping", intent=decision.intent, reasons=decision.reason_codes)
     append_jsonl("traces.jsonl", trace.to_dict())
     patch_trace(decision.decision_id, {}, lifecycle_stage="realizer_started")
-    realization = await realizer_mod.realize(
-        intent=decision.intent or "goal_aware",
-        event=event,
-        memory=mem_snap,
-        fisherman=fc,
-        config=dict(config["realizer"]) | {"privacy": config.get("privacy", {})},
-        daily_goal=daily_goal,
-        why_now=(getattr(decision, "why_now", None) or ", ".join(decision.reason_codes)),
-    )
-    trace.realization = realization.to_dict()
+    try:
+        realization = await realizer_mod.realize(
+            intent=decision.intent or "goal_aware",
+            event=event,
+            memory=mem_snap,
+            fisherman=fc,
+            config=dict(config["realizer"]) | {"privacy": config.get("privacy", {})},
+            daily_goal=daily_goal,
+            why_now=(getattr(decision, "why_now", None) or ", ".join(decision.reason_codes)),
+        )
+        trace.realization = realization.to_dict()
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+        log.warning("realizer_exception", error=error)
+        trace.realization = {
+            "model": str((config.get("realizer") or {}).get("model") or ""),
+            "base_url": str((config.get("realizer") or {}).get("base_url") or ""),
+            "prompt_version": "unavailable",
+            "message": "",
+            "tool_calls": [],
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "latency_ms": 0,
+            "vision_used": False,
+            "image_bytes": 0,
+            "privacy_flags": [],
+            "privacy_provenance": {},
+            "error": error,
+        }
+        patch_trace(
+            decision.decision_id,
+            {"realization": trace.realization},
+            lifecycle_stage="realizer_failed",
+            lifecycle_extra={"error": error},
+        )
+        trace.delivery = {"pushed": False, "channel": "skipped", "error": error}
+        patch_trace(
+            decision.decision_id,
+            {"delivery": trace.delivery},
+            lifecycle_stage="terminal_skipped",
+            lifecycle_extra={"error": error},
+        )
+        return
     patch_trace(
         decision.decision_id,
         {"realization": trace.realization},

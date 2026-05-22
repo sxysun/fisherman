@@ -13,6 +13,7 @@ from harness import config as config_mod
 from harness import critic as critic_mod
 from harness import curation as curation_mod
 from harness import dataset as dataset_mod
+from harness import daemon as daemon_mod
 from harness import eval_report as eval_report_mod
 from harness import fisherman_client as fc_mod
 from harness import experiments as experiments_mod
@@ -51,6 +52,7 @@ def test_imports():
     assert candidate_mod
     assert curation_mod
     assert dataset_mod
+    assert daemon_mod
     assert scene_mod
     assert memory_mod
     assert gate_mod
@@ -386,6 +388,64 @@ def test_scene_vlm_backoff_blocks_repeated_failures():
         assert scene_vlm_mod._should_skip(event, min_interval_sec=0).startswith("backoff")
     finally:
         scene_vlm_mod._backoff_until_ts = old_backoff
+
+
+def test_daemon_realizer_exception_records_skipped_trace(monkeypatch, tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        async def fake_synthesize(fc, user_pref, minutes_since_last_push):
+            event = schemas.CandidateEvent(candidate_id="cand_realizer_fail")
+            event.user_pref = user_pref
+            event.screen.frontmost_app = "Cursor"
+            event.screen.ocr_snippet = "TODO ship harness notification"
+            event.screen.frame_age_sec = 1
+            event.context.minutes_since_last_push = minutes_since_last_push
+            return event
+
+        async def fail_realize(*args, **kwargs):
+            raise FileNotFoundError("missing prompt")
+
+        monkeypatch.setattr(daemon_mod, "synthesize", fake_synthesize)
+        monkeypatch.setattr(daemon_mod.realizer_mod, "realize", fail_realize)
+        memory = memory_mod.SessionMemory(window_min=120, idle_boundary_sec=90)
+        cfg = {
+            "daemon": {"http_port": 7893},
+            "gate": {
+                "active_policy": "rule_v0",
+                "cooldown_min": 0,
+                "negative_feedback_backoff_min": 0,
+                "resume_suppression_sec": 90,
+                "quiet_hours_start": 3,
+                "quiet_hours_end": 4,
+            },
+            "intents": {"enabled": ["focus_nudge"]},
+            "experiment": {"enabled": False},
+            "policy_learner": {"enabled": False},
+            "privacy": {},
+            "realizer": {"base_url": "http://localhost:9000", "model": "test"},
+            "critic": {},
+            "push": {"channel": "notch_pill"},
+        }
+
+        asyncio.run(daemon_mod._tick(
+            config=cfg,
+            fc=object(),
+            memory=memory,
+            workflow_events=None,
+            last_push_at_ref=[None],
+        ))
+
+        decisions = store_mod.tail_jsonl("decisions.jsonl")
+        traces = store_mod.tail_jsonl("traces.jsonl")
+        assert decisions[-1]["action"] == "notch_ping"
+        assert traces[-1]["delivery"]["channel"] == "skipped"
+        assert "FileNotFoundError" in traces[-1]["realization"]["error"]
+        stages = [row["stage"] for row in traces[-1]["lifecycle"]]
+        assert "realizer_failed" in stages
+        assert "terminal_skipped" in stages
+    finally:
+        store_mod.HARNESS_DIR = old_dir
 
 
 def test_rule_v0_no_ping_when_in_call():
