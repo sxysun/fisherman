@@ -34,7 +34,7 @@ final class HarnessClient {
         }
         self.baseURL = url
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 3
+        cfg.timeoutIntervalForRequest = 15
         self.session = URLSession(configuration: cfg)
     }
 
@@ -61,7 +61,26 @@ final class HarnessClient {
         decisionID: String,
         action: String,
         latencyMs: Int,
-        interactions: [InteractionEvent] = []
+        interactions: [InteractionEvent] = [],
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        postOutcomeAttempt(
+            decisionID: decisionID,
+            action: action,
+            latencyMs: latencyMs,
+            interactions: interactions,
+            attemptsRemaining: 3,
+            completion: completion
+        )
+    }
+
+    private func postOutcomeAttempt(
+        decisionID: String,
+        action: String,
+        latencyMs: Int,
+        interactions: [InteractionEvent],
+        attemptsRemaining: Int,
+        completion: ((Bool) -> Void)?
     ) {
         let url = baseURL.appendingPathComponent("outcome")
         var req = URLRequest(url: url)
@@ -79,6 +98,27 @@ final class HarnessClient {
             "interactions": interactionsJSON,
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        session.dataTask(with: req).resume()
+        session.dataTask(with: req) { [weak self] _, response, error in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let ok = error == nil && (200..<300).contains(status)
+            if ok {
+                completion?(true)
+                return
+            }
+            guard let self = self, attemptsRemaining > 1 else {
+                completion?(false)
+                return
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.75) {
+                self.postOutcomeAttempt(
+                    decisionID: decisionID,
+                    action: action,
+                    latencyMs: latencyMs,
+                    interactions: interactions,
+                    attemptsRemaining: attemptsRemaining - 1,
+                    completion: completion
+                )
+            }
+        }.resume()
     }
 }

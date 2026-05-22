@@ -35,6 +35,7 @@ final class NotchCoordinator {
     private var surfaceTopInset: CGFloat
 
     private var currentDecisionID: String?
+    private var submittingOutcomeID: String?
     private var displayedAt: Date?
     private var autoDismissTask: Task<Void, Never>?
 
@@ -204,6 +205,15 @@ final class NotchCoordinator {
         }
     }
 
+    private func presentPingSurface() {
+        collapseTask?.cancel()
+        state.surfaceExpanded = true
+        resizeSurface()
+        ensureSurfaceVisible(repositionIfNeeded: true)
+        panel?.makeKeyAndOrderFront(nil)
+        panel?.orderFrontRegardless()
+    }
+
     private func handleSurfaceHover(_ hovering: Bool) {
         collapseTask?.cancel()
         if hovering {
@@ -312,7 +322,7 @@ final class NotchCoordinator {
     // MARK: - Polling
 
     private func poll() {
-        if currentDecisionID != nil { return }
+        if currentDecisionID != nil || submittingOutcomeID != nil { return }
         client.getPending { [weak self] pending in
             guard let self = self, let pending = pending else { return }
             Task { @MainActor in self.show(pending: pending) }
@@ -329,16 +339,14 @@ final class NotchCoordinator {
         lastWasNearPill = false
         state.activePanel = .ping
         state.current = pending
-        setSurfaceExpanded(true)
-        ensureSurfaceVisible(repositionIfNeeded: true)
+        presentPingSurface()
         startMouseTracking()
 
         autoDismissTask?.cancel()
         autoDismissTask = Task { [weak self, decisionID = pending.decisionID] in
-            let fallbackDelay = 8.0
-            let initialDelay = pending.expiresAtUnix.map {
-                max(1.0, min(60.0, $0 - Date().timeIntervalSince1970))
-            } ?? fallbackDelay
+            let minimumDisplayDelay = 30.0
+            let remaining = pending.expiresAtUnix.map { $0 - Date().timeIntervalSince1970 }
+            let initialDelay = max(minimumDisplayDelay, min(90.0, remaining ?? minimumDisplayDelay))
             try? await Task.sleep(nanoseconds: UInt64(initialDelay * 1_000_000_000))
             if Task.isCancelled { return }
             var extraWait = 0.0
@@ -368,12 +376,18 @@ final class NotchCoordinator {
         let collected = events
         events.removeAll(keepingCapacity: true)
         activeHoverTargets.removeAll(keepingCapacity: true)
+        submittingOutcomeID = did
         client.postOutcome(
             decisionID: did,
             action: action,
             latencyMs: latency,
             interactions: collected
-        )
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self = self, self.submittingOutcomeID == did else { return }
+                self.submittingOutcomeID = nil
+            }
+        }
 
         state.current = nil
         state.activePanel = .pipeline
