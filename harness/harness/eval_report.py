@@ -284,6 +284,12 @@ def classify_decision(
 
     if action == "notch_ping":
         trace_delivery = trace_delivery or {}
+        if not delivery and not trace_delivery:
+            return _cls(
+                "trace_gap_before_delivery",
+                "Policy chose ping, but no trace or delivery row exists; likely daemon restart, crash, or aborted realization before dispatch.",
+                "medium",
+            )
         if delivery and delivery.get("delivery_action") == "claimed":
             return _cls("missing_outcome_signal", "Notch claimed this ping but no outcome was recorded.", "medium")
         if trace_delivery.get("pushed") is False or trace_delivery.get("channel") in {"skipped", "blocked_by_critic"}:

@@ -1567,6 +1567,52 @@ def test_eval_report_distinguishes_queued_from_claimed_missing_outcomes(tmp_path
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_eval_report_distinguishes_trace_gap_from_claimed_missing_outcome(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        for did in ["pd_trace_gap", "pd_claimed_missing"]:
+            store_mod.append_jsonl(
+                "decisions.jsonl",
+                {
+                    "decision_id": did,
+                    "candidate_id": f"cand_{did}",
+                    "ts": "2026-05-19T12:00:00Z",
+                    "action": "notch_ping",
+                    "intent": "goal_aware",
+                },
+            )
+        store_mod.append_jsonl(
+            "traces.jsonl",
+            {
+                "trace_id": "tr_pd_claimed_missing",
+                "ts": "2026-05-19T12:00:00Z",
+                "state": {"candidate": {"candidate_id": "cand_pd_claimed_missing"}},
+                "action": {"decision_id": "pd_claimed_missing", "action": "notch_ping"},
+                "delivery": {"pushed": True, "channel": "notch_pill"},
+            },
+        )
+        store_mod.append_jsonl(
+            "deliveries.jsonl",
+            {
+                "delivery_id": "del_pd_claimed_missing_1",
+                "decision_id": "pd_claimed_missing",
+                "candidate_id": "cand_pd_claimed_missing",
+                "delivery_action": "claimed",
+                "channel": "notch_pill",
+                "pending_attempts": 1,
+                "ts": "2026-05-19T12:00:01Z",
+            },
+        )
+
+        report = eval_report_mod.build_report(window="365d", max_examples=10)
+        taxonomy = {row["type"]: row["n"] for row in report["taxonomy"]["by_type"]}
+        assert taxonomy["trace_gap_before_delivery"] == 1
+        assert taxonomy["missing_outcome_signal"] == 1
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_trainer_proposes_canary_from_implicit_signal(tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path

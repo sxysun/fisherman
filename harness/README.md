@@ -2,7 +2,7 @@
 
 Proactive presence harness for macOS. Decides *when* to ping the user and uses an LLM (hermes-agent or any OpenAI-compatible endpoint) to compose the message. Reads screen context from [Fisherman](../) over HTTP. Pings the user via a separate floating Harness capsule that can join all macOS Spaces while Fisherman keeps its own notch surface.
 
-For a complete picture, read [HANDOFF.md](HANDOFF.md) — it's the canonical doc for the system's current state. For a frontier-lab-style architecture audit and gap analysis, open [AUDIT.html](AUDIT.html).
+For a complete picture, read [HANDOFF.md](HANDOFF.md) — it's the canonical doc for the system's current state. For a frontier-lab-style architecture audit and gap analysis, open [AUDIT.html](AUDIT.html). For the ProAgentBench paper synthesis and rigor roadmap, read [PROAGENTBENCH_RIGOR_PLAN.md](PROAGENTBENCH_RIGOR_PLAN.md).
 
 ## Quick start
 

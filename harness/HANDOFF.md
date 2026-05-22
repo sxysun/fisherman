@@ -2,7 +2,7 @@
 
 You're picking up a proactive presence harness for macOS. The substrate is built. The system runs end-to-end. The next big work is **dogfooding** + **iterating on signal**, with only targeted infrastructure work when it improves learning from real outcomes.
 
-Read this doc + skim `README.md` and you'll know the system.
+Read this doc + skim `README.md` and you'll know the system. Read `PROAGENTBENCH_RIGOR_PLAN.md` for the paper-driven roadmap to bring the harness closer to benchmark-grade rigor.
 
 ---
 
