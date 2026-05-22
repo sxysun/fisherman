@@ -6,6 +6,7 @@ import SwiftUI
 struct HarnessExpanded: View {
     @ObservedObject var state: HarnessState
     @State private var dashboardData: JSON?
+    @State private var metricsData: JSON?
     @State private var evalData: JSON?
     @State private var dietData: JSON?
     @State private var loadingPanel: HarnessNotchPanel?
@@ -35,6 +36,7 @@ struct HarnessExpanded: View {
             case .pipeline:
                 PipelineNotchPanel(
                     dashboard: dashboardData,
+                    metrics: metricsData,
                     eval: evalData,
                     loading: loadingPanel == .pipeline,
                     error: loadError,
@@ -156,19 +158,22 @@ struct HarnessExpanded: View {
         case .ping:
             return
         case .pipeline:
-            if !force, dashboardData != nil, evalData != nil { return }
+            if !force, metricsData != nil {
+                if evalData == nil {
+                    Task { await refreshPipelineEval(force: false) }
+                }
+                return
+            }
             loadingPanel = .pipeline
             loadError = nil
-            async let dashboard = HarnessAPI.fetchData(window: "24h")
-            async let eval = HarnessAPI.fetchEvalReport(window: "24h", maxExamples: 4)
-            let (dashboardResult, evalResult) = await (dashboard, eval)
-            dashboardData = dashboardResult
-            evalData = evalResult
-            if dashboardResult == nil && evalResult == nil {
+            let metricsResult = await HarnessAPI.fetchMetrics(window: "24h")
+            metricsData = metricsResult
+            if metricsResult == nil {
                 loadError = "Pipeline data unavailable"
             }
             refreshedAt = Date()
             loadingPanel = nil
+            Task { await refreshPipelineEval(force: force) }
         case .diet:
             if !force, dietData != nil { return }
             loadingPanel = .diet
@@ -180,6 +185,16 @@ struct HarnessExpanded: View {
             loadingPanel = nil
         case .settings:
             return
+        }
+    }
+
+    @MainActor
+    private func refreshPipelineEval(force: Bool = false) async {
+        if !force, evalData != nil { return }
+        let eval = await HarnessAPI.fetchEvalReport(window: "24h", maxExamples: 4)
+        if eval != nil {
+            evalData = eval
+            refreshedAt = Date()
         }
     }
 }
@@ -286,6 +301,7 @@ private struct HarnessFloatingCompact: View {
 
 private struct PipelineNotchPanel: View {
     let dashboard: JSON?
+    let metrics: JSON?
     let eval: JSON?
     let loading: Bool
     let error: String?
@@ -294,27 +310,38 @@ private struct PipelineNotchPanel: View {
 
     var body: some View {
         let evalData = eval?["data"]
-        let nPings = evalData?["n_pings"].int ?? 0
+        let nPings = metrics?["n_pings"].int ?? evalData?["n_pings"].int ?? 0
+        let nCandidates = metrics?["n_candidates"].int ?? dashboard?["n_candidates"].int ?? 0
+        let nDecisions = metrics?["n_decisions"].int ?? dashboard?["n_decisions"].int ?? 0
+        let nTraces = metrics?["n_traces"].int ?? evalData?["n_traces"].int ?? 0
+        let nClaimed = metrics?["n_claimed_pings"].int ?? evalData?["n_claimed_pings"].int ?? 0
+        let nOutcomes = metrics?["outcomes"]["n"].int ?? evalData?["n_outcomes"].int ?? 0
+        let claimedCapture = metrics?["outcomes"]["capture_rate_for_claimed_pings"] ?? evalData?["outcome_capture_rate_for_claimed_pings"]
+        let traceComplete = metrics?["trace_funnel"]["trace_completeness_for_pings"] ?? evalData?["trace_completeness_for_pings"]
+        let implicitUsable = metrics?["implicit"]["usable"].int ?? evalData?["n_implicit_usable"].int ?? 0
+        let explicitLabels = metrics?["labels"]["n"].int ?? evalData?["n_explicit_labels"].int ?? 0
+        let labelCoverage = metrics?["explicit_label_coverage"] ?? evalData?["explicit_label_coverage"]
+        let labeledF1 = metrics?["labels"]["f1_labeled"] ?? eval?["quality"]["labels"]["f1_labeled"]
         VStack(alignment: .leading, spacing: 12) {
             panelToolbar(title: "Pipeline and eval", detail: updatedText, loading: loading, refresh: refresh)
             NotchRail(stages: [
-                NotchStage("Observe", "\(dashboard?["n_candidates"].int ?? 0)", "candidates"),
-                NotchStage("Gate", "\(dashboard?["n_decisions"].int ?? 0)", "decisions"),
-                NotchStage("Trace", "\(evalData?["n_traces"].int ?? 0)", "created"),
-                NotchStage("Ping", "\(evalData?["n_pings"].int ?? 0)", "eligible"),
-                NotchStage("Claim", "\(evalData?["n_claimed_pings"].int ?? 0)", "shown"),
-                NotchStage("Outcome", "\(evalData?["n_outcomes"].int ?? 0)", "captured"),
+                NotchStage("Observe", "\(nCandidates)", "candidates"),
+                NotchStage("Gate", "\(nDecisions)", "decisions"),
+                NotchStage("Trace", "\(nTraces)", "created"),
+                NotchStage("Ping", "\(nPings)", "eligible"),
+                NotchStage("Claim", "\(nClaimed)", "shown"),
+                NotchStage("Outcome", "\(nOutcomes)", "captured"),
             ])
 
             HStack(spacing: 8) {
-                NotchMetric(label: "claimed capture", value: nPings == 0 ? "no pings" : notchPct(evalData?["outcome_capture_rate_for_claimed_pings"]))
-                NotchMetric(label: "trace complete", value: nPings == 0 ? "no pings" : notchPct(evalData?["trace_completeness_for_pings"]))
-                NotchMetric(label: "implicit usable", value: "\(evalData?["n_implicit_usable"].int ?? 0)")
+                NotchMetric(label: "claimed capture", value: nPings == 0 ? "no pings" : notchPct(claimedCapture))
+                NotchMetric(label: "trace complete", value: nPings == 0 ? "no pings" : notchPct(traceComplete))
+                NotchMetric(label: "implicit usable", value: "\(implicitUsable)")
             }
             HStack(spacing: 8) {
-                NotchMetric(label: "explicit labels", value: "\(evalData?["n_explicit_labels"].int ?? 0)")
-                NotchMetric(label: "label coverage", value: notchPct(evalData?["explicit_label_coverage"]))
-                NotchMetric(label: "labeled F1", value: notchPct(eval?["quality"]["labels"]["f1_labeled"]))
+                NotchMetric(label: "explicit labels", value: "\(explicitLabels)")
+                NotchMetric(label: "label coverage", value: notchPct(labelCoverage))
+                NotchMetric(label: "labeled F1", value: notchPct(labeledF1))
             }
 
             if nPings == 0 {

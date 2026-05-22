@@ -111,10 +111,12 @@ def compute(window: str = "24h") -> dict[str, Any]:
         "since": since,
         "n_candidates": len(candidates),
         "n_decisions": len(decisions),
+        "n_traces": len(traces),
         "n_pings": n_pings,
         "n_no_pings": n_no_pings,
         "n_claimed_pings": len(claimed_ping_ids),
         "ping_rate": _ratio(n_pings, len(decisions)),
+        "explicit_label_coverage": _ratio(len(labels), len(decisions)),
         "outcomes": {
             "n": len(outcomes),
             "capture_rate_for_pings": _ratio(pings_with_outcome, n_pings),
@@ -255,12 +257,22 @@ def _read_payloads(
         db_exists = sql_store.db_path().exists()
         table_has_rows = db_exists and sql_store.count_rows(table) > 0
         if table_has_rows:
-            return sql_store.payload_rows(
+            rows = sql_store.payload_rows(
                 table,
                 since_iso=since_iso,
                 limit=limit,
                 newest_first=newest_first,
             )
+            if table in _JSONL_SUPPLEMENT_TABLES:
+                rows = _merge_jsonl_supplement(
+                    table,
+                    filename,
+                    rows,
+                    since_iso=since_iso,
+                    limit=limit,
+                    newest_first=newest_first,
+                )
+            return rows
     except Exception:
         pass
 
@@ -270,3 +282,67 @@ def _read_payloads(
     if newest_first:
         rows = list(reversed(rows))
     return rows
+
+
+_JSONL_SUPPLEMENT_TABLES = {
+    "deliveries",
+    "outcomes",
+    "retro_labels",
+    "workflow_events",
+    "curation",
+}
+
+
+def _merge_jsonl_supplement(
+    table: str,
+    filename: str,
+    rows: list[dict],
+    *,
+    since_iso: str | None = None,
+    limit: int | None = None,
+    newest_first: bool = False,
+) -> list[dict]:
+    """Merge small append streams with JSONL to survive partial SQLite backfills.
+
+    The JSONL files remain the canonical append logs. During a migration, a
+    sidecar table may contain some rows, which would otherwise disable the JSONL
+    fallback and make delivery/outcome metrics look empty. Large streams such as
+    candidates, decisions, and traces stay SQLite-only for dashboard latency.
+    """
+    merged: dict[str, dict] = {}
+    unkeyed: list[dict] = []
+    for source_row in rows:
+        key = _payload_key(table, source_row)
+        if key:
+            merged[key] = source_row
+        else:
+            unkeyed.append(source_row)
+
+    for source_row in iter_jsonl(filename):
+        if since_iso is not None and source_row.get("ts", "") < since_iso:
+            continue
+        key = _payload_key(table, source_row)
+        if key:
+            merged[key] = source_row
+        else:
+            unkeyed.append(source_row)
+
+    out = [*unkeyed, *merged.values()]
+    out.sort(key=lambda row: row.get("ts") or "", reverse=newest_first)
+    if limit is not None:
+        return out[:limit] if newest_first else out[-limit:]
+    return out
+
+
+def _payload_key(table: str, row: dict) -> str | None:
+    if table == "deliveries":
+        return row.get("delivery_id") or row.get("decision_id")
+    if table == "outcomes":
+        return row.get("outcome_id") or row.get("decision_id")
+    if table == "retro_labels":
+        return row.get("label_id") or row.get("decision_id") or row.get("candidate_id")
+    if table == "workflow_events":
+        return row.get("workflow_event_id")
+    if table == "curation":
+        return row.get("curation_id") or row.get("target_id")
+    return None

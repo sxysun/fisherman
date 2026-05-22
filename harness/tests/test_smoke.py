@@ -993,6 +993,48 @@ def test_pending_claim_writes_delivery_and_claimed_capture_metric(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_metrics_supplements_partial_sqlite_delivery_backfill(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {
+                "decision_id": "pd_jsonl_only_claim",
+                "candidate_id": "cand_jsonl_only_claim",
+                "ts": "2026-05-19T12:00:00Z",
+                "action": "notch_ping",
+            },
+        )
+        store_mod.append_jsonl(
+            "deliveries.jsonl",
+            {
+                "delivery_id": "del_unrelated",
+                "decision_id": "pd_unrelated",
+                "candidate_id": "cand_unrelated",
+                "delivery_action": "claimed",
+                "ts": "2026-05-19T12:00:01Z",
+            },
+        )
+
+        jsonl_only_delivery = {
+            "delivery_id": "del_jsonl_only_claim",
+            "decision_id": "pd_jsonl_only_claim",
+            "candidate_id": "cand_jsonl_only_claim",
+            "delivery_action": "claimed",
+            "ts": "2026-05-19T12:00:02Z",
+        }
+        with open(tmp_path / "deliveries.jsonl", "a") as f:
+            f.write(json.dumps(jsonl_only_delivery) + "\n")
+
+        assert sql_store_mod.count_rows("deliveries") == 1
+        report = metrics_mod.compute(window="365d")
+        assert report["n_claimed_pings"] == 1
+        assert report["outcomes"]["claimed_pings"] == 1
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
 def test_launchd_plist_points_at_harness_module(tmp_path):
     plist = service_mod.build_plist(
         python_executable="/tmp/venv/bin/python",
