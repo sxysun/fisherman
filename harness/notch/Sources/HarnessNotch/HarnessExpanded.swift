@@ -300,6 +300,7 @@ private struct PipelineNotchPanel: View {
             NotchRail(stages: [
                 NotchStage("Observe", "\(dashboard?["n_candidates"].int ?? 0)", "candidates"),
                 NotchStage("Gate", "\(dashboard?["n_decisions"].int ?? 0)", "decisions"),
+                NotchStage("Trace", "\(evalData?["n_traces"].int ?? 0)", "created"),
                 NotchStage("Ping", "\(evalData?["n_pings"].int ?? 0)", "eligible"),
                 NotchStage("Claim", "\(evalData?["n_claimed_pings"].int ?? 0)", "shown"),
                 NotchStage("Outcome", "\(evalData?["n_outcomes"].int ?? 0)", "captured"),
@@ -307,9 +308,13 @@ private struct PipelineNotchPanel: View {
 
             HStack(spacing: 8) {
                 NotchMetric(label: "claimed capture", value: nPings == 0 ? "no pings" : notchPct(evalData?["outcome_capture_rate_for_claimed_pings"]))
+                NotchMetric(label: "trace complete", value: nPings == 0 ? "no pings" : notchPct(evalData?["trace_completeness_for_pings"]))
                 NotchMetric(label: "implicit usable", value: "\(evalData?["n_implicit_usable"].int ?? 0)")
+            }
+            HStack(spacing: 8) {
                 NotchMetric(label: "explicit labels", value: "\(evalData?["n_explicit_labels"].int ?? 0)")
                 NotchMetric(label: "label coverage", value: notchPct(evalData?["explicit_label_coverage"]))
+                NotchMetric(label: "labeled F1", value: notchPct(eval?["quality"]["labels"]["f1_labeled"]))
             }
 
             if nPings == 0 {

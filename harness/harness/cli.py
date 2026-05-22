@@ -207,6 +207,8 @@ def storage_backfill(reset: bool) -> None:
         "deliveries.jsonl",
         "model_calls.jsonl",
         "retro_labels.jsonl",
+        "workflow_events.jsonl",
+        "curation.jsonl",
         "memory/session.jsonl",
     ]
     counts = sql_store.backfill_jsonl_files(filenames, reset=reset)
@@ -456,6 +458,7 @@ def metrics(since: str, as_json: bool) -> None:
     implicit = report["implicit"]
     outcomes = report["outcomes"]
     readiness = report["data_readiness"]
+    trace_funnel = report.get("trace_funnel") or {}
     click.echo(f"window: {report['window']} since {report['since']}")
     click.echo(f"decisions: {report['n_decisions']}  pings: {report['n_pings']}  ping_rate: {_fmt_pct(report['ping_rate'])}")
     click.echo(
@@ -465,8 +468,16 @@ def metrics(since: str, as_json: bool) -> None:
         f"avg_reward: {_fmt_num(outcomes['avg_reward'])}"
     )
     click.echo(
+        "trace: "
+        f"pings_with_trace={trace_funnel.get('pings_with_trace', 0)}  "
+        f"trace_complete={_fmt_pct(trace_funnel.get('trace_completeness_for_pings'))}"
+    )
+    click.echo(
         "labels: "
         f"{labels['n']}  agreement: {_fmt_pct(labels['agreement_rate'])}  "
+        f"precision: {_fmt_pct(labels.get('precision_labeled'))}  "
+        f"recall: {_fmt_pct(labels.get('recall_labeled'))}  "
+        f"f1: {_fmt_pct(labels.get('f1_labeled'))}  "
         f"false_interruptions: {_fmt_pct(labels['false_interruption_rate_labeled'])}  "
         f"missed_help: {_fmt_pct(labels['missed_help_rate_labeled'])}"
     )
@@ -607,10 +618,18 @@ def eval_report(since: str, policy: str, out: Optional[str], as_json: bool) -> N
     )
     click.echo(
         "coverage: "
+        f"trace_complete={_fmt_pct(data.get('trace_completeness_for_pings'))} "
         f"outcome_capture={_fmt_pct(data['outcome_capture_rate_for_pings'])} "
         f"claimed_capture={_fmt_pct(data.get('outcome_capture_rate_for_claimed_pings'))} "
         f"explicit_labels={_fmt_pct(data['explicit_label_coverage'])} "
         f"implicit_usable={_fmt_pct(data['implicit_usable_coverage'])}"
+    )
+    labels = ((report.get("quality") or {}).get("labels") or {})
+    click.echo(
+        "labeled timing: "
+        f"precision={_fmt_pct(labels.get('precision_labeled'))} "
+        f"recall={_fmt_pct(labels.get('recall_labeled'))} "
+        f"f1={_fmt_pct(labels.get('f1_labeled'))}"
     )
     best = ((report.get("variants") or {}).get("calibration") or {}).get("best_variant") or {}
     click.echo(
@@ -653,6 +672,82 @@ def info_diet(since: str, as_json: bool) -> None:
     click.echo("skill hypotheses:")
     for row in report.get("skill_hypotheses", [])[:5]:
         click.echo(f"  {row['confidence']:.2f}  {row['hypothesis']}")
+
+
+@main.command("kg-priors")
+@click.option("--since", default="30d", help="Window: 7d, 30d, etc.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def kg_priors(since: str, as_json: bool) -> None:
+    """Show local KG-style policy priors learned from labels/outcomes."""
+    from . import kg_priors as kg_priors_mod
+
+    report = kg_priors_mod.build_priors(window=since)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    click.echo(f"kg_priors: {report['window']} examples={report['n_examples']}")
+    for row in report.get("features", [])[:20]:
+        click.echo(
+            f"  {row['feature'][:44]:44s} "
+            f"p_should_ping={_fmt_pct(row['p_should_ping'])} n={_fmt_num(row['n'])}"
+        )
+
+
+@main.command("hard-examples")
+@click.option("--since", default="30d", help="Window: 7d, 30d, etc.")
+@click.option("--limit", default=80, help="Max examples.")
+@click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
+def hard_examples(since: str, limit: int, as_json: bool) -> None:
+    """Mine positives, hard negatives, and missed-help candidates."""
+    from . import dataset as dataset_mod
+
+    report = dataset_mod.hard_examples(window=since, limit=limit)
+    if as_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+    click.echo(f"hard_examples: {report['window']} since {report['since']}")
+    click.echo(json.dumps(report["summary"], indent=2))
+    for row in report.get("examples", [])[:12]:
+        ctx = row.get("context") or {}
+        click.echo(
+            f"  {row['example_type']:22s} target={row['target']:10s} "
+            f"action={row.get('policy_action') or 'n/a':10s} app={ctx.get('app') or '?'} "
+            f"scene={ctx.get('scene') or '?'}"
+        )
+
+
+@main.command("freeze-eval")
+@click.option("--since", default="30d", help="Window: 7d, 30d, etc.")
+@click.option("--limit", default=500, help="Max examples.")
+@click.option("--out", default=None, help="Dataset directory. Defaults to harness/datasets/YYYY-MM-DD.")
+def freeze_eval(since: str, limit: int, out: Optional[str]) -> None:
+    """Write a time-split frozen eval dataset manifest."""
+    from . import dataset as dataset_mod
+
+    out_dir = Path(out) if out else DATASETS_DIR / time.strftime("%Y-%m-%d")
+    manifest = dataset_mod.freeze_eval_dataset(window=since, out_dir=out_dir, limit=limit)
+    click.echo(f"dataset: {out_dir}")
+    click.echo(f"manifest: {out_dir / 'manifest.json'}")
+    click.echo(json.dumps(manifest["summary"], indent=2))
+
+
+@main.command("curate")
+@click.argument("target_type", type=click.Choice(["candidate", "decision", "workflow_event", "trace", "outcome"]))
+@click.argument("target_id")
+@click.option("--action", default="exclude", type=click.Choice(["retain", "exclude", "delete", "blur"]))
+@click.option("--reason", default="", help="Short rationale.")
+def curate(target_type: str, target_id: str, action: str, reason: str) -> None:
+    """Append a curation decision respected by eval/training builders."""
+    from . import curation as curation_mod
+
+    row = curation_mod.record(
+        target_type=target_type,
+        target_id=target_id,
+        action=action,
+        reason=reason,
+        source="cli",
+    )
+    click.echo(json.dumps(row, indent=2))
 
 
 @main.command("train-policy")

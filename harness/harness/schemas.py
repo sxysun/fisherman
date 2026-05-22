@@ -70,6 +70,7 @@ class CandidateEvent:
     scene: SceneTag = field(default_factory=lambda: SceneTag(label="unknown"))
     context: ContextSignals = field(default_factory=ContextSignals)
     user_pref: UserPref = field(default_factory=UserPref)
+    workflow_event_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -91,6 +92,7 @@ class WorkflowEvent:
     candidate_ids: list[str] = field(default_factory=list)
     ocr_preview: str = ""
     close_reason: Optional[str] = None
+    quality_flags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -111,6 +113,9 @@ class ProactiveDecision:
     # from reason_codes by a simple policy, but learned policies should prefer
     # a natural-language why-this-moment summary.
     why_now: Optional[str] = None
+    workflow_event_id: Optional[str] = None
+    intent_category: Optional[str] = None
+    evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -234,6 +239,8 @@ class Trace:
     ts: str
     state: dict
     action: dict
+    workflow_event_id: Optional[str] = None
+    lifecycle: list[dict[str, Any]] = field(default_factory=list)
     realization: Optional[dict] = None
     critic: Optional[dict] = None
     delivery: Optional[dict] = None
@@ -252,7 +259,13 @@ class Trace:
                 "recent_outcomes": recent_outcomes,
             },
             action={},
+            workflow_event_id=candidate.workflow_event_id,
         )
+
+    def mark(self, stage: str, **extra: Any) -> None:
+        row = {"stage": stage, "ts": _now_iso()}
+        row.update({k: v for k, v in extra.items() if v is not None})
+        self.lifecycle.append(row)
 
     def to_dict(self) -> dict:
         return asdict(self)

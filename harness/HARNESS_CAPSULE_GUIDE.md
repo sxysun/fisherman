@@ -42,6 +42,7 @@ The first row shows the end-to-end intervention pipeline over the current 24-hou
 | --- | --- | --- |
 | `Observe` | Number of screen-derived candidate moments the harness considered. A candidate is a snapshot/context event from Fisherman plus OCR/scene metadata. | `/dashboard/data`, `n_candidates` |
 | `Gate` | Number of policy decisions made for candidates. This includes both pings and non-pings. | `/dashboard/data`, `n_decisions` |
+| `Trace` | Number of trace rows created. A trace is now written immediately after the decision, before realization starts, then patched through later lifecycle stages. | `/eval/report`, `data.n_traces` |
 | `Ping` | Number of decisions where policy said a notification was warranted. This is the “eligible to interrupt” count. | `/eval/report`, `data.n_pings` |
 | `Claim` | Number of pings actually claimed/displayed by the Swift capsule app. This separates “daemon wanted to notify” from “UI actually showed it.” | `/eval/report`, `data.n_claimed_pings` |
 | `Outcome` | Number of reaction rows captured after pings, including clicks, dismisses, timeouts, hover/approach-derived summaries, etc. | `/eval/report`, `data.n_outcomes` |
@@ -53,9 +54,11 @@ These are quick health checks for whether the harness is producing usable traini
 | Card | Meaning | How To Read It |
 | --- | --- | --- |
 | `Claimed capture` | Percentage of displayed pings that produced an outcome row. | Should be high. If low, the UI may be showing pings but not reporting reactions back. |
+| `Trace complete` | Percentage of ping decisions that have a trace row. | Should be near 100%. If low, the daemon is dying or hanging between decision and realization. |
 | `Implicit usable` | Count of implicit weak labels considered usable for training/personalization. | Hover, approach, click, dismiss, and timeout reactions can become weak labels. More is better, but explicit labels are still cleaner. |
 | `Explicit labels` | Count of human retro labels in the selected window. | The cleanest eval signal for the ping/not-ping classifier. |
 | `Label coverage` | Explicit retro labels divided by decisions in the selected window. | `0.0%` means no decisions in that window have human labels. It does not count implicit labels or hover/dismiss outcomes. |
+| `Labeled F1` | F1 of the binary ping/not-ping policy on explicit labels. | `n/a` until there are both positive and negative labeled examples. |
 
 ## Settings Tab
 
@@ -155,6 +158,8 @@ Common labels:
 | `FALSE_INTERRUPTION` | The harness interrupted when it probably should not have. |
 | `MISSED_HELP` | The harness likely should have helped but did not. |
 | `MISSING_OUTCOME_SIGNAL` | The daemon/policy emitted something, but the system lacks enough reaction evidence. |
+| `TRACE_GAP_BEFORE_DELIVERY` | Policy chose ping but no trace/delivery row exists. New daemon builds should make this rare because trace rows are created before realization. |
+| `INCOMPLETE_TRACE_BEFORE_DELIVERY` | A trace exists, but it never reached delivery state. Usually means an in-flight or failed realization/critic/dispatch path. |
 | `QUEUED_NOT_CLAIMED` | A ping was produced by policy but not claimed by the UI. |
 | `UNDELIVERED_PING` | A ping was expected but did not make it to a displayed user surface. |
 | `SOFT_REJECTION` | User behavior suggests annoyance/low utility without a direct dismiss. |
@@ -189,6 +194,8 @@ The decision tree is:
    - `would_annoy` → `negative_implicit_only`
    - `not_now` → `not_now_implicit_only`
 4. Else if policy chose `notch_ping` but delivery/outcome is incomplete:
+   - no trace/delivery row → `trace_gap_before_delivery`
+   - trace exists but no delivery state → `incomplete_trace_before_delivery`
    - claimed by UI but no outcome → `missing_outcome_signal`
    - skipped or blocked before display → `undelivered_ping`
    - pushed/queued but not claimed → `queued_not_claimed`
@@ -249,11 +256,12 @@ Tabs:
 
 The Eval tab calls `loadEval()` in `dashboard_ui.py`, which fetches `/eval/report`. The renderer uses:
 
-- `r.data` for decisions, pings, claimed pings, outcome capture, labels, and implicit coverage.
+- `r.data` for decisions, traces, pings, claimed pings, outcome capture, labels, and implicit coverage.
+- `r.quality.labels` for explicit-label precision, recall, and F1.
 - `r.variants.calibration.best_variant` for policy calibration state.
 - `r.taxonomy.by_type` for decision classification counts.
 - `r.examples` for recent non-green examples.
-- `r.openadapt_style_gaps` for readiness gaps such as outcome capture, explicit labels, implicit labels, variant comparison, and decision volume.
+- `r.openadapt_style_gaps` for readiness gaps such as trace completeness, outcome capture, explicit labels, implicit labels, variant comparison, and decision volume.
 
 ### Dashboard Diet Tab
 

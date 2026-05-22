@@ -11,6 +11,8 @@ import time
 from harness import candidate as candidate_mod
 from harness import config as config_mod
 from harness import critic as critic_mod
+from harness import curation as curation_mod
+from harness import dataset as dataset_mod
 from harness import eval_report as eval_report_mod
 from harness import fisherman_client as fc_mod
 from harness import experiments as experiments_mod
@@ -18,6 +20,7 @@ from harness import gate as gate_mod
 from harness import image_redaction as image_redaction_mod
 from harness import implicit as implicit_mod
 from harness import information_diet as information_diet_mod
+from harness import kg_priors as kg_priors_mod
 from harness import label_ui as label_ui_mod
 from harness import memory as memory_mod
 from harness import metrics as metrics_mod
@@ -46,6 +49,8 @@ def test_imports():
     assert store_mod
     assert fc_mod
     assert candidate_mod
+    assert curation_mod
+    assert dataset_mod
     assert scene_mod
     assert memory_mod
     assert gate_mod
@@ -67,6 +72,7 @@ def test_imports():
     assert trust_mod
     assert trainer_mod
     assert workflow_events_mod
+    assert kg_priors_mod
 
 
 def test_schema_roundtrip():
@@ -89,6 +95,7 @@ def test_workflow_events_group_and_close_on_window_change():
     first.screen.frame_age_sec = 1
     first.scene = schemas.SceneTag(label="reading_browser", strength="medium")
     assert builder.observe(first) is None
+    assert first.workflow_event_id
 
     second = schemas.CandidateEvent(candidate_id="cand_wev_2")
     second.ts = "2026-05-19T12:00:10Z"
@@ -98,6 +105,7 @@ def test_workflow_events_group_and_close_on_window_change():
     second.screen.frame_age_sec = 1
     second.scene = schemas.SceneTag(label="reading_browser", strength="medium")
     assert builder.observe(second) is None
+    assert second.workflow_event_id == first.workflow_event_id
 
     third = schemas.CandidateEvent(candidate_id="cand_wev_3")
     third.ts = "2026-05-19T12:00:20Z"
@@ -108,6 +116,7 @@ def test_workflow_events_group_and_close_on_window_change():
     closed = builder.observe(third)
 
     assert closed is not None
+    assert third.workflow_event_id != closed.workflow_event_id
     assert closed.status == "closed"
     assert closed.close_reason == "window_changed"
     assert closed.n_candidates == 2
@@ -365,6 +374,18 @@ def test_scene_vlm_skips_sensitive_ocr_before_network():
     event.screen.frame_age_sec = 1
     event.screen.ocr_snippet = "api_key = sk-abcdefghijklmnopqrstuvwxyz"
     assert scene_vlm_mod._should_skip(event, min_interval_sec=0) == "sensitive_ocr"
+
+
+def test_scene_vlm_backoff_blocks_repeated_failures():
+    old_backoff = scene_vlm_mod._backoff_until_ts
+    try:
+        scene_vlm_mod._note_failure({"error_backoff_sec": 60})
+        event = schemas.CandidateEvent()
+        event.screen.frame_age_sec = 1
+        event.screen.ocr_snippet = "ordinary screen text"
+        assert scene_vlm_mod._should_skip(event, min_interval_sec=0).startswith("backoff")
+    finally:
+        scene_vlm_mod._backoff_until_ts = old_backoff
 
 
 def test_rule_v0_no_ping_when_in_call():
@@ -649,6 +670,7 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
             assert "drafting harness policy learner" in messages[1]["content"]
             assert "recent_workflow_events" in messages[1]["content"]
             assert "Harness policy notes" in messages[1]["content"]
+            assert "kg_priors" in messages[1]["content"]
             return {
                 "action": "notch_ping",
                 "confidence": 0.82,
@@ -820,6 +842,11 @@ def test_store_attaches_outcome_to_trace(tmp_path):
         rows = store_mod.tail_jsonl("traces.jsonl")
         assert rows[0]["outcome"] == outcome
         assert rows[0]["reward"] == reward
+        assert rows[0]["lifecycle"][-1]["stage"] == "outcome"
+        assert store_mod.patch_trace("pd_test", {"delivery": {"pushed": True}}, lifecycle_stage="dispatch_done")
+        rows = store_mod.tail_jsonl("traces.jsonl")
+        assert rows[0]["delivery"]["pushed"] is True
+        assert rows[0]["lifecycle"][-1]["stage"] == "dispatch_done"
     finally:
         store_mod.HARNESS_DIR = old_dir
 
@@ -994,6 +1021,24 @@ def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
             "duration_sec": 6.0,
             "close_reason": "window_changed",
         }
+        delivery = {
+            "delivery_id": "del_sql",
+            "decision_id": "pd_sql",
+            "candidate_id": "cand_sql",
+            "delivery_action": "claimed",
+            "channel": "notch_pill",
+            "pending_attempts": 1,
+            "ts": "2026-05-19T12:00:07Z",
+        }
+        curation = {
+            "curation_id": "cur_sql",
+            "target_type": "candidate",
+            "target_id": "cand_sql",
+            "action": "retain",
+            "reason": "test",
+            "source": "manual",
+            "ts": "2026-05-19T12:00:08Z",
+        }
 
         store_mod.append_jsonl("candidates.jsonl", candidate)
         store_mod.append_jsonl("decisions.jsonl", decision)
@@ -1002,16 +1047,20 @@ def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
         store_mod.append_jsonl("model_calls.jsonl", model_call)
         store_mod.append_jsonl("retro_labels.jsonl", label)
         store_mod.append_jsonl("workflow_events.jsonl", workflow_event)
+        store_mod.append_jsonl("deliveries.jsonl", delivery)
+        store_mod.append_jsonl("curation.jsonl", curation)
 
         assert sql_store_mod.db_path().exists()
-        assert sql_store_mod.count_rows("event_log") == 7
+        assert sql_store_mod.count_rows("event_log") == 9
         assert sql_store_mod.count_rows("candidates") == 1
         assert sql_store_mod.count_rows("decisions") == 1
         assert sql_store_mod.count_rows("traces") == 1
         assert sql_store_mod.count_rows("outcomes") == 1
+        assert sql_store_mod.count_rows("deliveries") == 1
         assert sql_store_mod.count_rows("model_calls") == 1
         assert sql_store_mod.count_rows("retro_labels") == 1
         assert sql_store_mod.count_rows("workflow_events") == 1
+        assert sql_store_mod.count_rows("curation") == 1
 
         reward = {"version": "v2", "value": -0.8}
         assert store_mod.attach_outcome_to_trace("pd_sql", outcome, reward)
@@ -1171,6 +1220,9 @@ def test_metrics_computes_label_quality_and_readiness(tmp_path):
         assert report["implicit"]["usable"] == 1
         assert report["implicit"]["positive"] == 1
         assert report["labels"]["agreement_rate"] == 0.5
+        assert report["labels"]["precision_labeled"] == 0.5
+        assert report["labels"]["recall_labeled"] == 0.5
+        assert report["labels"]["f1_labeled"] == 0.5
         assert report["labels"]["false_interruption_rate_labeled"] == 0.5
         assert report["labels"]["missed_help_rate_labeled"] == 0.5
         assert report["data_readiness"]["needs_labels_for_personalization"] == 16
@@ -1261,6 +1313,79 @@ def test_implicit_outcomes_become_confidence_weighted_weak_labels():
     assert summary["usable"] == 3
     assert summary["positive"] == 1
     assert summary["negative"] == 2
+
+
+def test_kg_priors_match_current_event_from_implicit_signal(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    old_cache = kg_priors_mod._CACHE
+    kg_priors_mod._CACHE = None
+    try:
+        store_mod.append_jsonl(
+            "candidates.jsonl",
+            {
+                "candidate_id": "cand_kg",
+                "ts": "2026-05-19T12:00:00Z",
+                "screen": {"frontmost_app": "Chrome", "window_title": "Harness paper", "ocr_snippet": "policy evaluation"},
+                "scene": {"label": "reading_browser"},
+            },
+        )
+        store_mod.append_jsonl(
+            "decisions.jsonl",
+            {"decision_id": "pd_kg", "candidate_id": "cand_kg", "ts": "2026-05-19T12:00:01Z", "action": "notch_ping"},
+        )
+        store_mod.append_jsonl(
+            "outcomes.jsonl",
+            {"decision_id": "pd_kg", "user_action": "clicked", "ts": "2026-05-19T12:00:02Z"},
+        )
+        event = schemas.CandidateEvent(candidate_id="cand_now")
+        event.screen.frontmost_app = "Chrome"
+        event.screen.window_title = "Harness paper"
+        event.screen.ocr_snippet = "policy evaluation"
+        event.scene = schemas.SceneTag(label="reading_browser")
+
+        matched = kg_priors_mod.priors_for_event(event, window="365d")
+        assert matched["n_examples"] == 1
+        assert any(row["feature"] == "app:chrome" for row in matched["matches"])
+    finally:
+        kg_priors_mod._CACHE = old_cache
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_hard_example_miner_respects_curation_exclusions(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        for cid, did, action, minute in [
+            ("cand_pos", "pd_pos", "notch_ping", "00"),
+            ("cand_neg", "pd_neg", "no_ping", "01"),
+        ]:
+            store_mod.append_jsonl(
+                "candidates.jsonl",
+                {
+                    "candidate_id": cid,
+                    "ts": f"2026-05-19T12:{minute}:00Z",
+                    "screen": {"frontmost_app": "Chrome", "window_title": "Harness eval", "ocr_snippet": "policy evaluation"},
+                    "scene": {"label": "reading_browser"},
+                },
+            )
+            store_mod.append_jsonl(
+                "decisions.jsonl",
+                {"decision_id": did, "candidate_id": cid, "ts": f"2026-05-19T12:{minute}:01Z", "action": action},
+            )
+        store_mod.append_jsonl(
+            "outcomes.jsonl",
+            {"decision_id": "pd_pos", "user_action": "clicked", "ts": "2026-05-19T12:00:02Z"},
+        )
+
+        mined = dataset_mod.hard_examples(window="365d", limit=20)
+        assert any(row["candidate_id"] == "cand_neg" and row["example_type"] == "hard_negative" for row in mined["examples"])
+
+        curation_mod.record(target_type="candidate", target_id="cand_neg", action="exclude", reason="test")
+        mined = dataset_mod.hard_examples(window="365d", limit=20)
+        assert not any(row["candidate_id"] == "cand_neg" for row in mined["examples"])
+    finally:
+        store_mod.HARNESS_DIR = old_dir
 
 
 def test_implicit_endpoint_returns_joined_examples(tmp_path):

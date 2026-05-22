@@ -12,6 +12,7 @@ from .store import (
     claim_pending,
     complete_pending,
     list_pending,
+    patch_trace,
     read_policy_state,
     tail_jsonl,
     write_policy_state,
@@ -37,7 +38,7 @@ async def get_pending(request: web.Request) -> web.Response:
     payload = claim_pending()
     if payload is None:
         return web.json_response(None)
-    append_jsonl("deliveries.jsonl", {
+    delivery_row = {
         "delivery_id": f"del_{payload.get('decision_id')}_{payload.get('pending_attempts', 0)}",
         "decision_id": payload.get("decision_id"),
         "candidate_id": payload.get("candidate_id"),
@@ -47,7 +48,15 @@ async def get_pending(request: web.Request) -> web.Response:
         "pending_created_at": payload.get("pending_created_at"),
         "pending_claimed_at": payload.get("pending_claimed_at"),
         "ts": _now_iso(),
-    })
+    }
+    append_jsonl("deliveries.jsonl", delivery_row)
+    if payload.get("decision_id"):
+        patch_trace(
+            str(payload.get("decision_id")),
+            {},
+            lifecycle_stage="claimed",
+            lifecycle_extra={"pending_attempts": payload.get("pending_attempts", 0)},
+        )
     return web.json_response(payload)
 
 

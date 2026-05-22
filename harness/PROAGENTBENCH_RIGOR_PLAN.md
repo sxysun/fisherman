@@ -489,6 +489,27 @@ Acceptance criteria:
 5. Add KG priors as the first serious memory mechanism.
 6. Add time-based frozen eval splits and precision/recall/F1.
 
+## Implementation Status: 2026-05-22
+
+The first paper-style rigor pass is now implemented in code:
+
+- The daemon appends a trace immediately after each decision and patches it through lifecycle stages: `decision_recorded`, `realizer_started`, `realizer_done`/`realizer_failed`, `critic_started`, `critic_done`, `dispatch_started`, `dispatch_done`, `claimed`, `outcome`, and terminal skipped/blocked/no-ping states.
+- Candidates, decisions, and traces now carry `workflow_event_id`, and workflow events include basic quality flags plus periodic open snapshots.
+- `metrics` and `eval-report` now expose ping trace-completeness plus explicit-label precision, recall, and F1.
+- SQLite sidecar schema now includes typed `deliveries` and `curation` tables in addition to candidates/decisions/traces/outcomes/model calls/labels/workflow events.
+- `curation.jsonl` exists and is respected by KG-prior and dataset builders.
+- `kg_priors.py` builds local app/scene/app+scene/window-keyword priors from explicit labels and usable implicit outcomes, and `llm_icl_v0` includes matching priors in the live policy prompt.
+- `dataset.py` mines useful pings, behavioral negatives, context-matched hard negatives, and missed-help candidates, and `harness freeze-eval` writes a sanitized time-ordered train/validation/test manifest.
+- The per-candidate VLM scene tagger now has explicit error/rate-limit backoff, so a failing VLM endpoint cannot repeatedly spend calls on every eligible tick.
+- Smoke coverage is 56 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, VLM backoff, and precision/recall metrics.
+
+Still not done:
+
+- There is not yet a native event-level labeling UI that labels whole workflow events instead of individual decision ticks.
+- The frozen eval protocol does not yet enforce strict temporal memory retrieval inside every policy replay path.
+- KG priors are simple count priors; RAG similar-event retrieval and ablation reports are still future work.
+- The curation ledger is CLI-backed; there is no capsule/browser review panel for delete/exclude workflows yet.
+
 ## Non-Goals For Now
 
 - Do not train a neural local classifier until the event/label protocol is clean.

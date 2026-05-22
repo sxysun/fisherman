@@ -36,6 +36,7 @@ def compute(window: str = "24h") -> dict[str, Any]:
     decisions = [r for r in all_decisions if r.get("ts", "") >= since]
     outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
     deliveries = _read_payloads("deliveries", "deliveries.jsonl", since_iso=since)
+    traces = _read_payloads("traces", "traces.jsonl", since_iso=since)
     labels = latest_label_rows(
         _read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
     )
@@ -45,6 +46,11 @@ def compute(window: str = "24h") -> dict[str, Any]:
         d.get("candidate_id"): d for d in all_decisions if d.get("candidate_id")
     }
     outcomes_by_decision = {o.get("decision_id"): o for o in outcomes if o.get("decision_id")}
+    traced_decision_ids = {
+        (row.get("action") or {}).get("decision_id")
+        for row in traces
+        if (row.get("action") or {}).get("decision_id")
+    }
 
     action_counts = Counter(d.get("action", "?") for d in decisions)
     label_counts = Counter(r.get("label", "?") for r in labels)
@@ -68,6 +74,7 @@ def compute(window: str = "24h") -> dict[str, Any]:
     }
     claimed_ping_ids &= ping_decision_ids
     claimed_with_outcome = sum(1 for did in claimed_ping_ids if did in outcomes_by_decision)
+    pings_with_trace = sum(1 for did in ping_decision_ids if did in traced_decision_ids)
 
     joined_labels: list[tuple[dict, dict | None]] = []
     for label in labels:
@@ -119,6 +126,12 @@ def compute(window: str = "24h") -> dict[str, Any]:
             "avg_reward": _ratio(total_reward, len(outcomes)),
             "reward_v2": reward_summary,
         },
+        "trace_funnel": {
+            "pings_with_trace": pings_with_trace,
+            "trace_completeness_for_pings": _ratio(pings_with_trace, n_pings),
+            "claimed_pings": len(claimed_ping_ids),
+            "claimed_capture_rate": _ratio(claimed_with_outcome, len(claimed_ping_ids)),
+        },
         "labels": {
             "n": len(labels),
             "counts": dict(label_counts),
@@ -138,6 +151,7 @@ def _label_quality(joined_labels: list[tuple[dict, dict | None]]) -> dict[str, A
     labeled_pings = 0
     labeled_no_pings = 0
     unknown_decision = 0
+    tp = fp = tn = fn = 0
 
     for label, decision in joined_labels:
         if decision is None:
@@ -152,19 +166,31 @@ def _label_quality(joined_labels: list[tuple[dict, dict | None]]) -> dict[str, A
             if value == "would_help":
                 determinate += 1
                 correct += 1
+                tp += 1
             elif value == "would_annoy":
                 determinate += 1
                 incorrect += 1
                 false_interruptions += 1
+                fp += 1
+            elif value == "good_no_ping":
+                determinate += 1
+                incorrect += 1
+                false_interruptions += 1
+                fp += 1
         elif action == "no_ping":
             labeled_no_pings += 1
             if value in ("good_no_ping", "would_annoy"):
                 determinate += 1
                 correct += 1
+                tn += 1
             elif value == "would_help":
                 determinate += 1
                 incorrect += 1
                 missed_help += 1
+                fn += 1
+
+    precision = _ratio(tp, tp + fp)
+    recall = _ratio(tp, tp + fn)
 
     return {
         "determinate": determinate,
@@ -177,6 +203,13 @@ def _label_quality(joined_labels: list[tuple[dict, dict | None]]) -> dict[str, A
         "missed_help_rate_labeled": _ratio(missed_help, labeled_no_pings),
         "false_interruptions_labeled": false_interruptions,
         "missed_help_labeled": missed_help,
+        "tp": tp,
+        "fp": fp,
+        "tn": tn,
+        "fn": fn,
+        "precision_labeled": precision,
+        "recall_labeled": recall,
+        "f1_labeled": _f1(precision, recall),
     }
 
 
@@ -201,6 +234,12 @@ def _ratio(num: float, den: float) -> float | None:
     if not den:
         return None
     return num / den
+
+
+def _f1(precision: float | None, recall: float | None) -> float | None:
+    if precision is None or recall is None or precision + recall <= 0:
+        return None
+    return 2 * precision * recall / (precision + recall)
 
 
 def _read_payloads(

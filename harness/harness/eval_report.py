@@ -102,6 +102,9 @@ def build_report(
     pings_with_outcome = sum(
         1 for row in pings if row.get("decision_id") in outcomes_by_decision
     )
+    pings_with_trace = sum(
+        1 for row in pings if row.get("decision_id") in traces_by_decision
+    )
     claimed_ping_ids = {
         str(row.get("decision_id"))
         for row in deliveries
@@ -123,9 +126,11 @@ def build_report(
             "n_pings": len(pings),
             "n_claimed_pings": len(claimed_ping_ids),
             "n_outcomes": len(outcomes),
+            "n_traces": len(traces),
             "n_explicit_labels": len(labels),
             "n_implicit_labels": len(weak_labels),
             "n_implicit_usable": sum(1 for row in weak_labels if row.get("usable_for_training")),
+            "trace_completeness_for_pings": _ratio(pings_with_trace, len(pings)),
             "outcome_capture_rate_for_pings": _ratio(pings_with_outcome, len(pings)),
             "outcome_capture_rate_for_claimed_pings": _ratio(claimed_with_outcome, len(claimed_ping_ids)),
             "explicit_label_coverage": _ratio(len(labels), len(decisions)),
@@ -159,6 +164,7 @@ def _joined_decision_row(
     trace: dict[str, Any] | None,
     delivery: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    trace_exists = trace is not None
     trace = trace or {}
     state = trace.get("state") or {}
     candidate = state.get("candidate") or {}
@@ -167,7 +173,15 @@ def _joined_decision_row(
     realization = trace.get("realization") or {}
     action = trace.get("action") or {}
     trace_delivery = trace.get("delivery") or {}
-    cls = classify_decision(decision, outcome, label, weak_label, delivery, trace_delivery)
+    cls = classify_decision(
+        decision,
+        outcome,
+        label,
+        weak_label,
+        delivery,
+        trace_delivery,
+        trace_exists=trace_exists,
+    )
 
     summary = (outcome or {}).get("interaction_summary") or {}
     reward = (outcome or {}).get("reward") or {}
@@ -234,6 +248,7 @@ def classify_decision(
     weak_label: dict[str, Any] | None = None,
     delivery: dict[str, Any] | None = None,
     trace_delivery: dict[str, Any] | None = None,
+    trace_exists: bool = True,
 ) -> dict[str, str]:
     """Classify a decision into an eval failure/success bucket."""
     action = decision.get("action")
@@ -284,10 +299,16 @@ def classify_decision(
 
     if action == "notch_ping":
         trace_delivery = trace_delivery or {}
-        if not delivery and not trace_delivery:
+        if not trace_exists:
             return _cls(
                 "trace_gap_before_delivery",
                 "Policy chose ping, but no trace or delivery row exists; likely daemon restart, crash, or aborted realization before dispatch.",
+                "medium",
+            )
+        if not delivery and not trace_delivery:
+            return _cls(
+                "incomplete_trace_before_delivery",
+                "Policy chose ping and trace exists, but no delivery state is recorded yet; likely in-flight, failed realization, or daemon interruption.",
                 "medium",
             )
         if delivery and delivery.get("delivery_action") == "claimed":
@@ -386,8 +407,15 @@ def _gap_checklist(
     labels = metrics.get("labels") or {}
     outcomes = metrics.get("outcomes") or {}
     implicit = metrics.get("implicit") or {}
+    trace_funnel = metrics.get("trace_funnel") or {}
     variants = variant_report.get("variants") or []
     return [
+        {
+            "name": "decision_trace_completeness",
+            "status": "pass" if (trace_funnel.get("trace_completeness_for_pings") or 0) >= 0.99 else "watch",
+            "detail": "Every ping decision should create a trace before realization begins.",
+            "value": trace_funnel.get("trace_completeness_for_pings"),
+        },
         {
             "name": "outcome_capture",
             "status": "pass" if (outcomes.get("capture_rate_for_claimed_pings") or 0) >= 0.9 else "watch",

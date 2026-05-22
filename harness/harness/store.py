@@ -38,19 +38,25 @@ def append_jsonl(filename: str, row: dict) -> None:
         log.warning("sql_mirror_failed filename=%s error=%s", filename, e)
 
 
-def attach_outcome_to_trace(decision_id: str, outcome: dict, reward: dict | None = None) -> bool:
-    """Patch the matching trace row with its eventual outcome/reward.
+def patch_trace(
+    decision_id: str,
+    patch: dict,
+    *,
+    lifecycle_stage: str | None = None,
+    lifecycle_extra: dict | None = None,
+) -> bool:
+    """Patch the latest trace for a decision in-place.
 
-    Traces are written when the decision is made, while outcomes arrive later
-    from the notch app. Rewriting this small local jsonl keeps the canonical
-    trace rows useful for replay and labeling without introducing a database.
+    Traces are append-created as soon as a decision is made, then patched as the
+    async ping path advances. This keeps decision -> trace completeness durable
+    without turning the JSONL store into a full event-sourced database.
     """
     p = HARNESS_DIR / "traces.jsonl"
     if not p.exists():
         return False
 
     rows: list[dict] = []
-    found = False
+    found_row: dict | None = None
     with open(p) as f:
         for line in f:
             line = line.strip()
@@ -64,13 +70,23 @@ def attach_outcome_to_trace(decision_id: str, outcome: dict, reward: dict | None
     for row in reversed(rows):
         action = row.get("action") or {}
         if action.get("decision_id") == decision_id:
-            row["outcome"] = outcome
-            if reward is not None:
-                row["reward"] = reward
-            found = True
+            _deep_merge(row, patch)
+            if lifecycle_stage:
+                lifecycle = row.setdefault("lifecycle", [])
+                if not isinstance(lifecycle, list):
+                    lifecycle = []
+                    row["lifecycle"] = lifecycle
+                lifecycle_row = {
+                    "stage": lifecycle_stage,
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                if lifecycle_extra:
+                    lifecycle_row.update({k: v for k, v in lifecycle_extra.items() if v is not None})
+                lifecycle.append(lifecycle_row)
+            found_row = row
             break
 
-    if not found:
+    if found_row is None:
         return False
 
     tmp = p.with_suffix(".jsonl.tmp")
@@ -81,10 +97,36 @@ def attach_outcome_to_trace(decision_id: str, outcome: dict, reward: dict | None
     try:
         from . import sql_store
 
-        sql_store.update_trace_outcome(decision_id, outcome, reward)
+        sql_store.upsert_trace_payload(found_row)
     except Exception as e:
-        log.warning("sql_trace_update_failed decision_id=%s error=%s", decision_id, e)
+        log.warning("sql_trace_patch_failed decision_id=%s error=%s", decision_id, e)
     return True
+
+
+def attach_outcome_to_trace(decision_id: str, outcome: dict, reward: dict | None = None) -> bool:
+    """Patch the matching trace row with its eventual outcome/reward.
+
+    Traces are written when the decision is made, while outcomes arrive later
+    from the notch app. Rewriting this small local jsonl keeps the canonical
+    trace rows useful for replay and labeling without introducing a database.
+    """
+    patch = {"outcome": outcome}
+    if reward is not None:
+        patch["reward"] = reward
+    return patch_trace(
+        decision_id,
+        patch,
+        lifecycle_stage="outcome",
+        lifecycle_extra={"user_action": outcome.get("user_action")},
+    )
+
+
+def _deep_merge(target: dict, patch: dict) -> None:
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = value
 
 
 def tail_jsonl(filename: str, n: Optional[int] = None) -> list[dict]:

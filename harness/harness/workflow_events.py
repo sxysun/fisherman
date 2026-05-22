@@ -68,6 +68,8 @@ class WorkflowEventBuilder:
                 self._active.window_title = (event.screen.window_title or "").strip()[:180]
             _extend_workflow_event(self._active, event, self.max_ocr_preview_chars)
 
+        if self._active is not None:
+            event.workflow_event_id = self._active.workflow_event_id
         return closed
 
     def close(self, reason: str = "closed") -> WorkflowEvent | None:
@@ -104,6 +106,12 @@ class WorkflowEventBuilder:
             rows.append(self._active)
         rows = rows[-max(1, int(limit)):]
         return [_compact(event) for event in rows]
+
+    def active_id(self) -> str | None:
+        return self._active.workflow_event_id if self._active is not None else None
+
+    def active_snapshot(self) -> dict | None:
+        return _compact(self._active) if self._active is not None else None
 
     def _boundary_reason(
         self,
@@ -145,6 +153,7 @@ def _new_workflow_event(
         scene_label=event.scene.label,
         ts=event.ts,
         n_candidates=0,
+        quality_flags=_quality_flags(event),
     )
     _extend_workflow_event(workflow_event, event, max_ocr_preview_chars)
     return workflow_event
@@ -159,6 +168,7 @@ def _extend_workflow_event(
     workflow_event.ts = event.ts
     workflow_event.scene_label = event.scene.label or workflow_event.scene_label
     workflow_event.n_candidates += 1
+    workflow_event.quality_flags = sorted(set(workflow_event.quality_flags + _quality_flags(event)))
     if event.candidate_id:
         workflow_event.candidate_ids.append(event.candidate_id)
         workflow_event.candidate_ids = workflow_event.candidate_ids[-20:]
@@ -188,6 +198,7 @@ def _compact(event: WorkflowEvent) -> dict:
         "n_candidates": event.n_candidates,
         "close_reason": event.close_reason,
         "ocr_preview": event.ocr_preview[:240],
+        "quality_flags": event.quality_flags,
     }
 
 
@@ -207,6 +218,23 @@ def _invalid_reason(event: CandidateEvent, active_frame_max_age_sec: float) -> s
     if frame_age > active_frame_max_age_sec:
         return "stale_frame"
     return None
+
+
+def _quality_flags(event: CandidateEvent) -> list[str]:
+    flags: list[str] = []
+    if not (event.screen.frontmost_app or event.screen.bundle_id):
+        flags.append("app_unknown")
+    if not (event.screen.window_title or "").strip():
+        flags.append("window_unknown")
+    if not (event.screen.ocr_snippet or "").strip():
+        flags.append("no_ocr")
+    if float(getattr(event.screen, "frame_age_sec", 0.0) or 0.0) > DEFAULT_ACTIVE_FRAME_MAX_AGE_SEC:
+        flags.append("stale_frame")
+    if float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0) > DEFAULT_MAX_GAP_SEC:
+        flags.append("capture_gap")
+    if event.screen.sensitive_scene or event.scene.label == "sensitive":
+        flags.append("sensitive")
+    return flags
 
 
 def _event_id(start_ts: str, app_key: str, title_key: str) -> str:

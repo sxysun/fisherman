@@ -31,9 +31,9 @@ from .schemas import (
 )
 from .server import build_app
 from .store import (
-    attach_outcome_to_trace,
     append_jsonl,
     ensure_dirs,
+    patch_trace,
     read_policy_state,
     tail_jsonl,
     write_policy_state,
@@ -257,19 +257,21 @@ async def _tick(
                 sensitive=vlm_result.get("sensitive"),
             )
 
-    append_jsonl("candidates.jsonl", event.to_dict())
-
     recent_workflow_events: list[dict] = []
     if workflow_events is not None:
         closed_workflow_event = workflow_events.observe(event)
         if closed_workflow_event is not None:
             append_jsonl("workflow_events.jsonl", closed_workflow_event.to_dict())
+        active_snapshot = workflow_events.active_snapshot()
+        if active_snapshot and _should_persist_workflow_snapshot(active_snapshot):
+            append_jsonl("workflow_events.jsonl", active_snapshot | {"snapshot_kind": "active"})
         workflow_cfg = config.get("workflow_events", {})
         recent_workflow_events = workflow_events.recent_context(
             window_sec=float(workflow_cfg.get("recent_context_sec", 300)),
             limit=int(workflow_cfg.get("max_recent_context", 6)),
         )
 
+    append_jsonl("candidates.jsonl", event.to_dict())
     memory.record(event)
     recent_outcomes = tail_jsonl("outcomes.jsonl", n=5)
     mem_snap = memory.snapshot(
@@ -304,6 +306,11 @@ async def _tick(
     if policy_metadata.get("active_policy") == "canary":
         decision.policy_version = f"{decision.policy_version}+canary"
     decision = experiments_mod.apply(decision, event, config.get("experiment", {}))
+    decision.workflow_event_id = event.workflow_event_id
+    evidence = dict(decision.evidence or {})
+    if event.workflow_event_id:
+        evidence.setdefault("workflow_event_ids", [event.workflow_event_id])
+    decision.evidence = evidence
     if policy_metadata.get("active_policy") == "canary":
         exp = dict(decision.experiment or {})
         exp["policy_canary"] = policy_metadata
@@ -312,14 +319,18 @@ async def _tick(
 
     trace = Trace.new(event, mem_snap, recent_outcomes)
     trace.action = decision.to_dict()
+    trace.mark("decision_recorded", action=decision.action)
 
     if decision.action == "no_ping":
         log.info("decision", action="no_ping", reasons=decision.reason_codes)
+        trace.mark("terminal_no_ping")
         append_jsonl("traces.jsonl", trace.to_dict())
         return
 
     # ping path
     log.info("decision", action="notch_ping", intent=decision.intent, reasons=decision.reason_codes)
+    append_jsonl("traces.jsonl", trace.to_dict())
+    patch_trace(decision.decision_id, {}, lifecycle_stage="realizer_started")
     realization = await realizer_mod.realize(
         intent=decision.intent or "goal_aware",
         event=event,
@@ -330,17 +341,35 @@ async def _tick(
         why_now=(getattr(decision, "why_now", None) or ", ".join(decision.reason_codes)),
     )
     trace.realization = realization.to_dict()
+    patch_trace(
+        decision.decision_id,
+        {"realization": trace.realization},
+        lifecycle_stage="realizer_failed" if realization.error or not realization.message.strip() else "realizer_done",
+        lifecycle_extra={"latency_ms": realization.latency_ms, "vision_used": realization.vision_used},
+    )
 
     if realization.error or not realization.message.strip():
         log.warning("realizer_failed", error=realization.error)
         trace.delivery = {"pushed": False, "channel": "skipped"}
-        append_jsonl("traces.jsonl", trace.to_dict())
+        patch_trace(
+            decision.decision_id,
+            {"delivery": trace.delivery},
+            lifecycle_stage="terminal_skipped",
+            lifecycle_extra={"error": realization.error or "empty_message"},
+        )
         return
 
     critic_cfg = dict(config.get("critic", {}))
     critic_cfg["privacy"] = config.get("privacy", {})
+    patch_trace(decision.decision_id, {}, lifecycle_stage="critic_started")
     critic_result = await critic_mod.check(realization.message, event, critic_cfg)
     trace.critic = critic_result.to_dict()
+    patch_trace(
+        decision.decision_id,
+        {"critic": trace.critic},
+        lifecycle_stage="critic_done",
+        lifecycle_extra={"pass": critic_result.pass_},
+    )
 
     if not critic_result.pass_:
         log.warning("critic_blocked", flags=critic_result.flags, reasons=critic_result.reasons)
@@ -358,13 +387,33 @@ async def _tick(
         trace.outcome = outcome
         trace.reward = reward
         append_jsonl("outcomes.jsonl", outcome)
-        append_jsonl("traces.jsonl", trace.to_dict())
-        attach_outcome_to_trace(decision.decision_id, outcome, reward)
+        patch_trace(
+            decision.decision_id,
+            {
+                "delivery": trace.delivery,
+                "outcome": trace.outcome,
+                "reward": trace.reward,
+            },
+            lifecycle_stage="terminal_blocked_by_critic",
+            lifecycle_extra={"flags": critic_result.flags},
+        )
         return
 
     push_cfg = dict(config.get("push", {}))
     push_cfg["harness_port"] = config["daemon"]["http_port"]
+    patch_trace(decision.decision_id, {}, lifecycle_stage="dispatch_started")
     delivery = await push_mod.dispatch(decision, realization, push_cfg)
     trace.delivery = delivery.__dict__
-    last_push_at_ref[0] = _now_unix()
-    append_jsonl("traces.jsonl", trace.to_dict())
+    if delivery.pushed:
+        last_push_at_ref[0] = _now_unix()
+    patch_trace(
+        decision.decision_id,
+        {"delivery": trace.delivery},
+        lifecycle_stage="dispatch_done",
+        lifecycle_extra={"pushed": delivery.pushed, "channel": delivery.channel},
+    )
+
+
+def _should_persist_workflow_snapshot(snapshot: dict) -> bool:
+    n_candidates = int(snapshot.get("n_candidates") or 0)
+    return n_candidates == 1 or (n_candidates > 0 and n_candidates % 12 == 0)

@@ -89,6 +89,9 @@ harness/
 │   ├── label_ui.py               rewind-style labeling web UI with frozen queue
 │   ├── metrics.py                live outcome + retro-label quality metrics
 │   ├── eval_report.py            joined OpenAdapt-style eval report
+│   ├── kg_priors.py              local app/scene/keyword priors for policy
+│   ├── dataset.py                hard-example mining + frozen eval manifests
+│   ├── curation.py               retain/exclude/delete/blur ledger
 │   └── dashboard_ui.py           dashboard/settings/diag web UI; capsule settings is primary
 │
 ├── policies/
@@ -121,7 +124,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live capsule/ping
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           52 tests; pytest passes
+└── tests/test_smoke.py           56 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -138,6 +141,7 @@ State on disk (outside the repo):
 ├── outcomes.jsonl                user reactions + interaction_summary
 ├── traces.jsonl                  joined view per tick
 ├── retro_labels.jsonl            from the labeling UI
+├── curation.jsonl                local retain/exclude/delete/blur decisions
 ├── model_calls.jsonl             privacy-safe model-call audit rows
 ├── harness.db                    SQLite sidecar with typed query tables
 ├── memory/
@@ -181,7 +185,10 @@ User flow once it's running:
 
 ```
 ✅ End-to-end pipeline live
-   poll → scene → memory → gate → realizer → critic → push → outcome → trace
+   poll → scene → memory → gate → trace → realizer → critic → push → claim → outcome
+   - A trace is appended immediately after each decision and patched through
+     lifecycle stages, so ping decisions are no longer allowed to disappear
+     before realization or delivery.
 
 ✅ Vision (VLM) in two places
    - Per-candidate scene tagger (google/gemma-3-4b-it on OpenRouter when
@@ -196,7 +203,8 @@ User flow once it's running:
    - Daily goal field in the floating capsule Settings tab
    - Sensitivity (gentle/balanced/responsive) → cooldown_min mapping
    - Single goal_aware_v1.md prompt; no fixed intent catalog
-   - reason_codes from gate flow directly to the realizer
+   - `reason_codes` stay machine-readable for audit/training; `why_now` is the
+     compact natural-language rationale passed to the realizer
    - Sleep/resume gaps are now explicit (`capture_gap_sec`,
      `last_event_gap_sec`, `session_boundary`) so long-session messages do
      not count closed-laptop time as active work
@@ -205,8 +213,11 @@ User flow once it's running:
    - `workflow_events.py` groups adjacent candidates into app/window runs
    - Closes runs on app/title changes, stale/inactive/sensitive frames,
      capture gaps, time gaps, or daemon shutdown
-   - Closed rows go to `workflow_events.jsonl` and the SQLite
-     `workflow_events` table
+   - Candidates/decisions/traces carry `workflow_event_id` joins
+   - Closed rows and periodic open snapshots go to `workflow_events.jsonl`
+     and the SQLite `workflow_events` table
+   - Basic event quality flags track missing app/window/OCR, stale frames,
+     capture gaps, and sensitive scenes
    - Recent compact runs are stored in `MemorySnapshot.recent_workflow_events`
      and included in the `llm_icl_v0` ping/not-ping policy prompt
 
@@ -245,12 +256,12 @@ User flow once it's running:
      evidence, not a trusted skill compiler until Fisherman exposes direct
      URL/title and downstream artifact links
    - `harness metrics --since 24h` reports ping rate, outcome capture,
-     avg reward, retro-label agreement, false-interruption rate, missed-help
-     rate, and readiness thresholds
+     trace completeness, avg reward, retro-label precision/recall/F1,
+     false-interruption rate, missed-help rate, and readiness thresholds
    - Delivery capture is split into queued vs notch-claimed pings, so eval no
      longer treats realizer/critic skips as missing user outcomes
    - `harness eval-report --since 7d` includes intervention taxonomy,
-     binary policy calibration, and compact non-green examples
+     trace completeness, binary policy calibration, and compact non-green examples
    - `/metrics?window=24h` exposes the same JSON from the daemon
    - Capsule Pipeline tab now shows the live lab counters and label
      readiness, so the user can tell whether the harness is learning or only
@@ -262,6 +273,19 @@ User flow once it's running:
    - Reports labeled precision/recall/F1, false-interruption rate, missed-help
      rate, agreement, and Wilson 95% intervals in JSON mode
    - `--full` replays the full candidate set when ping-rate comparison matters
+
+✅ Paper-style data hardening
+   - `harness kg-priors --since 30d` builds local KG-style priors from explicit
+     labels and usable implicit outcomes (`app`, `scene`, `app_scene`,
+     keyword, app+keyword)
+   - `llm_icl_v0` includes matching KG priors in the policy prompt alongside
+     workflow trajectory and few-shot examples
+   - `harness hard-examples --since 30d` mines useful pings, dismissed/ignored
+     pings, context-matched hard negatives, and missed-help candidates
+   - `harness freeze-eval` writes sanitized, time-ordered train/validation/test
+     manifests under `harness/datasets/`
+   - `harness curate ...` appends a curation ledger that dataset/KG builders
+     respect
 
 ✅ Deterministic experiment assignment
    - `[experiment]` config is merged into old local configs automatically
@@ -306,11 +330,14 @@ User flow once it's running:
    - JSONL remains the compatibility/export path for local debugging
    - Every JSONL append is mirrored into `~/.harness/harness.db`
    - SQLite stores a generic `event_log` plus typed candidates, decisions,
-     traces, outcomes, model calls, and retro labels
-   - Late outcome attachment updates both `traces.jsonl` and the typed trace row
+     traces, deliveries, outcomes, model calls, retro labels, workflow events,
+     and curation rows
+   - Trace lifecycle patching and late outcome attachment update both
+     `traces.jsonl` and the typed trace row
    - `harness storage-backfill --reset` rebuilds the sidecar from existing JSONL
-   - Dashboard, metrics, replay, score, and shadow comparison prefer typed
-     SQLite payload rows and fall back to JSONL when the sidecar is absent
+   - Dashboard, metrics, replay, score, dataset mining, and shadow comparison
+     prefer typed SQLite payload rows and fall back to JSONL when the sidecar
+     is absent
 
 ✅ Idempotent pending delivery
    - `/pending` now leases the oldest pending payload instead of deleting it
@@ -442,14 +469,16 @@ User flow once it's running:
 3. **VLM is available + smart-triggered.** The default config keeps the
    per-candidate scene VLM disabled until configured. When enabled, cost is
    bounded because the call is skipped when neither the app nor OCR has changed
-   since the last call and the minimum call gap has not elapsed.
+   since the last call and the minimum call gap has not elapsed. HTTP errors,
+   parse failures, and rate limits now put the VLM path into explicit backoff.
 
 4. **DynamicNotchKit is vendored** at `../menubar/Packages/DynamicNotchKit/`
    — same library FishermanMenu uses. The harness path-depends on it.
 
 5. **Goal-driven model is the only model.** The 4-intent catalog is dead.
-   Rule_v0 still has rules but they emit reason_codes (not intents). The
-   realizer reads reason_codes + daily_goal + screenshot, writes the
+   Rule_v0 still has rules but they emit reason_codes for audit. Learned
+   policies should fill `why_now` with a concise natural-language rationale.
+   The realizer reads `why_now` + daily_goal + screenshot, then writes the
    message. If you want the old intents back, they're in
    `prompts/realizer/_archive/`.
 

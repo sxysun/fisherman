@@ -573,11 +573,13 @@ function renderActivity(d) {
 
 function renderEval(r) {
   const data = r.data || {};
+  const labels = ((r.quality || {}).labels || {});
   const best = (((r.variants || {}).calibration || {}).best_variant || {});
   const stats = [
     {label: 'Decisions', val: data.n_decisions ?? 0, sub: `${data.n_pings ?? 0} pings · ${data.n_claimed_pings ?? 0} claimed`},
+    {label: 'Trace complete', val: pctMaybe(data.trace_completeness_for_pings), sub: `${data.n_traces ?? 0} traces`},
     {label: 'Claimed capture', val: pctMaybe(data.outcome_capture_rate_for_claimed_pings), sub: `${pctMaybe(data.outcome_capture_rate_for_pings)} all pings`},
-    {label: 'Explicit labels', val: data.n_explicit_labels ?? 0, sub: pctMaybe(data.explicit_label_coverage)},
+    {label: 'P/R/F1 labels', val: `${pctMaybe(labels.precision_labeled)} / ${pctMaybe(labels.recall_labeled)} / ${pctMaybe(labels.f1_labeled)}`, sub: `${data.n_explicit_labels ?? 0} labels`},
     {label: 'Best variant', val: best.variant || 'n/a', sub: `score ${numMaybe(best.score)}`},
   ];
   document.getElementById('eval-stats').innerHTML = stats.map(s => `

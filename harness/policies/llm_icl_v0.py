@@ -20,6 +20,7 @@ import urllib.request
 from typing import Any
 
 from harness import implicit as implicit_mod
+from harness import kg_priors as kg_priors_mod
 from harness import metrics as metrics_mod
 from harness import model_audit
 from harness import privacy
@@ -124,6 +125,9 @@ def _fallback_decision(baseline: ProactiveDecision, reason: str) -> ProactiveDec
         confidence=min(float(baseline.confidence or 1.0), 0.75),
         propensity=baseline.propensity,
         why_now=baseline.why_now,
+        workflow_event_id=baseline.workflow_event_id,
+        intent_category=baseline.intent_category,
+        evidence=dict(baseline.evidence or {}),
     )
 
 
@@ -281,6 +285,7 @@ def _build_prompt(
             "reason_codes": baseline.reason_codes,
             "why_now": baseline.why_now,
         },
+        "kg_priors": kg_priors_mod.priors_for_event(event, window=str(config.get("policy_learner", {}).get("kg_window", "30d"))),
     }
     system = (
         "You are the ping/not-ping policy learner for a proactive macOS harness. "
@@ -297,8 +302,10 @@ def _build_prompt(
         "output_schema": {
             "action": "notch_ping|no_ping",
             "confidence": "0.0-1.0",
+            "intent_category": "knowledge_qa|code|research|focus|writing|coordination|other|null",
             "reason_codes": ["short_machine_reason"],
             "why_now": "one short phrase, only if action is notch_ping",
+            "evidence": {"screen_fields_used": [], "memory_priors_used": []},
         },
     }
     return [
@@ -414,7 +421,23 @@ def _decision_from_result(
         confidence=confidence,
         propensity=1.0,
         why_now=str(result.get("why_now") or ", ".join(reasons))[:240] if action == "notch_ping" else None,
+        workflow_event_id=event.workflow_event_id,
+        intent_category=_intent_category(result.get("intent_category")),
+        evidence=_evidence(result.get("evidence")),
     )
+
+
+def _intent_category(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw = str(value)
+    if raw in {"", "null", "none", "None"}:
+        return None
+    return raw[:40]
+
+
+def _evidence(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def _audit(

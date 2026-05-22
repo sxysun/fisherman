@@ -34,6 +34,7 @@ from .schemas import CandidateEvent, SceneTag
 
 # Module-level call state. We're single-process single-loop so this is fine.
 _last_call_ts: float = 0.0
+_backoff_until_ts: float = 0.0
 _last_signal: Optional[tuple[str, str]] = None  # (app, ocr_hash)
 _cache: dict[str, dict] = {}                    # ocr_hash → parsed VLM JSON
 
@@ -72,6 +73,8 @@ def _signal(event: CandidateEvent) -> tuple[str, str]:
 def _should_skip(event: CandidateEvent, min_interval_sec: float) -> Optional[str]:
     """Return a short reason string if we should skip the VLM call, else None."""
     now = time.time()
+    if now < _backoff_until_ts:
+        return f"backoff ({int(_backoff_until_ts - now)}s left)"
     if now - _last_call_ts < min_interval_sec:
         return f"cooldown ({int(min_interval_sec - (now - _last_call_ts))}s left)"
     if not (event.screen.ocr_snippet or "").strip():
@@ -105,6 +108,16 @@ def _parse_json(text: str) -> Optional[dict]:
         return None
 
 
+def _note_failure(config: dict, *, rate_limited: bool = False) -> None:
+    global _backoff_until_ts
+    now = time.time()
+    backoff = float(
+        config.get("rate_limit_backoff_sec" if rate_limited else "error_backoff_sec")
+        or (300 if rate_limited else 120)
+    )
+    _backoff_until_ts = max(_backoff_until_ts, now + max(1.0, backoff))
+
+
 async def _fetch_image_b64(fc: FishermanClient) -> tuple[Optional[str], int]:
     frames = await fc.list_frames(count=1)
     if not frames:
@@ -134,7 +147,7 @@ async def maybe_tag(
     None otherwise. Side effects: updates module call state + caches the
     result for a short while.
     """
-    global _last_call_ts, _last_signal
+    global _last_call_ts, _last_signal, _backoff_until_ts
 
     if not config.get("enabled", False):
         return None
@@ -210,11 +223,13 @@ async def maybe_tag(
 
     timeout_sec = float(config.get("timeout_sec", 12))
     started = time.monotonic()
+    _last_call_ts = time.time()
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout_sec)) as s:
             async with s.post(endpoint, headers=headers, json=body) as r:
                 latency_ms = int((time.monotonic() - started) * 1000)
                 if r.status != 200:
+                    _note_failure(config, rate_limited=r.status == 429)
                     model_audit.record_model_call(
                         purpose="scene_vlm",
                         base_url=base_url,
@@ -236,6 +251,7 @@ async def maybe_tag(
                     return None
                 data = await r.json(content_type=None)
     except Exception as e:
+        _note_failure(config)
         model_audit.record_model_call(
             purpose="scene_vlm",
             base_url=base_url,
@@ -282,9 +298,11 @@ async def maybe_tag(
         },
     )
     if not parsed:
+        _note_failure(config)
         return None
 
     _last_call_ts = time.time()
+    _backoff_until_ts = 0.0
     _last_signal = sig
     _cache[sig[1]] = parsed
     if len(_cache) > 200:

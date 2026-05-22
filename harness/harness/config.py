@@ -61,6 +61,7 @@ timeout_sec = 8
 max_tokens = 220
 temperature = 0.0
 max_examples = 16
+kg_window = "30d"
 min_interval_sec = 15
 min_confidence_to_ping = 0.55
 
@@ -85,6 +86,8 @@ model = "google/gemma-3-4b-it"
 api_key = ""
 api_key_env = "OPENROUTER_API_KEY"
 min_interval_sec = 30
+error_backoff_sec = 120
+rate_limit_backoff_sec = 300
 timeout_sec = 12
 
 [memory]
