@@ -351,6 +351,48 @@ def count_rows(table: str, base_dir: Path | None = None) -> int:
     return int(row["n"] if row else 0)
 
 
+def count_payload_rows(
+    table: str,
+    *,
+    since_iso: str | None = None,
+    base_dir: Path | None = None,
+) -> int:
+    _require_known_table(table)
+    where = ""
+    params: list[Any] = []
+    if since_iso is not None:
+        where = "WHERE COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(f"SELECT COUNT(*) AS n FROM {table} {where}", params).fetchone()
+    return int(row["n"] if row else 0)
+
+
+def trace_decision_ids(
+    *,
+    since_iso: str | None = None,
+    base_dir: Path | None = None,
+) -> tuple[int, set[str]]:
+    where = "WHERE decision_id IS NOT NULL AND decision_id != ''"
+    params: list[Any] = []
+    if since_iso is not None:
+        where += " AND COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"SELECT decision_id FROM traces {where}",
+            params,
+        ).fetchall()
+        count_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM traces"
+            + (" WHERE COALESCE(ts, '') >= ?" if since_iso is not None else ""),
+            params,
+        ).fetchone()
+    return int(count_row["n"] if count_row else 0), {str(row["decision_id"]) for row in rows}
+
+
 def recent_rows(table: str, limit: int = 50, base_dir: Path | None = None) -> list[dict]:
     _require_known_table(table)
     limit = max(1, min(int(limit), 500))
@@ -398,6 +440,40 @@ def payload_rows(
         _ensure_schema(conn)
         rows = conn.execute(
             f"SELECT payload_json FROM {table} {where} ORDER BY {order} {direction}{limit_sql}",
+            params,
+        ).fetchall()
+    out: list[dict] = []
+    for row in rows:
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            out.append(payload)
+    return out
+
+
+def payload_rows_for_decisions(
+    table: str,
+    decision_ids: Iterable[str],
+    *,
+    since_iso: str | None = None,
+    base_dir: Path | None = None,
+) -> list[dict]:
+    _require_known_table(table)
+    ids = [str(decision_id) for decision_id in dict.fromkeys(decision_ids) if decision_id]
+    if not ids:
+        return []
+    placeholders = ",".join("?" for _ in ids)
+    where = f"decision_id IN ({placeholders})"
+    params: list[Any] = [*ids]
+    if since_iso is not None:
+        where += " AND COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"SELECT payload_json FROM {table} WHERE {where} ORDER BY COALESCE(ts, '') ASC",
             params,
         ).fetchall()
     out: list[dict] = []

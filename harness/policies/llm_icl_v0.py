@@ -24,6 +24,7 @@ from harness import kg_priors as kg_priors_mod
 from harness import metrics as metrics_mod
 from harness import model_audit
 from harness import privacy
+from harness import sql_store
 from harness import trust
 from harness.realizer import chat_completions_url
 from harness.schemas import CandidateEvent, MemorySnapshot, ProactiveDecision
@@ -147,16 +148,12 @@ def _few_shot_examples(limit: int = 16) -> list[dict[str, Any]]:
     decisions = [row for row in iter_jsonl("decisions.jsonl") if row.get("decision_id")]
     decisions_by_id = {row.get("decision_id"): row for row in decisions}
     decisions_by_candidate = {row.get("candidate_id"): row for row in decisions if row.get("candidate_id")}
-    traces_by_decision = {
-        (row.get("action") or {}).get("decision_id"): row
-        for row in iter_jsonl("traces.jsonl")
-        if (row.get("action") or {}).get("decision_id")
-    }
     labels = metrics_mod.latest_label_rows(list(iter_jsonl("retro_labels.jsonl")))
     outcomes = list(iter_jsonl("outcomes.jsonl"))
     weak = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
 
-    rows: list[dict[str, Any]] = []
+    pending: list[tuple[dict[str, Any], dict[str, Any], str, str, float]] = []
+    trace_decision_ids: list[str] = []
     for label in labels:
         target = _target_from_label(label.get("label"))
         if target is None:
@@ -166,14 +163,9 @@ def _few_shot_examples(limit: int = 16) -> list[dict[str, Any]]:
             or decisions_by_candidate.get(label.get("candidate_id") or "")
             or {}
         )
-        rows.append(_example(
-            label,
-            decision,
-            traces_by_decision.get(decision.get("decision_id") or "") or {},
-            target,
-            "explicit",
-            1.0,
-        ))
+        pending.append((label, decision, target, "explicit", 1.0))
+        if decision.get("decision_id"):
+            trace_decision_ids.append(str(decision.get("decision_id")))
 
     for label in weak:
         if not label.get("usable_for_training"):
@@ -182,17 +174,50 @@ def _few_shot_examples(limit: int = 16) -> list[dict[str, Any]]:
         if target is None:
             continue
         decision = decisions_by_id.get(label.get("decision_id") or "") or {}
-        rows.append(_example(
+        pending.append((label, decision, target, "implicit", float(label.get("confidence") or 0.0)))
+        if decision.get("decision_id"):
+            trace_decision_ids.append(str(decision.get("decision_id")))
+
+    traces_by_decision = _trace_rows_for_decisions(trace_decision_ids)
+    rows = [
+        _example(
             label,
             decision,
             traces_by_decision.get(decision.get("decision_id") or "") or {},
             target,
-            "implicit",
-            float(label.get("confidence") or 0.0),
-        ))
-
+            source,
+            confidence,
+        )
+        for label, decision, target, source, confidence in pending
+    ]
     rows.sort(key=lambda row: (row.get("ts") or "", row.get("confidence") or 0.0), reverse=True)
     return _balanced(rows, max(0, limit))
+
+
+def _trace_rows_for_decisions(decision_ids: list[str]) -> dict[str, dict[str, Any]]:
+    wanted = [decision_id for decision_id in dict.fromkeys(decision_ids) if decision_id]
+    if not wanted:
+        return {}
+    try:
+        if sql_store.db_path().exists() and sql_store.count_rows("traces") > 0:
+            rows = sql_store.payload_rows_for_decisions("traces", wanted)
+        else:
+            wanted_set = set(wanted)
+            rows = [
+                row for row in iter_jsonl("traces.jsonl")
+                if (row.get("action") or {}).get("decision_id") in wanted_set
+            ]
+    except Exception:
+        wanted_set = set(wanted)
+        rows = [
+            row for row in iter_jsonl("traces.jsonl")
+            if (row.get("action") or {}).get("decision_id") in wanted_set
+        ]
+    return {
+        str((row.get("action") or {}).get("decision_id")): row
+        for row in rows
+        if (row.get("action") or {}).get("decision_id")
+    }
 
 
 def _target_from_label(label: str | None) -> str | None:

@@ -310,18 +310,18 @@ private struct PipelineNotchPanel: View {
 
     var body: some View {
         let evalData = eval?["data"]
-        let nPings = metrics?["n_pings"].int ?? evalData?["n_pings"].int ?? 0
-        let nCandidates = metrics?["n_candidates"].int ?? dashboard?["n_candidates"].int ?? 0
-        let nDecisions = metrics?["n_decisions"].int ?? dashboard?["n_decisions"].int ?? 0
-        let nTraces = metrics?["n_traces"].int ?? evalData?["n_traces"].int ?? 0
-        let nClaimed = metrics?["n_claimed_pings"].int ?? evalData?["n_claimed_pings"].int ?? 0
-        let nOutcomes = metrics?["outcomes"]["n"].int ?? evalData?["n_outcomes"].int ?? 0
-        let claimedCapture = metrics?["outcomes"]["capture_rate_for_claimed_pings"] ?? evalData?["outcome_capture_rate_for_claimed_pings"]
-        let traceComplete = metrics?["trace_funnel"]["trace_completeness_for_pings"] ?? evalData?["trace_completeness_for_pings"]
-        let implicitUsable = metrics?["implicit"]["usable"].int ?? evalData?["n_implicit_usable"].int ?? 0
-        let explicitLabels = metrics?["labels"]["n"].int ?? evalData?["n_explicit_labels"].int ?? 0
-        let labelCoverage = metrics?["explicit_label_coverage"] ?? evalData?["explicit_label_coverage"]
-        let labeledF1 = metrics?["labels"]["f1_labeled"] ?? eval?["quality"]["labels"]["f1_labeled"]
+        let nPings = notchFirstInt(metrics?["n_pings"], evalData?["n_pings"])
+        let nCandidates = notchFirstInt(metrics?["n_candidates"], evalData?["n_candidates"], dashboard?["n_candidates"])
+        let nDecisions = notchFirstInt(metrics?["n_decisions"], evalData?["n_decisions"], dashboard?["n_decisions"])
+        let nTraces = notchFirstInt(metrics?["n_traces"], evalData?["n_traces"])
+        let nClaimed = notchFirstInt(metrics?["n_claimed_pings"], evalData?["n_claimed_pings"])
+        let nOutcomes = notchFirstInt(metrics?["outcomes"]["n"], evalData?["n_outcomes"])
+        let claimedCapture = notchFirstJSON(metrics?["outcomes"]["capture_rate_for_claimed_pings"], evalData?["outcome_capture_rate_for_claimed_pings"])
+        let traceComplete = notchFirstJSON(metrics?["trace_funnel"]["trace_completeness_for_pings"], evalData?["trace_completeness_for_pings"])
+        let implicitUsable = notchFirstInt(metrics?["implicit"]["usable"], evalData?["n_implicit_usable"])
+        let explicitLabels = notchFirstInt(metrics?["labels"]["n"], evalData?["n_explicit_labels"])
+        let labelCoverage = notchFirstJSON(metrics?["explicit_label_coverage"], evalData?["explicit_label_coverage"])
+        let labeledF1 = notchFirstJSON(metrics?["labels"]["f1_labeled"], eval?["quality"]["labels"]["f1_labeled"])
         VStack(alignment: .leading, spacing: 12) {
             panelToolbar(title: "Pipeline and eval", detail: updatedText, loading: loading, refresh: refresh)
             NotchRail(stages: [
@@ -375,7 +375,8 @@ private struct PipelineNotchPanel: View {
 
 private struct SettingsNotchPanel: View {
     @StateObject private var model = SettingsModel()
-    @State private var loading = true
+    @State private var loading = false
+    @State private var loaded = false
     @State private var saving = false
 
     var body: some View {
@@ -481,7 +482,7 @@ private struct SettingsNotchPanel: View {
                             Task { await save() }
                         }
                         .buttonStyle(.plain)
-                        .disabled(saving || loading)
+                        .disabled(saving || !loaded)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 7)
                         .background(Capsule().fill(Color(hex: 0xE8D8A8)))
@@ -519,19 +520,21 @@ private struct SettingsNotchPanel: View {
             }
             .frame(height: 492)
         }
-        .task { await refresh() }
+        .task { await refresh(showLoading: false) }
     }
 
     private var detailText: String {
         if saving { return "saving config" }
         if loading { return "loading config" }
+        if !loaded { return "loading config in background" }
         return model.statusLine.isEmpty ? "LLM ICL policy controls" : model.statusLine
     }
 
-    private func refresh() async {
-        loading = true
+    private func refresh(showLoading: Bool = true) async {
+        if showLoading { loading = true }
         await model.refreshSettings()
-        loading = false
+        loaded = true
+        if showLoading { loading = false }
     }
 
     private func save() async {
@@ -1084,6 +1087,24 @@ private func notchNumber(_ value: Double?) -> String {
 private func notchPct(_ value: JSON?) -> String {
     guard let value, !value.isNull else { return "n/a" }
     return String(format: "%.1f%%", value.double * 100.0)
+}
+
+private func notchFirstJSON(_ values: JSON?...) -> JSON? {
+    for value in values {
+        if let value, !value.isNull {
+            return value
+        }
+    }
+    return nil
+}
+
+private func notchFirstInt(_ values: JSON?...) -> Int {
+    for value in values {
+        if let value, !value.isNull {
+            return value.int
+        }
+    }
+    return 0
 }
 
 private func notchDict(_ row: [String: Any], _ key: String) -> [String: Any] {

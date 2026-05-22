@@ -199,7 +199,8 @@ async def _trainer_loop(config: dict) -> None:
     await asyncio.sleep(max(0.0, initial_delay_sec))
     while True:
         try:
-            result = trainer_mod.run_trainer(
+            result = await asyncio.to_thread(
+                trainer_mod.run_trainer,
                 window=window,
                 min_implicit_usable=min_implicit,
                 min_explicit_labels=min_explicit,
@@ -296,7 +297,8 @@ async def _tick(
         "privacy": config.get("privacy", {}),
     }
     gate_cfg.update(policy_overrides)
-    decision = gate_mod.decide(
+    decision = await asyncio.to_thread(
+        gate_mod.decide,
         policy_name,
         event,
         mem_snap,

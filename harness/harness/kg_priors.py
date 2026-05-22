@@ -24,7 +24,6 @@ def build_priors(window: str = "30d", *, min_count: float = 0.5) -> dict[str, An
     decisions = [row for row in iter_jsonl("decisions.jsonl") if row.get("ts", "") >= since]
     decisions_by_id = {row.get("decision_id"): row for row in decisions if row.get("decision_id")}
     decisions_by_candidate = {row.get("candidate_id"): row for row in decisions if row.get("candidate_id")}
-    traces_by_decision = _traces_by_decision()
     labels = metrics_mod.latest_label_rows([
         row for row in iter_jsonl("retro_labels.jsonl") if row.get("ts", "") >= since
     ])
@@ -52,7 +51,7 @@ def build_priors(window: str = "30d", *, min_count: float = 0.5) -> dict[str, An
         candidate_id = decision.get("candidate_id") or label.get("candidate_id")
         if _is_excluded(excluded, decision.get("decision_id"), candidate_id, decision.get("workflow_event_id")):
             continue
-        candidate = _candidate_for_decision(decision, traces_by_decision, candidate_by_id)
+        candidate = candidate_by_id.get(candidate_id or "") or {}
         if not candidate:
             continue
         weight = float(label.get("confidence") or 1.0)
@@ -132,27 +131,6 @@ def _target(label: str | None) -> str | None:
     if label in {"would_annoy", "good_no_ping"}:
         return "no_ping"
     return None
-
-
-def _traces_by_decision() -> dict[str, dict]:
-    out: dict[str, dict] = {}
-    for trace in iter_jsonl("traces.jsonl"):
-        decision_id = (trace.get("action") or {}).get("decision_id")
-        if decision_id:
-            out[str(decision_id)] = trace
-    return out
-
-
-def _candidate_for_decision(
-    decision: dict,
-    traces_by_decision: dict[str, dict],
-    candidate_by_id: dict[str, dict],
-) -> dict:
-    trace = traces_by_decision.get(str(decision.get("decision_id") or "")) or {}
-    candidate = ((trace.get("state") or {}).get("candidate") or {})
-    if candidate:
-        return candidate
-    return candidate_by_id.get(decision.get("candidate_id") or "") or {}
 
 
 def _features(candidate: dict) -> list[str]:

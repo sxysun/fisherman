@@ -7,6 +7,7 @@ from typing import Any
 from . import implicit as implicit_mod
 from . import metrics as metrics_mod
 from . import shadow_eval
+from . import sql_store
 from . import trainer as trainer_mod
 
 
@@ -31,11 +32,20 @@ def build_report(
     safe to surface in the dashboard.
     """
     since = metrics_mod.since_iso(window)
-    candidates = metrics_mod._read_payloads("candidates", "candidates.jsonl", since_iso=since)
+    n_candidates = metrics_mod._count_payloads("candidates", "candidates.jsonl", since_iso=since)
     decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl", since_iso=since)
     all_decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl")
     outcomes = metrics_mod._read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
-    traces = metrics_mod._read_payloads("traces", "traces.jsonl", since_iso=since)
+    pings = [row for row in decisions if row.get("action") == "notch_ping"]
+    n_traces, traced_decision_ids = metrics_mod._trace_summary(
+        "traces",
+        "traces.jsonl",
+        since_iso=since,
+    )
+    traces = _trace_payloads_for_decisions(
+        [row.get("decision_id") for row in pings if row.get("decision_id")],
+        since_iso=since,
+    )
     deliveries = metrics_mod._read_payloads("deliveries", "deliveries.jsonl", since_iso=since)
     labels = metrics_mod.latest_label_rows(
         metrics_mod._read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
@@ -98,12 +108,11 @@ def build_report(
     metrics = metrics_mod.compute(window=window)
     variant_report = _variant_report(policy=policy, window=window)
     calibration = _calibration_report(window=window)
-    pings = [row for row in decisions if row.get("action") == "notch_ping"]
     pings_with_outcome = sum(
         1 for row in pings if row.get("decision_id") in outcomes_by_decision
     )
     pings_with_trace = sum(
-        1 for row in pings if row.get("decision_id") in traces_by_decision
+        1 for row in pings if row.get("decision_id") in traced_decision_ids
     )
     claimed_ping_ids = {
         str(row.get("decision_id"))
@@ -121,12 +130,12 @@ def build_report(
         "since": since,
         "policy": policy,
         "data": {
-            "n_candidates": len(candidates),
+            "n_candidates": n_candidates,
             "n_decisions": len(decisions),
             "n_pings": len(pings),
             "n_claimed_pings": len(claimed_ping_ids),
             "n_outcomes": len(outcomes),
-            "n_traces": len(traces),
+            "n_traces": n_traces,
             "n_explicit_labels": len(labels),
             "n_implicit_labels": len(weak_labels),
             "n_implicit_usable": sum(1 for row in weak_labels if row.get("usable_for_training")),
@@ -456,6 +465,28 @@ def _traces_by_decision(traces: list[dict[str, Any]]) -> dict[str, dict[str, Any
         if decision_id:
             out[decision_id] = trace
     return out
+
+
+def _trace_payloads_for_decisions(
+    decision_ids: list[str],
+    *,
+    since_iso: str | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        if sql_store.db_path().exists() and sql_store.count_rows("traces") > 0:
+            return sql_store.payload_rows_for_decisions(
+                "traces",
+                decision_ids,
+                since_iso=since_iso,
+            )
+    except Exception:
+        pass
+    wanted = set(decision_ids)
+    return [
+        row
+        for row in metrics_mod._read_payloads("traces", "traces.jsonl", since_iso=since_iso)
+        if (row.get("action") or {}).get("decision_id") in wanted
+    ]
 
 
 def _ratio(num: float, den: float) -> float | None:

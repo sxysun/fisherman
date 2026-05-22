@@ -31,12 +31,12 @@ def since_iso(window: str = "24h", now: Optional[float] = None) -> str:
 def compute(window: str = "24h") -> dict[str, Any]:
     since = since_iso(window)
 
-    candidates = _read_payloads("candidates", "candidates.jsonl", since_iso=since)
+    n_candidates = _count_payloads("candidates", "candidates.jsonl", since_iso=since)
     all_decisions = _read_payloads("decisions", "decisions.jsonl")
     decisions = [r for r in all_decisions if r.get("ts", "") >= since]
     outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
     deliveries = _read_payloads("deliveries", "deliveries.jsonl", since_iso=since)
-    traces = _read_payloads("traces", "traces.jsonl", since_iso=since)
+    n_traces, traced_decision_ids = _trace_summary("traces", "traces.jsonl", since_iso=since)
     labels = latest_label_rows(
         _read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
     )
@@ -46,12 +46,6 @@ def compute(window: str = "24h") -> dict[str, Any]:
         d.get("candidate_id"): d for d in all_decisions if d.get("candidate_id")
     }
     outcomes_by_decision = {o.get("decision_id"): o for o in outcomes if o.get("decision_id")}
-    traced_decision_ids = {
-        (row.get("action") or {}).get("decision_id")
-        for row in traces
-        if (row.get("action") or {}).get("decision_id")
-    }
-
     action_counts = Counter(d.get("action", "?") for d in decisions)
     label_counts = Counter(r.get("label", "?") for r in labels)
     outcome_counts = Counter(o.get("user_action", "?") for o in outcomes)
@@ -109,9 +103,9 @@ def compute(window: str = "24h") -> dict[str, Any]:
     return {
         "window": window,
         "since": since,
-        "n_candidates": len(candidates),
+        "n_candidates": n_candidates,
         "n_decisions": len(decisions),
-        "n_traces": len(traces),
+        "n_traces": n_traces,
         "n_pings": n_pings,
         "n_no_pings": n_no_pings,
         "n_claimed_pings": len(claimed_ping_ids),
@@ -282,6 +276,30 @@ def _read_payloads(
     if newest_first:
         rows = list(reversed(rows))
     return rows
+
+
+def _count_payloads(table: str, filename: str, *, since_iso: str | None = None) -> int:
+    try:
+        if sql_store.db_path().exists() and sql_store.count_rows(table) > 0:
+            return sql_store.count_payload_rows(table, since_iso=since_iso)
+    except Exception:
+        pass
+    return sum(1 for row in iter_jsonl(filename) if since_iso is None or row.get("ts", "") >= since_iso)
+
+
+def _trace_summary(table: str, filename: str, *, since_iso: str | None = None) -> tuple[int, set[str]]:
+    try:
+        if sql_store.db_path().exists() and sql_store.count_rows(table) > 0:
+            return sql_store.trace_decision_ids(since_iso=since_iso)
+    except Exception:
+        pass
+    rows = [row for row in iter_jsonl(filename) if since_iso is None or row.get("ts", "") >= since_iso]
+    decision_ids = {
+        (row.get("action") or {}).get("decision_id")
+        for row in rows
+        if (row.get("action") or {}).get("decision_id")
+    }
+    return len(rows), {str(decision_id) for decision_id in decision_ids}
 
 
 _JSONL_SUPPLEMENT_TABLES = {
