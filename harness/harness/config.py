@@ -95,6 +95,16 @@ session_window_min = 120
 idle_boundary_sec = 90
 active_frame_max_age_sec = 60
 
+[workflow_events]
+# Deterministic local eventization inspired by LifeTrace-style data collection:
+# group adjacent candidates into app/window workflow runs so policy sees the
+# trajectory that produced the current screen, not only one frame.
+enabled = true
+max_gap_sec = 90
+recent_context_sec = 300
+max_recent_context = 6
+max_ocr_preview_chars = 500
+
 # Realizer points at the hermes-agent endpoint. Hermes handles its own
 # agentic loop server-side, so client-side tool calls are disabled by default.
 # To swap providers, change base_url + model + api_key.

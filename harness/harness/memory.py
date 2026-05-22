@@ -99,7 +99,11 @@ class SessionMemory:
             last_ts = event_ts
         return max(0.0, (_event_ts(latest) - start_ts) / 60.0)
 
-    def snapshot(self, recent_outcomes: list[dict]) -> MemorySnapshot:
+    def snapshot(
+        self,
+        recent_outcomes: list[dict],
+        recent_workflow_events: list[dict] | None = None,
+    ) -> MemorySnapshot:
         snap = MemorySnapshot.build(
             recent_apps=self.recent_apps(),
             recent_scenes=self.recent_scenes(),
@@ -108,6 +112,7 @@ class SessionMemory:
             minutes_on_current_app=self.minutes_on_current_app(),
             last_event_gap_sec=self.last_event_gap_sec,
             session_boundary=self.session_boundary,
+            recent_workflow_events=recent_workflow_events,
         )
         write_snapshot(snap.snapshot_id, snap.to_dict())
         return snap

@@ -263,6 +263,7 @@ def _build_prompt(
         "memory": {
             "recent_apps": memory.recent_apps[-8:],
             "recent_scenes": memory.recent_scenes[-8:],
+            "recent_workflow_events": _workflow_context(memory),
             "app_switches_last_15m": memory.app_switches_last_15m,
             "minutes_on_current_app": memory.minutes_on_current_app,
             "last_event_gap_sec": getattr(memory, "last_event_gap_sec", 0.0),
@@ -312,6 +313,24 @@ def _scene_dict(event: CandidateEvent) -> dict[str, Any]:
         if raw.get(key):
             raw[key] = privacy.redact_text(str(raw[key]))[:240]
     return raw
+
+
+def _workflow_context(memory: MemorySnapshot) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in (getattr(memory, "recent_workflow_events", []) or [])[-6:]:
+        if not isinstance(row, dict):
+            continue
+        rows.append({
+            "status": row.get("status"),
+            "app": row.get("app"),
+            "window_title": privacy.redact_text(str(row.get("window_title") or ""))[:120],
+            "scene_label": row.get("scene_label"),
+            "duration_sec": row.get("duration_sec"),
+            "n_candidates": row.get("n_candidates"),
+            "close_reason": row.get("close_reason"),
+            "ocr_preview": privacy.redact_text(str(row.get("ocr_preview") or ""))[:180],
+        })
+    return rows
 
 
 def _call_model(cfg: dict, base_url: str, model: str, messages: list[dict[str, str]]) -> dict[str, Any]:

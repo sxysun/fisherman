@@ -76,6 +76,27 @@ class CandidateEvent:
 
 
 @dataclass
+class WorkflowEvent:
+    workflow_event_id: str
+    start_ts: str
+    last_ts: str
+    app: str = "unknown"
+    window_title: str = ""
+    scene_label: str = "unknown"
+    status: Literal["open", "closed"] = "open"
+    ts: str = field(default_factory=_now_iso)
+    end_ts: Optional[str] = None
+    duration_sec: float = 0.0
+    n_candidates: int = 0
+    candidate_ids: list[str] = field(default_factory=list)
+    ocr_preview: str = ""
+    close_reason: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class ProactiveDecision:
     decision_id: str
     candidate_id: str
@@ -175,6 +196,7 @@ class MemorySnapshot:
     minutes_on_current_app: float = 0.0
     last_event_gap_sec: float = 0.0
     session_boundary: Optional[str] = None
+    recent_workflow_events: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def build(
@@ -186,6 +208,7 @@ class MemorySnapshot:
         minutes_on_current_app: float,
         last_event_gap_sec: float = 0.0,
         session_boundary: Optional[str] = None,
+        recent_workflow_events: Optional[list[dict[str, Any]]] = None,
     ) -> "MemorySnapshot":
         body = {
             "recent_apps": recent_apps,
@@ -195,6 +218,7 @@ class MemorySnapshot:
             "minutes_on_current_app": round(minutes_on_current_app, 2),
             "last_event_gap_sec": round(last_event_gap_sec, 2),
             "session_boundary": session_boundary,
+            "recent_workflow_events": recent_workflow_events or [],
         }
         snap_id = f"mem_{_stable_hash(body)}"
         return cls(snapshot_id=snap_id, ts=_now_iso(), **body)

@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 
 DB_FILENAME = "harness.db"
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 KNOWN_TABLES = {
     "event_log",
@@ -19,6 +19,7 @@ KNOWN_TABLES = {
     "outcomes",
     "model_calls",
     "retro_labels",
+    "workflow_events",
 }
 
 
@@ -175,6 +176,26 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ON retro_labels(candidate_id);
         CREATE INDEX IF NOT EXISTS idx_retro_labels_ts
             ON retro_labels(ts);
+
+        CREATE TABLE IF NOT EXISTS workflow_events (
+            workflow_event_id TEXT PRIMARY KEY,
+            ts TEXT,
+            start_ts TEXT,
+            end_ts TEXT,
+            status TEXT,
+            app TEXT,
+            window_title TEXT,
+            scene_label TEXT,
+            n_candidates INTEGER,
+            duration_sec REAL,
+            close_reason TEXT,
+            payload_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_workflow_events_ts
+            ON workflow_events(ts);
+        CREATE INDEX IF NOT EXISTS idx_workflow_events_app
+            ON workflow_events(app, ts);
         """
     )
     conn.execute(
@@ -352,6 +373,7 @@ def backfill_jsonl_files(
                 "outcomes",
                 "model_calls",
                 "retro_labels",
+                "workflow_events",
             ):
                 conn.execute(f"DELETE FROM {table}")
 
@@ -396,6 +418,8 @@ def _mirror_typed(
         _upsert_model_call(conn, row, payload_json, payload_hash)
     elif filename == "retro_labels.jsonl":
         _upsert_retro_label(conn, row, payload_json, payload_hash)
+    elif filename == "workflow_events.jsonl":
+        _upsert_workflow_event(conn, row, payload_json, payload_hash)
 
 
 def _upsert_candidate(
@@ -657,6 +681,55 @@ def _upsert_retro_label(
     )
 
 
+def _upsert_workflow_event(
+    conn: sqlite3.Connection,
+    row: dict,
+    payload_json: str,
+    payload_hash: str,
+) -> None:
+    workflow_event_id = row.get("workflow_event_id")
+    if not workflow_event_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO workflow_events(
+            workflow_event_id, ts, start_ts, end_ts, status, app, window_title,
+            scene_label, n_candidates, duration_sec, close_reason,
+            payload_hash, payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(workflow_event_id) DO UPDATE SET
+            ts = excluded.ts,
+            start_ts = excluded.start_ts,
+            end_ts = excluded.end_ts,
+            status = excluded.status,
+            app = excluded.app,
+            window_title = excluded.window_title,
+            scene_label = excluded.scene_label,
+            n_candidates = excluded.n_candidates,
+            duration_sec = excluded.duration_sec,
+            close_reason = excluded.close_reason,
+            payload_hash = excluded.payload_hash,
+            payload_json = excluded.payload_json
+        """,
+        (
+            workflow_event_id,
+            row.get("ts") or row.get("last_ts"),
+            row.get("start_ts"),
+            row.get("end_ts"),
+            row.get("status"),
+            row.get("app"),
+            row.get("window_title"),
+            row.get("scene_label"),
+            _int_or_none(row.get("n_candidates")),
+            _float_or_none(row.get("duration_sec")),
+            row.get("close_reason"),
+            payload_hash,
+            payload_json,
+        ),
+    )
+
+
 def _stream_name(filename: str) -> str:
     return filename.removesuffix(".jsonl").replace("/", "_")
 
@@ -674,6 +747,8 @@ def _object_id(filename: str, row: dict) -> str | None:
         return row.get("model_call_id")
     if filename == "retro_labels.jsonl":
         return row.get("label_id") or row.get("decision_id") or row.get("candidate_id")
+    if filename == "workflow_events.jsonl":
+        return row.get("workflow_event_id")
     return row.get("id")
 
 

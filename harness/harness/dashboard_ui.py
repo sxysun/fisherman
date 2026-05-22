@@ -275,6 +275,10 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="bars" id="app-bars"></div>
     </div>
     <div class="panel">
+      <h2>Recent workflow events</h2>
+      <div class="example-list" id="workflow-events"></div>
+    </div>
+    <div class="panel">
       <h2>Reason codes (why decisions went the way they did)</h2>
       <div class="bars" id="reason-bars"></div>
     </div>
@@ -541,6 +545,7 @@ function renderActivity(d) {
     {label: 'Ping rate',             val: pct(d.n_pings / Math.max(d.n_decisions, 1))},
     {label: 'Outcomes captured',     val: d.n_outcomes, sub: `${d.n_clicked} clicked · ${d.n_dismissed} dismissed`},
     {label: 'Considered + timed_out',val: d.n_considered_no_click, sub: 'intent signal but no commit'},
+    {label: 'Workflow runs',         val: d.n_workflow_events || 0, sub: `avg ${numMaybe(d.workflow_avg_duration_sec)}s closed`},
   ];
   document.getElementById('stats').innerHTML = stats.map(s => `
     <div class="stat">
@@ -552,6 +557,16 @@ function renderActivity(d) {
   document.getElementById('action-bars').innerHTML = barsHTML(d.dist_actions, 'action_');
   document.getElementById('scene-bars').innerHTML = barsHTML(d.dist_scenes);
   document.getElementById('app-bars').innerHTML = barsHTML(d.dist_apps);
+  document.getElementById('workflow-events').innerHTML = (d.recent_workflow_events || []).map(row => `
+    <div class="example-row">
+      <div class="topline">
+        <span><span class="pill info">${escapeHTML(row.status || 'event')}</span> ${escapeHTML(row.app || 'unknown')} · ${escapeHTML(row.scene_label || 'unknown')}</span>
+        <span>${escapeHTML((row.last_ts || row.ts || '').slice(0,19))}</span>
+      </div>
+      <div class="msg">${escapeHTML(row.window_title || '(untitled window)')}</div>
+      <div class="meta">duration=${escapeHTML(numMaybe(row.duration_sec))}s candidates=${escapeHTML(row.n_candidates ?? 0)} close=${escapeHTML(row.close_reason || 'open')}</div>
+      ${row.ocr_preview ? `<div class="meta">preview=${escapeHTML(row.ocr_preview)}</div>` : ''}
+    </div>`).join('') || '<div style="color:#7c7c86">no closed workflow events yet</div>';
   document.getElementById('reason-bars').innerHTML = barsHTML(d.dist_reasons);
   document.getElementById('intent-bars').innerHTML = barsHTML(d.dist_intent_signals);
 }
@@ -832,6 +847,7 @@ def _aggregate(window_sec: int = 86400) -> dict:
     decisions = _read_payloads("decisions", "decisions.jsonl", since_iso=since_iso)
     outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since_iso)
     traces = list(reversed(_read_payloads("traces", "traces.jsonl", limit=50, newest_first=True)))
+    workflow_events = _read_payloads("workflow_events", "workflow_events.jsonl", since_iso=since_iso)
 
     dist_actions: Counter = Counter()
     dist_intents: Counter = Counter()
@@ -850,6 +866,12 @@ def _aggregate(window_sec: int = 86400) -> dict:
         dist_scenes[scene] += 1
         app = (c.get("screen") or {}).get("frontmost_app") or "?"
         dist_apps[app] += 1
+
+    workflow_durations = [
+        float(row.get("duration_sec") or 0.0)
+        for row in workflow_events
+        if row.get("status") == "closed"
+    ]
 
     dist_intent_signals: Counter = Counter()
     n_clicked = 0
@@ -904,6 +926,11 @@ def _aggregate(window_sec: int = 86400) -> dict:
         "n_clicked": n_clicked,
         "n_dismissed": n_dismissed,
         "n_considered_no_click": n_considered_no_click,
+        "n_workflow_events": len(workflow_events),
+        "workflow_avg_duration_sec": (
+            round(sum(workflow_durations) / len(workflow_durations), 2)
+            if workflow_durations else None
+        ),
         "dist_actions": dict(dist_actions),
         "dist_scenes": dict(dist_scenes.most_common(20)),
         "dist_apps": dict(dist_apps.most_common(20)),
@@ -911,6 +938,7 @@ def _aggregate(window_sec: int = 86400) -> dict:
         "dist_intent_signals": dict(dist_intent_signals),
         "recent_decisions": decisions[-30:][::-1],
         "recent_outcomes": outcomes[-15:][::-1],
+        "recent_workflow_events": workflow_events[-12:][::-1],
         "recent_realizations": recent_realizations,
         "recent_model_calls": model_calls,
     }
@@ -965,7 +993,7 @@ def _dump_toml(cfg: dict) -> str:
     lines: list[str] = []
     # Top-level tables in a stable order
     section_order = ["daemon", "gate", "experiment", "trainer", "policy_learner", "scene", "scene_tagger", "memory",
-                     "realizer", "critic", "privacy", "push", "reward", "intents", "debug"]
+                     "workflow_events", "realizer", "critic", "privacy", "push", "reward", "intents", "debug"]
     written: set[str] = set()
 
     def _val(v: Any) -> str:

@@ -275,14 +275,30 @@ The Diet tab is meant to show what the harness thinks your information diet and 
 1. Fisherman captures local screen/activity context.
 2. Harness daemon polls Fisherman and creates candidate events.
 3. Optional vision/scene tagging enriches candidates.
-4. Policy gate applies `rule_v0` hard gates, then the default `llm_icl_v0` learner decides whether to ping or skip when eligible.
-5. Realizer writes a candidate notification message.
-6. Critic checks whether the message is safe/useful enough.
-7. The Swift capsule claims pending pings and renders them.
-8. User reaction is captured: click, later, dismiss, timeout, hover, approach, leave.
-9. Outcomes become reward and implicit weak labels.
-10. Eval reports join decisions, deliveries, outcomes, labels, traces, and policy calibration.
-11. Capsule fetches those reports and visualizes the current 24-hour window.
+4. Workflow eventization groups adjacent candidates into app/window runs, closing runs on app/title changes, stale frames, sensitive/inactive screens, or sleep/capture gaps.
+5. Policy gate applies `rule_v0` hard gates, then the default `llm_icl_v0` learner decides whether to ping or skip when eligible. The learner sees the recent workflow run sequence, not just the current frame.
+6. Realizer writes a candidate notification message.
+7. Critic checks whether the message is safe/useful enough.
+8. The Swift capsule claims pending pings and renders them.
+9. User reaction is captured: click, later, dismiss, timeout, hover, approach, leave.
+10. Outcomes become reward and implicit weak labels.
+11. Eval reports join decisions, deliveries, outcomes, labels, traces, and policy calibration.
+12. Capsule fetches those reports and visualizes the current 24-hour window.
+
+## Workflow Events
+
+`workflow_events.jsonl` is the harness-local event layer inspired by LifeTrace-style data collection. It is not a replacement for candidate ticks. Candidates are still the atomic decision/eval rows; workflow events are the compact trajectory summaries the policy can read.
+
+The implementation lives in `harness/harness/workflow_events.py`:
+
+- A run starts from the first valid candidate in an app/window.
+- The run extends while the active app and window title stay stable.
+- The run closes on app change, window-title change, stale frame, inactive/sensitive screen, daemon shutdown, or a capture/time gap above `[workflow_events].max_gap_sec`.
+- Closed runs are appended to `~/.harness/workflow_events.jsonl` and mirrored into the SQLite `workflow_events` table.
+- The daemon puts the last `[workflow_events].recent_context_sec` seconds of compact runs into `MemorySnapshot.recent_workflow_events`.
+- `policies/llm_icl_v0.py` includes those compact runs in the LLM binary policy prompt.
+
+The web dashboard Activity tab now shows recent closed workflow events. The capsule Pipeline panel stays focused on the intervention funnel; use the browser dashboard for deeper run inspection until the native capsule grows a detailed event window.
 
 ## How To Manually Inspect The Same Data
 

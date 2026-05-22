@@ -164,8 +164,22 @@ def _serialize_state(
         f"continuous_minutes_on_current_app: {memory.minutes_on_current_app}",
         f"session_boundary: {memory.session_boundary or 'none'}",
         f"app_switches_last_15m: {memory.app_switches_last_15m}",
-        f"ocr_snippet: {ocr}",
     ])
+    workflow_events = getattr(memory, "recent_workflow_events", []) or []
+    if workflow_events:
+        compact_events: list[str] = []
+        for row in workflow_events[-3:]:
+            if not isinstance(row, dict):
+                continue
+            app = privacy.redact_text(str(row.get("app") or "unknown"))[:60]
+            title = privacy.redact_text(str(row.get("window_title") or ""))[:80]
+            scene = str(row.get("scene_label") or "unknown")[:40]
+            duration = int(float(row.get("duration_sec") or 0))
+            status = str(row.get("status") or "unknown")
+            compact_events.append(f"{status}:{app}:{title}:{scene}:{duration}s")
+        if compact_events:
+            lines.append(f"recent_workflow_events: {' | '.join(compact_events)}")
+    lines.append(f"ocr_snippet: {ocr}")
     return "\n".join(lines)
 
 

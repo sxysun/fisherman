@@ -15,7 +15,7 @@ The user wanted this to:
 2. Surface information that helps the current task (silent research, open threads, focus drift)
 3. Never feel ad-hoc or "AI-assistant warm" — terse, direct, like a colleague
 
-The harness produces **traces**: structured logs of (state, decision, message, outcome) per tick. These traces are RL-friendly. The current live policy is an LLM in-context binary classifier (`llm_icl_v0`) guarded by the deterministic `rule_v0` safety baseline.
+The harness produces **traces**: structured logs of (state, decision, message, outcome) per tick. It also produces **workflow events**: compact app/window runs that preserve how the user got to the current screen. The current live policy is an LLM in-context binary classifier (`llm_icl_v0`) guarded by the deterministic `rule_v0` safety baseline.
 
 ---
 
@@ -72,6 +72,7 @@ harness/
 │   ├── scene.py                  rule-based scene tagger (fast path)
 │   ├── scene_vlm.py              per-candidate VLM scene tagger (smart-triggered)
 │   ├── memory.py                 rolling 2h session + content-addressed snapshots
+│   ├── workflow_events.py        local app/window run eventizer for policy trajectory
 │   ├── gate.py                   loads policy module by name
 │   ├── realizer.py               openai-compatible agent loop, sends vision JPEG
 │   │                              unless privacy preflight suppresses it
@@ -120,7 +121,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live capsule/ping
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           50 tests; pytest passes
+└── tests/test_smoke.py           52 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -131,6 +132,7 @@ State on disk (outside the repo):
 ├── policy.json                   runtime state: daily_goal, sensitivity, snooze, mutes
 ├── HarnessNotch                  Swift binary, launched by daemon
 ├── candidates.jsonl              every CandidateEvent
+├── workflow_events.jsonl         closed app/window workflow runs
 ├── decisions.jsonl               every gate decision
 ├── deliveries.jsonl              notch claim/display ledger
 ├── outcomes.jsonl                user reactions + interaction_summary
@@ -198,6 +200,15 @@ User flow once it's running:
    - Sleep/resume gaps are now explicit (`capture_gap_sec`,
      `last_event_gap_sec`, `session_boundary`) so long-session messages do
      not count closed-laptop time as active work
+
+✅ Workflow eventization
+   - `workflow_events.py` groups adjacent candidates into app/window runs
+   - Closes runs on app/title changes, stale/inactive/sensitive frames,
+     capture gaps, time gaps, or daemon shutdown
+   - Closed rows go to `workflow_events.jsonl` and the SQLite
+     `workflow_events` table
+   - Recent compact runs are stored in `MemorySnapshot.recent_workflow_events`
+     and included in the `llm_icl_v0` ping/not-ping policy prompt
 
 ✅ Signal-derived reward (reward_v2)
    - clicked +2, considered +0.5, approached -0.2, ignored -1, dismissed -1.5

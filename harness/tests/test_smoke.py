@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar
 import io
 import json
 import time
@@ -34,6 +35,7 @@ from harness import sql_store as sql_store_mod
 from harness import store as store_mod
 from harness import trust as trust_mod
 from harness import trainer as trainer_mod
+from harness import workflow_events as workflow_events_mod
 
 
 def test_imports():
@@ -64,6 +66,7 @@ def test_imports():
     assert service_mod
     assert trust_mod
     assert trainer_mod
+    assert workflow_events_mod
 
 
 def test_schema_roundtrip():
@@ -73,6 +76,86 @@ def test_schema_roundtrip():
     serialized = json.dumps(event.to_dict(), default=str)
     assert "Cursor" in serialized
     assert "candidate_id" in serialized
+
+
+def test_workflow_events_group_and_close_on_window_change():
+    builder = workflow_events_mod.WorkflowEventBuilder(max_gap_sec=90)
+
+    first = schemas.CandidateEvent(candidate_id="cand_wev_1")
+    first.ts = "2026-05-19T12:00:00Z"
+    first.screen.frontmost_app = "Google Chrome"
+    first.screen.window_title = "FreeTodo paper"
+    first.screen.ocr_snippet = "ProAgentBench evaluates proactive assistance"
+    first.screen.frame_age_sec = 1
+    first.scene = schemas.SceneTag(label="reading_browser", strength="medium")
+    assert builder.observe(first) is None
+
+    second = schemas.CandidateEvent(candidate_id="cand_wev_2")
+    second.ts = "2026-05-19T12:00:10Z"
+    second.screen.frontmost_app = "Google Chrome"
+    second.screen.window_title = "FreeTodo paper"
+    second.screen.ocr_snippet = "When to Assist and How to Assist"
+    second.screen.frame_age_sec = 1
+    second.scene = schemas.SceneTag(label="reading_browser", strength="medium")
+    assert builder.observe(second) is None
+
+    third = schemas.CandidateEvent(candidate_id="cand_wev_3")
+    third.ts = "2026-05-19T12:00:20Z"
+    third.screen.frontmost_app = "Google Chrome"
+    third.screen.window_title = "Harness dashboard"
+    third.screen.frame_age_sec = 1
+    third.scene = schemas.SceneTag(label="reading_browser", strength="medium")
+    closed = builder.observe(third)
+
+    assert closed is not None
+    assert closed.status == "closed"
+    assert closed.close_reason == "window_changed"
+    assert closed.n_candidates == 2
+    assert closed.duration_sec == 10.0
+    assert closed.candidate_ids == ["cand_wev_1", "cand_wev_2"]
+    context = builder.recent_context(now_ts=calendar.timegm(time.strptime(third.ts, "%Y-%m-%dT%H:%M:%SZ")))
+    assert [row["status"] for row in context] == ["closed", "open"]
+    assert context[-1]["window_title"] == "Harness dashboard"
+
+
+def test_workflow_events_close_on_capture_gap_and_memory_snapshot(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        builder = workflow_events_mod.WorkflowEventBuilder(max_gap_sec=90)
+        mem = memory_mod.SessionMemory(window_min=120, idle_boundary_sec=90)
+        first = schemas.CandidateEvent()
+        first.ts = "2026-05-19T12:00:00Z"
+        first.screen.frontmost_app = "Cursor"
+        first.screen.window_title = "policy.py"
+        first.screen.frame_age_sec = 1
+        first.scene = schemas.SceneTag(label="coding_focused")
+        mem.record(first)
+        assert builder.observe(first) is None
+
+        resumed = schemas.CandidateEvent()
+        resumed.ts = "2026-05-19T12:30:00Z"
+        resumed.screen.frontmost_app = "Cursor"
+        resumed.screen.window_title = "policy.py"
+        resumed.screen.capture_gap_sec = 1800
+        resumed.screen.frame_age_sec = 1
+        resumed.scene = schemas.SceneTag(label="coding_focused")
+        mem.record(resumed)
+        closed = builder.observe(resumed)
+        assert closed is not None
+        assert closed.close_reason == "capture_gap"
+
+        snap = mem.snapshot(
+            [],
+            recent_workflow_events=builder.recent_context(
+                now_ts=calendar.timegm(time.strptime(resumed.ts, "%Y-%m-%dT%H:%M:%SZ"))
+            ),
+        )
+        assert snap.session_boundary == "capture_gap"
+        assert snap.recent_workflow_events[-1]["status"] == "open"
+        assert snap.recent_workflow_events[-1]["app"] == "Cursor"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
 
 
 def test_config_load_merges_new_defaults(tmp_path):
@@ -534,6 +617,15 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
             recent_outcomes=[],
             app_switches_last_15m=0,
             minutes_on_current_app=12.0,
+            recent_workflow_events=[{
+                "status": "open",
+                "app": "Chrome",
+                "window_title": "Harness policy notes",
+                "scene_label": "reading_browser",
+                "duration_sec": 42.0,
+                "n_candidates": 4,
+                "ocr_preview": "drafting harness policy learner",
+            }],
         )
         cfg = {
             "cooldown_min": 5,
@@ -555,6 +647,8 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
 
         def fake_call(cfg, base_url, model, messages):
             assert "drafting harness policy learner" in messages[1]["content"]
+            assert "recent_workflow_events" in messages[1]["content"]
+            assert "Harness policy notes" in messages[1]["content"]
             return {
                 "action": "notch_ping",
                 "confidence": 0.82,
@@ -886,6 +980,20 @@ def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
             "confidence": 0.9,
             "ts": "2026-05-19T12:00:05Z",
         }
+        workflow_event = {
+            "workflow_event_id": "wev_sql",
+            "ts": "2026-05-19T12:00:06Z",
+            "start_ts": "2026-05-19T12:00:00Z",
+            "last_ts": "2026-05-19T12:00:06Z",
+            "end_ts": "2026-05-19T12:00:06Z",
+            "status": "closed",
+            "app": "Chrome",
+            "window_title": "Harness eval",
+            "scene_label": "reading_browser",
+            "n_candidates": 2,
+            "duration_sec": 6.0,
+            "close_reason": "window_changed",
+        }
 
         store_mod.append_jsonl("candidates.jsonl", candidate)
         store_mod.append_jsonl("decisions.jsonl", decision)
@@ -893,15 +1001,17 @@ def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):
         store_mod.append_jsonl("outcomes.jsonl", outcome)
         store_mod.append_jsonl("model_calls.jsonl", model_call)
         store_mod.append_jsonl("retro_labels.jsonl", label)
+        store_mod.append_jsonl("workflow_events.jsonl", workflow_event)
 
         assert sql_store_mod.db_path().exists()
-        assert sql_store_mod.count_rows("event_log") == 6
+        assert sql_store_mod.count_rows("event_log") == 7
         assert sql_store_mod.count_rows("candidates") == 1
         assert sql_store_mod.count_rows("decisions") == 1
         assert sql_store_mod.count_rows("traces") == 1
         assert sql_store_mod.count_rows("outcomes") == 1
         assert sql_store_mod.count_rows("model_calls") == 1
         assert sql_store_mod.count_rows("retro_labels") == 1
+        assert sql_store_mod.count_rows("workflow_events") == 1
 
         reward = {"version": "v2", "value": -0.8}
         assert store_mod.attach_outcome_to_trace("pd_sql", outcome, reward)

@@ -38,6 +38,7 @@ from .store import (
     tail_jsonl,
     write_policy_state,
 )
+from .workflow_events import WorkflowEventBuilder
 
 
 log = structlog.get_logger("harness.daemon")
@@ -126,6 +127,16 @@ async def run_loop(config: dict) -> None:
         idle_boundary_sec=int(memory_cfg.get("idle_boundary_sec", 90)),
         active_frame_max_age_sec=int(memory_cfg.get("active_frame_max_age_sec", 60)),
     )
+    workflow_events: Optional[WorkflowEventBuilder] = None
+    workflow_cfg = config.get("workflow_events", {})
+    if bool(workflow_cfg.get("enabled", True)):
+        workflow_events = WorkflowEventBuilder(
+            max_gap_sec=float(workflow_cfg.get("max_gap_sec", memory_cfg.get("idle_boundary_sec", 90))),
+            active_frame_max_age_sec=float(
+                memory_cfg.get("active_frame_max_age_sec", workflow_cfg.get("active_frame_max_age_sec", 60))
+            ),
+            max_ocr_preview_chars=int(workflow_cfg.get("max_ocr_preview_chars", 500)),
+        )
 
     last_push_at_ref: list[Optional[float]] = [None]
 
@@ -158,10 +169,15 @@ async def run_loop(config: dict) -> None:
                 config=config,
                 fc=fc,
                 memory=memory,
+                workflow_events=workflow_events,
                 last_push_at_ref=last_push_at_ref,
             )
             await asyncio.sleep(poll_sec)
     finally:
+        if workflow_events is not None:
+            closed = workflow_events.close("daemon_shutdown")
+            if closed is not None:
+                append_jsonl("workflow_events.jsonl", closed.to_dict())
         trainer_task.cancel()
         try:
             await trainer_task
@@ -204,6 +220,7 @@ async def _tick(
     config: dict,
     fc: FishermanClient,
     memory: SessionMemory,
+    workflow_events: Optional[WorkflowEventBuilder],
     last_push_at_ref: list[Optional[float]],
 ) -> None:
     user_pref = _user_pref_from_config(config)
@@ -242,9 +259,23 @@ async def _tick(
 
     append_jsonl("candidates.jsonl", event.to_dict())
 
+    recent_workflow_events: list[dict] = []
+    if workflow_events is not None:
+        closed_workflow_event = workflow_events.observe(event)
+        if closed_workflow_event is not None:
+            append_jsonl("workflow_events.jsonl", closed_workflow_event.to_dict())
+        workflow_cfg = config.get("workflow_events", {})
+        recent_workflow_events = workflow_events.recent_context(
+            window_sec=float(workflow_cfg.get("recent_context_sec", 300)),
+            limit=int(workflow_cfg.get("max_recent_context", 6)),
+        )
+
     memory.record(event)
     recent_outcomes = tail_jsonl("outcomes.jsonl", n=5)
-    mem_snap = memory.snapshot(recent_outcomes)
+    mem_snap = memory.snapshot(
+        recent_outcomes,
+        recent_workflow_events=recent_workflow_events,
+    )
 
     policy_state = read_policy_state()
     daily_goal = (policy_state.get("daily_goal") or "").strip()
