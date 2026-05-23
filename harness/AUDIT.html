@@ -86,6 +86,115 @@
       font-size: 13px;
       white-space: nowrap;
     }
+    .reading-path {
+      display: grid;
+      grid-template-columns: 1.35fr .65fr;
+      gap: 14px;
+      align-items: stretch;
+      margin: 20px 0 8px;
+    }
+    .big-idea {
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      padding: 18px;
+      background: #fbfcfd;
+    }
+    .big-idea strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 18px;
+    }
+    .plain-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .plain-list li {
+      margin: 0;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .phase-map {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 8px;
+    }
+    .phase {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: var(--panel);
+    }
+    .phase b {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 28px;
+      height: 28px;
+      margin-bottom: 12px;
+      border-radius: 999px;
+      background: var(--ink);
+      color: var(--bg);
+      font-size: 13px;
+    }
+    .phase h3 {
+      margin: 0 0 8px;
+      color: var(--ink);
+      text-transform: none;
+      letter-spacing: 0;
+      font-size: 18px;
+    }
+    .phase p { color: var(--muted); }
+    .walkthrough {
+      counter-reset: step;
+      display: grid;
+      gap: 10px;
+      margin: 14px 0 22px;
+    }
+    .step {
+      counter-increment: step;
+      display: grid;
+      grid-template-columns: 42px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+    }
+    .step::before {
+      content: counter(step);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background: var(--panel2);
+      color: var(--ink);
+      font-weight: 700;
+      font-size: 13px;
+    }
+    .step strong { display: block; margin-bottom: 3px; }
+    .step span { color: var(--muted); }
+    .cheatsheet {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin: 12px 0 20px;
+    }
+    .cheatsheet div {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--panel);
+    }
+    .cheatsheet strong { display: block; margin-bottom: 4px; }
     .grid {
       display: grid;
       gap: 14px;
@@ -174,7 +283,7 @@
     .print-note { color: var(--muted); font-size: 13px; }
     @media (max-width: 860px) {
       main { padding: 32px 18px 64px; }
-      .grid.two, .grid.three, .verdict, .flow { grid-template-columns: 1fr; }
+      .grid.two, .grid.three, .verdict, .flow, .reading-path, .phase-map, .cheatsheet { grid-template-columns: 1fr; }
       h1 { font-size: 36px; }
     }
     @media print {
@@ -188,12 +297,12 @@
 <main>
   <header>
     <h1>Fisherman Harness Architecture and Gap Audit</h1>
-    <p class="dek">A direct assessment of the proactive-presence harness as of May 22, 2026: what exists, why the architecture mostly makes sense, where it falls short of a frontier-lab-quality system, and what has to close before it is a reliable working harness rather than a promising dogfood prototype.</p>
+    <p class="dek">A practical map of the proactive-presence harness as of May 23, 2026: what runs, how a screen moment becomes a ping, how feedback becomes training data, and what still separates the dogfood harness from a fully validated policy system.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
-      <span class="pill">Smoke tests: 56 passing</span>
+      <span class="pill">Smoke tests: 72 passing in CI</span>
       <span class="pill">Approx. source/docs: 55 files, 10k lines</span>
-      <span class="pill">Updated: 2026-05-22</span>
+      <span class="pill">Updated: 2026-05-23</span>
     </div>
   </header>
 
@@ -211,6 +320,58 @@
       <div class="label">Dogfood: yes<br>Validated policy: no<br>Lab-grade eval: data-gated</div>
     </div>
   </section>
+
+  <section class="reading-path">
+    <div class="big-idea">
+      <strong>The harness is a binary intervention learner.</strong>
+      <p>Every screen tick asks one product question: should the assistant interrupt now, or stay quiet? If it interrupts, the capsule observes what happened next. Those outcomes become weak labels, explicit labels, and eval rows for improving the next ping/not-ping policy.</p>
+      <p>Think of the harness as the lab bench around Fisherman, not Fisherman itself. Fisherman captures local context. The harness turns that context into experiments, pings, traces, and policy measurements.</p>
+    </div>
+    <ul class="plain-list">
+      <li><strong>Read first:</strong> the three-phase map below.</li>
+      <li><strong>Then:</strong> check the pipeline walkthrough for the exact data path.</li>
+      <li><strong>Finally:</strong> use the gap table to decide what to improve next.</li>
+    </ul>
+  </section>
+
+  <h2>One-Screen Mental Model</h2>
+  <div class="phase-map">
+    <div class="phase">
+      <b>1</b>
+      <h3>Observe</h3>
+      <p>Poll Fisherman's local API, read the current app/window/OCR/screenshot, redact sensitive content, and package the moment as a typed candidate.</p>
+    </div>
+    <div class="phase">
+      <b>2</b>
+      <h3>Decide</h3>
+      <p>Apply hard safety gates, then let the LLM ICL policy decide ping vs. not-ping using the daily goal, recent workflow, priors, and labeled examples.</p>
+    </div>
+    <div class="phase">
+      <b>3</b>
+      <h3>Learn</h3>
+      <p>Deliver through the capsule, capture hover/click/dismiss/timeout signals, write a complete trace, and evaluate the policy on frozen candidate/event datasets.</p>
+    </div>
+  </div>
+
+  <h2>What You See vs. What Gets Written</h2>
+  <div class="cheatsheet">
+    <div>
+      <strong>Floating capsule</strong>
+      <p>The native UI. It shows pings, lets you answer yes/later/dismiss, exposes Pipeline/Diet/Settings, and records interaction signals.</p>
+    </div>
+    <div>
+      <strong>Dashboard at <code>:7893/dashboard</code></strong>
+      <p>The browser workbench. It shows eval reports, information diet summaries, and label/review links when the native capsule is not enough.</p>
+    </div>
+    <div>
+      <strong>Local state at <code>~/.harness</code></strong>
+      <p>The audit trail. JSONL files remain inspectable; SQLite mirrors the typed rows for fast metrics, replay, dataset mining, and dashboard queries.</p>
+    </div>
+    <div>
+      <strong>Harness CI</strong>
+      <p>The repo safety check. Harness-only commits are tested separately and should not trigger Fisherman app update prompts or Cloud deploys.</p>
+    </div>
+  </div>
 
   <h2>Repository Boundary</h2>
   <div class="grid two">
@@ -237,6 +398,44 @@
   </div>
 
   <h2>How The Harness Works</h2>
+  <div class="walkthrough">
+    <div class="step">
+      <div>
+        <strong>Fisherman exposes local context.</strong>
+        <span>The harness reads from localhost. It does not need Fisherman Cloud ingest to be connected, and Fisherman does not import the harness.</span>
+      </div>
+    </div>
+    <div class="step">
+      <div>
+        <strong>The daemon makes a candidate every tick.</strong>
+        <span>A candidate is the atomic eval row: current app, window, OCR summary, scene tags, sensitivity state, daily goal, recent workflow, and policy state.</span>
+      </div>
+    </div>
+    <div class="step">
+      <div>
+        <strong>The policy chooses ping or not-ping.</strong>
+        <span><code>rule_v0</code> is the hard guardrail and fallback. <code>llm_icl_v0</code> is the live policy learner: it uses in-context examples, recent trajectory, and KG-style priors.</span>
+      </div>
+    </div>
+    <div class="step">
+      <div>
+        <strong>The realizer writes the actual message.</strong>
+        <span>The message is not a template tied to a rigid reason code. It is generated from the daily goal, why-now rationale, compact state, and privacy-approved screen context.</span>
+      </div>
+    </div>
+    <div class="step">
+      <div>
+        <strong>The capsule records the outcome.</strong>
+        <span>Clicking yes/later/dismiss is recorded. Hover target, approach, timeout, and displayed acknowledgements are also captured, so ignored pings become attention-cost signal.</span>
+      </div>
+    </div>
+    <div class="step">
+      <div>
+        <strong>Eval turns behavior into policy evidence.</strong>
+        <span>Implicit outcomes, explicit labels, hard negatives, event labels, and frozen split reports are used to decide whether a policy change is actually better.</span>
+      </div>
+    </div>
+  </div>
   <div class="flow">
     <div class="node"><strong>1. Fisherman capture</strong><small>Fisherman daemon exposes frames, OCR, app/window metadata, status, and query endpoints on localhost.</small></div>
     <div class="node"><strong>2. Candidate synthesis</strong><small><code>candidate.py</code> snapshots screen context and current user prefs into a typed <code>CandidateEvent</code>.</small></div>
