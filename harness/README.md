@@ -135,7 +135,7 @@ harness info-diet [--since 7d --json]        research episodes + workflow hypoth
 harness kg-priors [--since 30d --json]       local app/scene/keyword priors
 harness hard-examples [--since 30d --json]   balanced candidate positives, hard negatives, misses
 harness freeze-eval [--since 30d]            write frozen candidate + event eval dataset
-harness eval-manifest datasets/.../manifest.json
+harness eval-manifest datasets/.../manifest.json [--require-live-model]
                                              replay policy on frozen candidate + event split
 harness curate TYPE ID --action exclude      curation ledger for eval/training rows
 harness train-policy [--since 30d]           propose a canary policy from labels/outcomes
@@ -159,9 +159,9 @@ The report includes trace completeness, data coverage, claimed-ping outcome capt
 
 The browser labeler now has two scopes: `/label` for exact decision moments and `/label/events` for workflow-event review. Event labels are stored in `retro_labels.jsonl` with `label_scope="workflow_event"` and are reported separately from candidate labels, so event-level recall does not corrupt tick-level precision.
 
-`harness freeze-eval` writes a self-contained sanitized eval bundle under `harness/datasets/`: `source_candidates.jsonl`, `source_workflow_events.jsonl`, `source_outcomes.jsonl`, `examples.jsonl`, `event_examples.jsonl`, and `manifest.json`. The manifest includes split timestamp bounds and a no-future-leakage rule: policy replay may use only candidates, outcomes, labels, priors, and workflow events whose timestamps are at or before the example timestamp. The export omits raw screenshots and raw OCR by default and respects `curation.jsonl` exclusions.
+`harness freeze-eval` writes a self-contained sanitized eval bundle under `harness/datasets/`: `source_candidates.jsonl`, `source_workflow_events.jsonl`, `source_outcomes.jsonl`, `examples.jsonl`, `event_examples.jsonl`, `split_assignments.jsonl`, and `manifest.json`. The manifest includes split timestamp bounds, per-example split assignments, and a no-future-leakage rule: policy replay may use only candidates, outcomes, labels, priors, and workflow events whose timestamps are at or before the example timestamp. The export omits raw screenshots and raw OCR by default and respects `curation.jsonl` exclusions.
 
-`harness eval-manifest path/to/manifest.json --policy rule_v0` replays a policy chronologically over the sanitized source candidate stream, then scores only the frozen candidate/event examples. The report includes precision, recall, F1, false-interruption rate, missed-help rate, bootstrap confidence intervals, train/validation/test metrics, and slices by app, scene, and example type. This is the command to run before trusting a policy change.
+`harness eval-manifest path/to/manifest.json --policy rule_v0` replays a policy chronologically over the sanitized source candidate stream, then scores only the frozen candidate/event examples. The report includes precision, recall, F1, false-interruption rate, missed-help rate, bootstrap confidence intervals, train/validation/test metrics, source/confidence-weighted metrics, and slices by app, scene, and example type. It validates split assignment consistency and can require a live-model attestation with `--require-live-model`, which prevents accidentally promoting a policy that only exercised static fixtures. This is the command to run before trusting a policy change.
 
 `harness info-diet --since 7d` builds a conservative research/workflow report from the same candidate stream. It groups browser-like reading episodes, inferred domains, query-like phrases, dwell patterns, and tentative workflow hypotheses. Treat it as an evidence panel, not a trusted skill compiler yet: current source attribution is OCR-derived until Fisherman exposes browser URL/title ground truth.
 
@@ -171,10 +171,12 @@ Runtime state lives outside the repo at `~/.harness/`. See `HANDOFF.md` for the 
 
 The canonical append path still writes JSONL files such as `candidates.jsonl`, `workflow_events.jsonl`, `decisions.jsonl`, `deliveries.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, `curation.jsonl`, and `model_calls.jsonl`. Each append is also mirrored into `~/.harness/harness.db` event history, with typed tables for the core candidate/workflow/decision/trace/delivery/outcome/model/label/curation streams. Trace lifecycle patching and late outcome attachment update both `traces.jsonl` and the typed SQLite trace row. Dashboard, metrics, replay, score, dataset mining, and shadow comparison read from SQLite when the sidecar is present and fall back to JSONL for old installs. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
 
+Retention is intentionally conservative right now: JSONL and SQLite are append-mostly so the eval trail is inspectable. There is not yet an automatic prune/compact job for `~/.harness`; treat retention/compaction as the next storage-hardening item once the eval protocol is stable.
+
 ## Tests
 
 ```bash
 .venv/bin/python -m pytest tests/test_smoke.py
 ```
 
-The smoke suite covers schemas, config default merging, workflow eventization, trace lifecycle patching, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay/backoff, gate, LLM ICL policy, KG priors, hard-example mining, frozen manifest eval, sleep/resume continuity, experiments, launchd plist generation, labeler queueing, metrics, information-diet reporting, shadow eval, critic, and reward.
+The smoke suite currently has 72 tests. It covers schemas, config default merging, workflow eventization, trace lifecycle patching, delivery ack/expiry handling, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay/backoff, gate, LLM ICL policy, KG priors, hard-example mining, frozen manifest eval, split assignment checks, live-model attestation, source weighting, sleep/resume continuity, experiments, launchd plist generation, labeler queueing, metrics, information-diet reporting, shadow eval, critic, and reward.

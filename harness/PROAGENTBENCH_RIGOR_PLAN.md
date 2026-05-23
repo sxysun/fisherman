@@ -502,11 +502,14 @@ The first paper-style rigor pass is now implemented in code:
 - `dataset.py` mines useful pings, behavioral negatives, context-matched hard negatives, and missed-help candidates. It now also mines workflow-event review rows, and `harness freeze-eval` writes sanitized candidate and event eval files with time-ordered split bounds.
 - `/label/events` adds a browser event-level labeling UI for whole workflow runs. Event labels are stored separately from decision labels via `label_scope="workflow_event"` and feed event-level precision/recall/F1 metrics.
 - Replay/shadow evaluation now preserves `workflow_event_id` and reconstructs a no-future-leak recent workflow context for offline memory snapshots.
-- `harness freeze-eval` now exports sanitized source candidates, source workflow events, and source outcomes alongside candidate/event examples, so frozen datasets are replayable without reading live JSONL state.
-- `harness eval-manifest` replays a policy chronologically over a frozen manifest and reports candidate/event precision, recall, F1, missed-help rate, false-interruption rate, bootstrap confidence intervals, train/validation/test splits, and slices by app/scene/example type.
+- `harness freeze-eval` now exports sanitized source candidates, source workflow events, source outcomes, split assignments, and candidate/event examples, so frozen datasets are replayable without reading live JSONL state.
+- `harness eval-manifest` replays a policy chronologically over a frozen manifest and reports candidate/event precision, recall, F1, missed-help rate, false-interruption rate, bootstrap confidence intervals, train/validation/test splits, source/confidence-weighted metrics, and slices by app/scene/example type.
+- Frozen manifest replay validates split assignment consistency, fails closed on missing required artifacts, counts missing predictions as coverage failures instead of silent no-ping wins, and supports `--require-live-model` for live-model attestation.
+- Live delivery handling now requires displayed acknowledgements, expires terminal delivery states, and avoids treating a dequeued-but-never-displayed payload as a clean outcome.
+- Shadow eval now uses the active store by default, uses time-ordered group holdout, and avoids ambient `~/.harness` fallback when an explicit store is provided.
 - Workflow events now carry first/last OCR previews, window-title samples, and event-level quality flags such as `too_short`, `too_long`, and `no_valid_frame`.
 - The per-candidate VLM scene tagger now has explicit error/rate-limit backoff, so a failing VLM endpoint cannot repeatedly spend calls on every eligible tick.
-- Smoke coverage is 61 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, workflow-event review mining, frozen manifest replay, VLM backoff, and precision/recall metrics.
+- Smoke coverage is 72 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, workflow-event review mining, frozen manifest replay, split assignment validation, live-model attestation, source weighting, delivery ack/expiry handling, VLM backoff, and precision/recall metrics.
 
 Still not done:
 
@@ -514,6 +517,7 @@ Still not done:
 - The frozen eval protocol now has a manifest replay command with leakage checks. Policy-specific RAG retrievers still need explicit tests before they are allowed into offline comparison.
 - KG priors are simple count priors; RAG similar-event retrieval and ablation reports are still future work.
 - The curation ledger is CLI-backed and event-review-backed for workflow events; there is still no full capsule review panel for arbitrary candidate/trace deletion.
+- Harness storage is append-mostly. There is SQLite backfill, but no automatic retention/compaction policy for long-running dogfood state yet.
 
 ## Non-Goals For Now
 

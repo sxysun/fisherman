@@ -273,7 +273,7 @@
     </div>
     <div class="card risk-low">
       <h3>Testable seams</h3>
-      <p>The modules are small enough to unit test: gate, scene overlay, reward, trace patching, and snooze behavior now have smoke coverage.</p>
+      <p>The modules are small enough to unit test: gate, scene overlay, reward, trace patching, delivery lifecycle, frozen eval, and snooze behavior now have 72 smoke tests.</p>
     </div>
   </div>
 
@@ -290,8 +290,8 @@
     <tbody>
       <tr>
         <td>Evaluation data</td>
-        <td>Live traces, sparse retro labels, confidence-weighted implicit weak labels from notification behavior, native metrics, deterministic holdouts, KG priors, hard-example mining, frozen eval manifest generation, and <code>harness shadow</code> now report ping rate, trace completeness, outcome capture, precision/recall/F1, false-interruption rate, missed-help rate, and simple shadow-policy comparisons.</td>
-        <td>More human labels, event-level review, disagreement analysis, strict no-leakage frozen splits, and stable policy acceptance criteria.</td>
+        <td>Live traces, sparse retro labels, confidence-weighted implicit weak labels from notification behavior, native metrics, deterministic holdouts, KG priors, hard-example mining, frozen eval manifest generation, split assignment checks, source/confidence-weighted metrics, optional live-model attestation, and <code>harness shadow</code> now report ping rate, trace completeness, outcome capture, precision/recall/F1, false-interruption rate, missed-help rate, and simple shadow-policy comparisons.</td>
+        <td>More human labels, native event-level review, disagreement analysis, stable promotion criteria, and leakage-tested RAG/similar-event retrieval before use in offline comparison.</td>
         <td class="status-bad">P0</td>
       </tr>
       <tr>
@@ -308,7 +308,7 @@
       </tr>
       <tr>
         <td>Persistent storage</td>
-        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, deliveries, outcomes, labels, workflow events, curation, and model calls. Dashboard, metrics, replay, score, dataset mining, and shadow prefer SQLite payload rows. A CLI backfill can rebuild the sidecar from JSONL. Pending notch delivery is leased and completed on outcome.</td>
+        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, deliveries, outcomes, labels, workflow events, curation, and model calls. Dashboard, metrics, replay, score, dataset mining, and shadow prefer SQLite payload rows. A CLI backfill can rebuild the sidecar from JSONL. Pending notch delivery is leased, requires displayed ack, completes on outcome, and expires stuck terminal states.</td>
         <td>Formal migrations, retention/compaction, and automated recovery/backfill validation.</td>
         <td class="status-warn">P1</td>
       </tr>
@@ -391,7 +391,7 @@
   </div>
   <div class="card risk-med">
     <h3>P1: Storage has a typed sidecar, but not a migration contract</h3>
-    <p>The harness now mirrors JSONL into SQLite and dashboard/metrics/replay/score/dataset builders/shadow prefer SQLite payload rows. It still needs explicit migration tests across old local databases, backfill/recovery checks, and retention policy before storage can be treated as long-lived lab infrastructure.</p>
+    <p>The harness now mirrors JSONL into SQLite and dashboard/metrics/replay/score/dataset builders/shadow prefer SQLite payload rows. It has backfill and delivery-lifecycle recovery coverage, but still needs explicit migration tests across old local databases and an automatic retention/compaction policy before storage can be treated as long-lived lab infrastructure.</p>
   </div>
   <div class="card risk-med">
     <h3>P1: Replay is still not the real system</h3>
@@ -413,7 +413,7 @@
       </tr>
       <tr>
         <td>Policy-eval-ready</td>
-        <td>At least 500 labeled candidates, frozen datasets, policy versioning, replay under 10 seconds for a day of candidates, and tracked precision, recall, F1, false-interruption rate, and missed-help rate.</td>
+        <td>At least 500 labeled candidates, frozen datasets, policy versioning, replay under 10 seconds for a day of candidates, live-model attestation when required, and tracked precision, recall, F1, false-interruption rate, and missed-help rate.</td>
       </tr>
       <tr>
         <td>Privacy-ready</td>
@@ -446,8 +446,8 @@
     <div class="card">
       <h3>Next engineering pass</h3>
       <ul>
-        <li>Add event-level labeling and curation review surfaces, not just candidate-level labels.</li>
-        <li>Add explicit SQLite migration/backfill recovery checks and retention policy.</li>
+        <li>Bring event-level labeling and curation review into the native capsule, not just the browser.</li>
+        <li>Add explicit SQLite migration checks and automatic retention/compaction policy.</li>
         <li>Add token-level OCR boxes and sensitive-domain suppression.</li>
         <li>Add decision drill-down from the capsule Pipeline view into raw candidate/decision/outcome rows.</li>
       </ul>
@@ -475,7 +475,7 @@
   <h2>Bottom Line</h2>
   <div class="callout">
     <p>The core idea is sound: a proactive assistant should be evaluated as an intervention policy, not just as a chat prompt. This build has the right loop and enough instrumentation to start learning from real use.</p>
-    <p>The gap to "frontier lab" is disciplined measurement. The next useful work is labeled data, implicit-signal calibration, storage integrity, and policy evaluation.</p>
+    <p>The gap to "frontier lab" is now mostly disciplined data volume and promotion policy. The next useful work is labeled data, implicit-signal calibration, retention/compaction, and native review surfaces.</p>
   </div>
   <p class="print-note">Tip: use the browser print dialog to save this file as a PDF if a PDF artifact is needed.</p>
 </main>

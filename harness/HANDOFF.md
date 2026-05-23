@@ -124,7 +124,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live capsule/ping
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           56 tests; pytest passes
+└── tests/test_smoke.py           72 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -284,6 +284,9 @@ User flow once it's running:
      pings, context-matched hard negatives, and missed-help candidates
    - `harness freeze-eval` writes sanitized, time-ordered train/validation/test
      manifests under `harness/datasets/`
+   - Frozen eval bundles include `split_assignments.jsonl`, source/confidence
+     weighting, leakage checks, and optional live-model attestation via
+     `harness eval-manifest ... --require-live-model`
    - `harness curate ...` appends a curation ledger that dataset/KG builders
      respect
 
@@ -338,6 +341,16 @@ User flow once it's running:
    - Dashboard, metrics, replay, score, dataset mining, and shadow comparison
      prefer typed SQLite payload rows and fall back to JSONL when the sidecar
      is absent
+
+✅ Eval lifecycle hardening
+   - Pending delivery now requires a displayed acknowledgement before it is
+     counted as user-visible
+   - Terminal delivery expiry keeps stuck pings from living forever in pending
+     state
+   - Frozen manifest replay fails closed on missing required artifacts, validates
+     split assignments, and treats missing predictions as coverage failures
+   - Shadow eval uses the active store by default and avoids accidental ambient
+     `~/.harness` fallback during explicit-store tests
 
 ✅ Idempotent pending delivery
    - `/pending` now leases the oldest pending payload instead of deleting it
@@ -395,6 +408,10 @@ User flow once it's running:
    The user has started labeling, but the current count is still below the
    20-label personalization threshold and far below the 500-label learned-gate
    threshold. Metrics exist now, but they are not statistically meaningful yet.
+
+⚠ Harness storage retention is not automated
+   JSONL and SQLite state under ~/.harness are append-mostly for auditability.
+   There is a backfill command, but no prune/compact job yet.
 ```
 
 ---

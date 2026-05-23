@@ -97,6 +97,7 @@ Status: fixed.
 - manifest includes candidate/event split bounds.
 - manifest states the memory rule: replay may only use candidates, outcomes, labels, priors, and workflow events with timestamps at or before the example timestamp.
 - `harness eval-manifest` replays a policy chronologically over the source stream and reports candidate/event metrics, bootstrap confidence intervals, and app/scene/example-type slices.
+- The final hardening pass added `split_assignments.jsonl`, split consistency checks, source/confidence-weighted metrics, fail-closed missing-artifact behavior, missing-prediction coverage accounting, and optional `--require-live-model` attestation.
 
 ### 7. Old next-step prediction files remain local state
 
@@ -110,6 +111,7 @@ Status: not deleted automatically. They are historical local artifacts, not repo
 - Added workflow-event example mining in `dataset.py`.
 - Balanced hard-example sampling so hard negatives and missed-help rows survive truncation.
 - Extended frozen eval manifests with source streams, event examples, no-future-leak metadata, and manifest replay.
+- Added split assignment export/validation, source weighting, live-model attestation, and missing-prediction coverage accounting.
 - Added `/label/events` workflow-event review UI and submit/curate endpoints.
 - Added event-label metrics separate from candidate-label metrics.
 - Linked event review from the dashboard Eval tab and decision labeler.
@@ -123,6 +125,7 @@ The remaining important gaps are now narrower:
 - RAG/similar-event retrieval is not implemented, and should not be added to live policy until its temporal no-leak behavior is tested.
 - Event-review UI is browser-backed, not native inside the floating capsule.
 - Curation is available for workflow events from event review, but arbitrary candidate/trace deletion still needs a fuller review panel.
+- Storage remains append-mostly; there is backfill coverage, but no automatic retention/compaction job yet.
 - The dashboard can show low trace completeness until pre-fix historical rows age out of the selected window.
 - The LLM ICL learner still depends on endpoint latency and quality; keep `rule_v0` hard gates and recent-negative-feedback backoff as non-negotiable safety rails.
 - RAG/similar-event retrieval is still intentionally absent. Add it only with a temporal retrieval test proving no future examples can be retrieved.
@@ -134,5 +137,7 @@ The remaining important gaps are now narrower:
 .venv/bin/harness event-examples --since 7d --limit 20
 .venv/bin/harness freeze-eval --since 7d --limit 40 --out /tmp/harness-freeze-test
 .venv/bin/harness eval-manifest /tmp/harness-freeze-test/manifest.json --policy rule_v0
+# Optional promotion gate when the dataset/policy run should prove live-model use:
+.venv/bin/harness eval-manifest /tmp/harness-freeze-test/manifest.json --policy rule_v0 --require-live-model
 .venv/bin/python -m pytest tests/test_smoke.py -q
 ```
