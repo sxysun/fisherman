@@ -28,6 +28,8 @@ def compare(
     labels_path: str | None = None,
     labeled_only: bool = True,
     variants: dict[str, dict[str, Any]] | None = None,
+    holdout_only: bool = False,
+    holdout_fraction: float = 0.2,
 ) -> dict[str, Any]:
     variants = variants or DEFAULT_VARIANTS
     dataset_path = Path(dataset or os.path.expanduser("~/.harness/candidates.jsonl"))
@@ -39,6 +41,23 @@ def compare(
         rows = sql_store.payload_rows("candidates", since_iso=since_iso)
     else:
         rows = replay_mod._load_dataset(dataset_path, since_iso)
+    rows = sorted(rows, key=_row_sort_key)
+    replay_rows = rows
+    scoring_rows = rows
+    holdout_protocol: dict[str, Any] | None = None
+    if holdout_only:
+        scoring_rows, holdout_protocol = _holdout_rows(rows, fraction=holdout_fraction)
+        replay_rows = _replay_rows_for_scoring(rows, scoring_rows)
+    row_candidate_ids = {
+        row.get("candidate_id")
+        for row in scoring_rows
+        if row.get("candidate_id")
+    }
+    event_by_candidate = {
+        str(row.get("candidate_id")): str(row.get("workflow_event_id") or "")
+        for row in scoring_rows
+        if row.get("candidate_id")
+    }
     if outcomes_path is None and _table_has_rows("outcomes"):
         outcomes = sql_store.payload_rows("outcomes")
     else:
@@ -47,9 +66,39 @@ def compare(
         labels = _latest_labels(sql_store.payload_rows("retro_labels"))
     else:
         labels = _latest_labels(replay_mod._load_jsonl(labels_file))
+    labels_for_rows = {
+        str(cid): label
+        for cid, label in labels.items()
+        if cid in row_candidate_ids
+    }
+    event_labels = _latest_event_labels(
+        sql_store.payload_rows("retro_labels") if labels_path is None and _table_has_rows("retro_labels")
+        else replay_mod._load_jsonl(labels_file)
+    )
+    row_event_ids = {
+        str(row.get("workflow_event_id"))
+        for row in scoring_rows
+        if row.get("workflow_event_id")
+    }
+    event_labels_for_rows = {
+        event_id: label
+        for event_id, label in event_labels.items()
+        if event_id in row_event_ids
+    }
     if labeled_only:
-        labeled_candidates = set(labels)
-        rows = [row for row in rows if row.get("candidate_id") in labeled_candidates]
+        labeled_candidates = set(labels_for_rows)
+        labeled_events = set(event_labels_for_rows)
+        scoring_rows = [
+            row for row in scoring_rows
+            if row.get("candidate_id") in labeled_candidates
+            or str(row.get("workflow_event_id") or "") in labeled_events
+        ]
+        replay_rows = _replay_rows_for_scoring(replay_rows, scoring_rows)
+    scoring_candidate_ids = {
+        row.get("candidate_id")
+        for row in scoring_rows
+        if row.get("candidate_id")
+    }
     decide = replay_mod._load_policy(policy)
     base_cfg = replay_mod._live_gate_config()
 
@@ -57,16 +106,27 @@ def compare(
     for name, overrides in variants.items():
         cfg = dict(base_cfg)
         cfg.update(overrides)
-        predictions = _replay_predictions(rows, outcomes, decide, cfg)
-        reports.append(_score_variant(name, overrides, predictions, labels))
+        all_predictions = _replay_predictions(replay_rows, outcomes, decide, cfg)
+        predictions = [
+            row for row in all_predictions
+            if row.get("candidate_id") in scoring_candidate_ids
+        ]
+        report = _score_variant(name, overrides, predictions, labels_for_rows)
+        report["event_labels"] = _score_event_variant(predictions, event_labels_for_rows)
+        reports.append(report)
 
     best = None
-    scored = [r for r in reports if r["labels"]["n"] > 0]
+    scored = [
+        r for r in reports
+        if r["labels"]["n"] > 0 or r.get("event_labels", {}).get("n", 0) > 0
+    ]
     if scored:
         best = max(
             scored,
             key=lambda r: (
-                r["labels"]["f1_labeled"] if r["labels"]["f1_labeled"] is not None else -1,
+                r.get("event_labels", {}).get("f1_labeled")
+                if r.get("event_labels", {}).get("f1_labeled") is not None
+                else r["labels"]["f1_labeled"] if r["labels"]["f1_labeled"] is not None else -1,
                 r["labels"]["agreement_rate"] if r["labels"]["agreement_rate"] is not None else -1,
                 -r["n_pings"],
             ),
@@ -75,12 +135,104 @@ def compare(
     return {
         "policy": policy,
         "since": since_iso,
-        "n_candidates": len(rows),
-        "n_labeled_candidates": len(labels),
+        "n_candidates": len(scoring_rows),
+        "n_replay_candidates": len(replay_rows),
+        "n_labeled_candidates": len(labels_for_rows),
+        "n_labeled_events": len(event_labels_for_rows),
+        "label_support": _label_support(labels_for_rows, event_labels_for_rows, event_by_candidate),
         "labeled_only": labeled_only,
+        "holdout_protocol": holdout_protocol,
         "best_by_labeled_f1": best,
         "variants": reports,
     }
+
+
+def _holdout_rows(rows: list[dict], *, fraction: float) -> tuple[list[dict], dict[str, Any]]:
+    if not rows:
+        return [], {"enabled": True, "method": "time_ordered_group_holdout", "fraction": fraction, "n_total": 0, "n_holdout": 0}
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        key = str(row.get("workflow_event_id") or row.get("candidate_id") or row.get("ts") or id(row))
+        groups.setdefault(key, []).append(row)
+    group_infos = [
+        {
+            "key": key,
+            "rows": group,
+            "start_ts": min(str(row.get("ts") or "") for row in group),
+            "end_ts": max(str(row.get("ts") or "") for row in group),
+        }
+        for key, group in groups.items()
+    ]
+    ordered_groups = sorted(
+        group_infos,
+        key=lambda item: (item["start_ts"], item["key"]),
+    )
+    total = sum(len(info["rows"]) for info in ordered_groups)
+    target = max(1, int(math.ceil(total * max(0.0, min(1.0, fraction)))))
+    selected_infos = []
+    selected_n = 0
+    for info in reversed(ordered_groups):
+        selected_infos.append(info)
+        selected_n += len(info["rows"])
+        if selected_n >= target:
+            break
+    cutoff_ts = min(info["start_ts"] for info in selected_infos) if selected_infos else None
+    holdout_infos = [
+        info for info in ordered_groups
+        if cutoff_ts is not None and info["start_ts"] >= cutoff_ts
+    ]
+    train_infos = [
+        info for info in ordered_groups
+        if cutoff_ts is not None and info["end_ts"] < cutoff_ts
+    ]
+    boundary_infos = [
+        info for info in ordered_groups
+        if info not in holdout_infos and info not in train_infos
+    ]
+    selected = [row for info in holdout_infos for row in info["rows"]]
+    selected.sort(key=_row_sort_key)
+    train_rows = [row for info in train_infos for row in info["rows"]]
+    train_rows.sort(key=_row_sort_key)
+    return selected, {
+        "enabled": True,
+        "method": "time_ordered_group_holdout",
+        "fraction": max(0.0, min(1.0, fraction)),
+        "n_total": total,
+        "n_holdout": len(selected),
+        "n_train": len(train_rows),
+        "n_boundary_excluded": sum(len(info["rows"]) for info in boundary_infos),
+        "n_holdout_groups": len(holdout_infos),
+        "n_train_groups": len(train_infos),
+        "n_boundary_groups": len(boundary_infos),
+        "train_start_ts": train_rows[0].get("ts") if train_rows else None,
+        "train_end_ts": train_rows[-1].get("ts") if train_rows else None,
+        "start_ts": selected[0].get("ts") if selected else None,
+        "end_ts": selected[-1].get("ts") if selected else None,
+        "strict_temporal": (
+            bool(train_rows and selected and str(train_rows[-1].get("ts") or "") < str(selected[0].get("ts") or ""))
+            or not train_rows
+            or not selected
+        ),
+        "group_isolated": True,
+    }
+
+
+def _row_sort_key(row: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(row.get("ts") or ""),
+        str(row.get("workflow_event_id") or ""),
+        str(row.get("candidate_id") or ""),
+    )
+
+
+def _replay_rows_for_scoring(rows: list[dict], scoring_rows: list[dict]) -> list[dict]:
+    if not scoring_rows:
+        return []
+    max_ts = max(str(row.get("ts") or "") for row in scoring_rows)
+    return [
+        row for row in rows
+        if str(row.get("ts") or "") <= max_ts
+    ]
 
 
 def _replay_predictions(rows: list[dict], outcomes: list[dict], decide, cfg: dict) -> list[dict]:
@@ -111,6 +263,7 @@ def _replay_predictions(rows: list[dict], outcomes: list[dict], decide, cfg: dic
             simulated_last_push_ts = event_ts
         predictions.append({
             "candidate_id": row.get("candidate_id"),
+            "workflow_event_id": row.get("workflow_event_id"),
             "decision": {
                 "action": decision.action,
                 "reason_codes": decision.reason_codes,
@@ -368,19 +521,123 @@ def _score_variant(
     }
 
 
+def _score_event_variant(
+    predictions: list[dict],
+    labels_by_event: dict[str, dict],
+) -> dict[str, Any]:
+    by_event: dict[str, list[dict]] = {}
+    for pred in predictions:
+        event_id = pred.get("workflow_event_id")
+        if event_id:
+            by_event.setdefault(str(event_id), []).append(pred)
+
+    tp = fp = tn = fn = ignored = 0
+    for event_id, label in labels_by_event.items():
+        should = _should_ping(label.get("label"))
+        if should is None:
+            ignored += 1
+            continue
+        event_predictions = by_event.get(str(event_id), [])
+        if not event_predictions:
+            ignored += 1
+            continue
+        did_ping = any((pred.get("decision") or {}).get("action") == "notch_ping" for pred in event_predictions)
+        if did_ping and should:
+            tp += 1
+        elif did_ping and not should:
+            fp += 1
+        elif not did_ping and should:
+            fn += 1
+        else:
+            tn += 1
+
+    n = tp + fp + tn + fn
+    precision = _ratio(tp, tp + fp)
+    recall = _ratio(tp, tp + fn)
+    f1 = None
+    if precision is not None and recall is not None and precision + recall > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    return {
+        "n": n,
+        "ignored": ignored,
+        "tp_should_ping_and_pinged": tp,
+        "fp_should_stay_quiet_but_pinged": fp,
+        "tn_should_stay_quiet_and_silent": tn,
+        "fn_should_ping_but_silent": fn,
+        "precision_labeled": precision,
+        "recall_labeled": recall,
+        "f1_labeled": f1,
+        "agreement_rate": _ratio(tp + tn, n),
+        "false_interruption_rate": _ratio(fp, fp + tn),
+        "missed_help_rate": _ratio(fn, tp + fn),
+        "agreement_ci95": _wilson_ci(tp + tn, n),
+        "false_interruption_ci95": _wilson_ci(fp, fp + tn),
+        "missed_help_ci95": _wilson_ci(fn, tp + fn),
+    }
+
+
+def _label_support(
+    labels_by_candidate: dict[str, dict],
+    labels_by_event: dict[str, dict],
+    event_by_candidate: dict[str, str],
+) -> dict[str, Any]:
+    units: dict[str, bool] = {}
+    for event_id, label in labels_by_event.items():
+        should = _should_ping(label.get("label"))
+        if should is None:
+            continue
+        units[f"event:{event_id}"] = should
+    for candidate_id, label in labels_by_candidate.items():
+        event_id = event_by_candidate.get(candidate_id)
+        unit_id = f"event:{event_id}" if event_id else f"candidate:{candidate_id}"
+        if unit_id in units:
+            continue
+        should = _should_ping(label.get("label"))
+        if should is None:
+            continue
+        units[unit_id] = should
+    positives = sum(1 for value in units.values() if value)
+    negatives = sum(1 for value in units.values() if not value)
+    return {
+        "n_units": len(units),
+        "positive_units": positives,
+        "negative_units": negatives,
+        "unit": "workflow_event_preferred",
+    }
+
+
 def _latest_labels(rows: list[dict]) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    for row in rows:
+    for row in sorted(rows, key=_label_sort_key):
+        if row.get("label_scope") == "workflow_event" or row.get("workflow_event_id"):
+            continue
         cid = row.get("candidate_id")
         if cid:
             out[cid] = row
     return out
 
 
+def _latest_event_labels(rows: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for row in sorted(rows, key=_label_sort_key):
+        event_id = row.get("workflow_event_id")
+        if event_id and (row.get("label_scope") == "workflow_event" or not row.get("candidate_id")):
+            out[str(event_id)] = row
+    return out
+
+
+def _label_sort_key(row: dict) -> tuple[str, str, str]:
+    return (
+        str(row.get("ts") or ""),
+        str(row.get("created_at") or ""),
+        str(row.get("label_id") or row.get("decision_id") or row.get("candidate_id") or row.get("workflow_event_id") or ""),
+    )
+
+
 def _should_ping(label: str | None) -> bool | None:
-    if label == "would_help":
+    if label in {"would_help", "should_ping", "should_ping_review"}:
         return True
-    if label in ("would_annoy", "good_no_ping"):
+    if label in {"would_annoy", "good_no_ping", "should_not_ping", "not_now"}:
         return False
     return None
 

@@ -362,7 +362,7 @@ def _recent_outcomes_for(outcomes: list[dict], event_ts_iso: str, n: int = 5) ->
     eligible = []
     for outcome in outcomes:
         outcome_ts = _iso_to_unix(outcome.get("ts"))
-        if outcome_ts is not None and outcome_ts <= event_ts:
+        if outcome_ts is not None and outcome_ts < event_ts:
             eligible.append(outcome)
     return eligible[-n:]
 
@@ -382,16 +382,28 @@ def _live_gate_config() -> dict:
         ],
         "daily_goal": "",
         "sensitivity": "balanced",
+        "policy_learner": {},
+        "privacy": {},
+        "experiment": {},
     }
-    config_path = Path(os.path.expanduser("~/.harness/config.toml"))
+    try:
+        from harness import config as config_mod
+        config_path = config_mod.CONFIG_PATH
+    except Exception:
+        config_mod = None
+        config_path = Path(os.path.expanduser("~/.harness/config.toml"))
     if config_path.exists():
         try:
-            import tomllib
-            with open(config_path, "rb") as f:
-                live = tomllib.load(f)
+            if config_mod is not None:
+                live = config_mod.load()
+            else:
+                import tomllib
+                with open(config_path, "rb") as f:
+                    live = tomllib.load(f)
             gate = live.get("gate") or {}
             intents = live.get("intents") or {}
             cfg.update({
+                "active_policy": gate.get("active_policy", cfg.get("active_policy")),
                 "cooldown_min": gate.get("cooldown_min", cfg["cooldown_min"]),
                 "negative_feedback_backoff_min": gate.get(
                     "negative_feedback_backoff_min",
@@ -405,6 +417,9 @@ def _live_gate_config() -> dict:
                 "quiet_hours_end": gate.get("quiet_hours_end", cfg["quiet_hours_end"]),
                 "allowed_intents": intents.get("enabled", cfg["allowed_intents"]),
             })
+            for section in ("policy_learner", "privacy", "experiment"):
+                if isinstance(live.get(section), dict):
+                    cfg[section] = live.get(section) or {}
         except Exception:
             pass
     state_path = Path(os.path.expanduser("~/.harness/policy.json"))

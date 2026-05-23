@@ -13,6 +13,8 @@ from .store import read_policy_state, write_policy_state
 
 
 TRAINER_VERSION = "trainer_v1"
+MIN_VARIANT_LABELS = 20
+MIN_VARIANT_CLASS_LABELS = 3
 
 DEFAULT_VARIANTS: dict[str, dict[str, Any]] = {
     "current": {},
@@ -64,7 +66,7 @@ def run_trainer(
     *,
     window: str = "30d",
     min_implicit_usable: int = 20,
-    min_explicit_labels: int = 0,
+    min_explicit_labels: int = MIN_VARIANT_LABELS,
     write: bool = True,
 ) -> dict[str, Any]:
     report = calibration_report(window=window, write=False)
@@ -182,7 +184,7 @@ def calibration_report(
     write: bool = False,
 ) -> dict[str, Any]:
     variants = variants or DEFAULT_VARIANTS
-    explicit = shadow_eval.compare(since=window, labeled_only=True, variants=variants)
+    explicit = shadow_eval.compare(since=window, labeled_only=True, variants=variants, holdout_only=True)
     implicit_eval = _implicit_variant_report(window=window, variants=variants)
 
     by_variant: dict[str, dict[str, Any]] = {}
@@ -191,6 +193,7 @@ def calibration_report(
             "variant": row["variant"],
             "overrides": row.get("overrides") or {},
             "explicit": row.get("labels") or {},
+            "event_explicit": row.get("event_labels") or {},
             "explicit_ping_rate": row.get("ping_rate"),
             "n_pings_explicit_replay": row.get("n_pings"),
         }
@@ -208,20 +211,37 @@ def calibration_report(
         row["score"] = score
         row["guardrail_pass"] = _guardrail_pass(row, current)
         scored.append(row)
+    support = explicit.get("label_support") or {}
+    explicit_total = int(support.get("n_units") or 0)
+    positive_units = int(support.get("positive_units") or 0)
+    negative_units = int(support.get("negative_units") or 0)
+    if explicit_total < MIN_VARIANT_LABELS:
+        comparison_status = "insufficient_explicit_labels"
+    elif positive_units < MIN_VARIANT_CLASS_LABELS or negative_units < MIN_VARIANT_CLASS_LABELS:
+        comparison_status = "insufficient_class_balance"
+    else:
+        comparison_status = "ready"
     candidates = [row for row in scored if row.get("guardrail_pass")]
-    if not candidates:
-        candidates = scored
-    best = max(candidates, key=lambda row: row.get("score") or -999.0, default={})
+    best = (
+        max(candidates, key=lambda row: row.get("score") or -999.0, default={})
+        if comparison_status == "ready"
+        else {}
+    )
 
     report = {
         "version": TRAINER_VERSION,
         "window": window,
         "generated_at": now_iso(),
         "readiness": {
-            "explicit_labels": explicit.get("n_labeled_candidates", 0),
+            "explicit_labels": explicit_total,
             "implicit_usable": implicit_eval.get("summary", {}).get("usable", 0),
             "implicit_weighted_n": implicit_eval.get("summary", {}).get("confidence_weighted_n", 0),
             "n_candidates": implicit_eval.get("n_candidates", 0),
+            "min_variant_labels": MIN_VARIANT_LABELS,
+            "min_variant_class_labels": MIN_VARIANT_CLASS_LABELS,
+            "comparison_status": comparison_status,
+            "label_support": support,
+            "holdout_protocol": explicit.get("holdout_protocol") or {},
         },
         "current_variant": current,
         "best_variant": best,
@@ -229,6 +249,10 @@ def calibration_report(
         "explicit": {
             "best_by_labeled_f1": explicit.get("best_by_labeled_f1"),
             "n_candidates": explicit.get("n_candidates"),
+            "n_labeled_candidates": explicit.get("n_labeled_candidates"),
+            "n_labeled_events": explicit.get("n_labeled_events"),
+            "label_support": support,
+            "holdout_protocol": explicit.get("holdout_protocol") or {},
         },
         "implicit": {
             "summary": implicit_eval.get("summary"),
@@ -422,14 +446,17 @@ def _score_implicit_variant(
 def _variant_score(row: dict[str, Any], current: dict[str, Any]) -> float:
     implicit = row.get("implicit") or {}
     explicit = row.get("explicit") or {}
+    event_explicit = row.get("event_explicit") or {}
     score = 0.0
     score += float(implicit.get("avg_utility") or 0.0)
     if explicit.get("n"):
         score += float(explicit.get("f1_labeled") or explicit.get("agreement_rate") or 0.0)
         score -= float(explicit.get("false_interruption_rate") or 0.0) * 0.25
         score -= float(explicit.get("missed_help_rate") or 0.0) * 0.15
-    else:
-        score += 0.1
+    if event_explicit.get("n"):
+        score += float(event_explicit.get("f1_labeled") or event_explicit.get("agreement_rate") or 0.0) * 1.25
+        score -= float(event_explicit.get("false_interruption_rate") or 0.0) * 0.35
+        score -= float(event_explicit.get("missed_help_rate") or 0.0) * 0.25
     score -= float(implicit.get("ping_rate") or 0.0) * 0.05
     if row.get("variant") == "current":
         score += 0.001
@@ -438,7 +465,10 @@ def _variant_score(row: dict[str, Any], current: dict[str, Any]) -> float:
 
 def _guardrail_pass(row: dict[str, Any], current: dict[str, Any]) -> bool:
     explicit = row.get("explicit") or {}
+    event_explicit = row.get("event_explicit") or {}
     current_explicit = current.get("explicit") or {}
+    if int(explicit.get("n") or 0) + int(event_explicit.get("n") or 0) < MIN_VARIANT_LABELS:
+        return False
     if not explicit.get("n") or not current_explicit.get("n"):
         return True
     agreement = explicit.get("agreement_rate")
@@ -488,6 +518,8 @@ def _empty_calibration_report(window: str) -> dict[str, Any]:
             "implicit_usable": 0,
             "implicit_weighted_n": 0,
             "n_candidates": 0,
+            "min_variant_labels": MIN_VARIANT_LABELS,
+            "comparison_status": "insufficient_explicit_labels",
         },
         "current_variant": {},
         "best_variant": {},

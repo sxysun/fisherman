@@ -35,6 +35,7 @@ from .store import (
     ensure_dirs,
     patch_trace,
     read_policy_state,
+    sweep_expired_pending,
     tail_jsonl,
     write_policy_state,
 )
@@ -165,13 +166,19 @@ async def run_loop(config: dict) -> None:
                 if notch_proc is not None:
                     log.warning("notch_exited", returncode=notch_proc.returncode)
                 notch_proc = _launch_notch(harness_port)
-            await _tick(
-                config=config,
-                fc=fc,
-                memory=memory,
-                workflow_events=workflow_events,
-                last_push_at_ref=last_push_at_ref,
-            )
+            expired = sweep_expired_pending()
+            if expired:
+                log.info("pending_expired_sweep", n=expired)
+            try:
+                await _tick(
+                    config=config,
+                    fc=fc,
+                    memory=memory,
+                    workflow_events=workflow_events,
+                    last_push_at_ref=last_push_at_ref,
+                )
+            except Exception as e:
+                log.warning("tick_failed", error=f"{type(e).__name__}: {e}")
             await asyncio.sleep(poll_sec)
     finally:
         if workflow_events is not None:
@@ -317,21 +324,22 @@ async def _tick(
         exp = dict(decision.experiment or {})
         exp["policy_canary"] = policy_metadata
         decision.experiment = exp
-    append_jsonl("decisions.jsonl", decision.to_dict() | {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
-
     trace = Trace.new(event, mem_snap, recent_outcomes)
     trace.action = decision.to_dict()
     trace.mark("decision_recorded", action=decision.action)
+    decision_row = decision.to_dict() | {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
     if decision.action == "no_ping":
         log.info("decision", action="no_ping", reasons=decision.reason_codes)
         trace.mark("terminal_no_ping")
         append_jsonl("traces.jsonl", trace.to_dict())
+        append_jsonl("decisions.jsonl", decision_row)
         return
 
     # ping path
     log.info("decision", action="notch_ping", intent=decision.intent, reasons=decision.reason_codes)
     append_jsonl("traces.jsonl", trace.to_dict())
+    append_jsonl("decisions.jsonl", decision_row)
     patch_trace(decision.decision_id, {}, lifecycle_stage="realizer_started")
     try:
         realization = await realizer_mod.realize(
@@ -397,7 +405,19 @@ async def _tick(
     critic_cfg = dict(config.get("critic", {}))
     critic_cfg["privacy"] = config.get("privacy", {})
     patch_trace(decision.decision_id, {}, lifecycle_stage="critic_started")
-    critic_result = await critic_mod.check(realization.message, event, critic_cfg)
+    try:
+        critic_result = await critic_mod.check(realization.message, event, critic_cfg)
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+        log.warning("critic_exception", error=error)
+        trace.delivery = {"pushed": False, "channel": "skipped", "error": error}
+        patch_trace(
+            decision.decision_id,
+            {"delivery": trace.delivery},
+            lifecycle_stage="terminal_skipped",
+            lifecycle_extra={"error": error},
+        )
+        return
     trace.critic = critic_result.to_dict()
     patch_trace(
         decision.decision_id,
@@ -437,7 +457,19 @@ async def _tick(
     push_cfg = dict(config.get("push", {}))
     push_cfg["harness_port"] = config["daemon"]["http_port"]
     patch_trace(decision.decision_id, {}, lifecycle_stage="dispatch_started")
-    delivery = await push_mod.dispatch(decision, realization, push_cfg)
+    try:
+        delivery = await push_mod.dispatch(decision, realization, push_cfg)
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+        log.warning("dispatch_exception", error=error)
+        trace.delivery = {"pushed": False, "channel": push_cfg.get("channel", "unknown"), "error": error}
+        patch_trace(
+            decision.decision_id,
+            {"delivery": trace.delivery},
+            lifecycle_stage="dispatch_failed",
+            lifecycle_extra={"error": error},
+        )
+        return
     trace.delivery = delivery.__dict__
     if delivery.pushed:
         last_push_at_ref[0] = _now_unix()

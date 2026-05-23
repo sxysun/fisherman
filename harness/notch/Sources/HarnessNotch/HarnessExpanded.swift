@@ -322,29 +322,32 @@ private struct PipelineNotchPanel: View {
         let explicitLabels = notchFirstInt(metrics?["labels"]["n"], evalData?["n_explicit_labels"])
         let labelCoverage = notchFirstJSON(metrics?["explicit_label_coverage"], evalData?["explicit_label_coverage"])
         let labeledF1 = notchFirstJSON(metrics?["labels"]["f1_labeled"], eval?["quality"]["labels"]["f1_labeled"])
+        let hasPipelineData = nCandidates != nil || nDecisions != nil || nPings != nil || nTraces != nil
         VStack(alignment: .leading, spacing: 12) {
             panelToolbar(title: "Pipeline and eval", detail: updatedText, loading: loading, refresh: refresh)
             NotchRail(stages: [
-                NotchStage("Observe", "\(nCandidates)", "candidates"),
-                NotchStage("Gate", "\(nDecisions)", "decisions"),
-                NotchStage("Trace", "\(nTraces)", "created"),
-                NotchStage("Ping", "\(nPings)", "eligible"),
-                NotchStage("Claim", "\(nClaimed)", "shown"),
-                NotchStage("Outcome", "\(nOutcomes)", "captured"),
+                NotchStage("Observe", notchIntText(nCandidates), "candidates"),
+                NotchStage("Gate", notchIntText(nDecisions), "decisions"),
+                NotchStage("Trace", notchIntText(nTraces), "created"),
+                NotchStage("Ping", notchIntText(nPings), "eligible"),
+                NotchStage("Claim", notchIntText(nClaimed), "shown"),
+                NotchStage("Outcome", notchIntText(nOutcomes), "captured"),
             ])
 
             HStack(spacing: 8) {
-                NotchMetric(label: "claimed capture", value: nPings == 0 ? "no pings" : notchPct(claimedCapture))
-                NotchMetric(label: "trace complete", value: nPings == 0 ? "no pings" : notchPct(traceComplete))
-                NotchMetric(label: "implicit usable", value: "\(implicitUsable)")
+                NotchMetric(label: "claimed capture", value: nPings == nil ? "data unavailable" : nPings == 0 ? "no pings" : notchPct(claimedCapture))
+                NotchMetric(label: "trace complete", value: nPings == nil ? "data unavailable" : nPings == 0 ? "no pings" : notchPct(traceComplete))
+                NotchMetric(label: "implicit usable", value: notchIntText(implicitUsable))
             }
             HStack(spacing: 8) {
-                NotchMetric(label: "explicit labels", value: "\(explicitLabels)")
+                NotchMetric(label: "explicit labels", value: notchIntText(explicitLabels))
                 NotchMetric(label: "label coverage", value: notchPct(labelCoverage))
                 NotchMetric(label: "labeled F1", value: notchPct(labeledF1))
             }
 
-            if nPings == 0 {
+            if !hasPipelineData {
+                NotchBanner(error ?? "Pipeline data unavailable; counts are not loaded yet.")
+            } else if nPings == 0 {
                 NotchBanner("No pings were delivered in this 24h window, so ping capture, implicit ping labels, and recent ping examples are empty.")
             }
 
@@ -355,7 +358,7 @@ private struct PipelineNotchPanel: View {
                             NotchExampleRow(row: row)
                         }
                         if exampleRows.isEmpty {
-                            NotchMutedText(error ?? (nPings == 0 ? "No ping examples because Ping/Claim are 0 in this window." : "No non-green examples in this window."))
+                            NotchMutedText(error ?? (!hasPipelineData ? "Data unavailable." : nPings == 0 ? "No ping examples because Ping/Claim are 0 in this window." : "No non-green examples in this window."))
                         }
                     }
                 }
@@ -1098,13 +1101,18 @@ private func notchFirstJSON(_ values: JSON?...) -> JSON? {
     return nil
 }
 
-private func notchFirstInt(_ values: JSON?...) -> Int {
+private func notchFirstInt(_ values: JSON?...) -> Int? {
     for value in values {
         if let value, !value.isNull {
             return value.int
         }
     }
-    return 0
+    return nil
+}
+
+private func notchIntText(_ value: Int?) -> String {
+    guard let value else { return "n/a" }
+    return "\(value)"
 }
 
 private func notchDict(_ row: [String: Any], _ key: String) -> [String: Any] {

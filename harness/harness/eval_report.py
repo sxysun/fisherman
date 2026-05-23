@@ -32,7 +32,9 @@ def build_report(
     safe to surface in the dashboard.
     """
     since = metrics_mod.since_iso(window)
-    n_candidates = metrics_mod._count_payloads("candidates", "candidates.jsonl", since_iso=since)
+    candidates = metrics_mod._read_payloads("candidates", "candidates.jsonl", since_iso=since)
+    workflow_events = _workflow_event_payloads_in_window(since)
+    n_candidates = len(candidates)
     decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl", since_iso=since)
     all_decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl")
     outcomes = metrics_mod._read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
@@ -50,6 +52,30 @@ def build_report(
     labels = metrics_mod.latest_label_rows(
         metrics_mod._read_payloads("retro_labels", "retro_labels.jsonl", since_iso=since)
     )
+    window_decision_ids = {row.get("decision_id") for row in decisions if row.get("decision_id")}
+    window_candidate_ids = {row.get("candidate_id") for row in decisions if row.get("candidate_id")}
+    joined_candidate_labels = [
+        row for row in labels
+        if row.get("label_scope") != "workflow_event"
+        and not row.get("workflow_event_id")
+        and (
+            row.get("decision_id") in window_decision_ids
+            or row.get("candidate_id") in window_candidate_ids
+        )
+    ]
+    joined_event_labels = [
+        row for row in labels
+        if row.get("label_scope") == "workflow_event" or row.get("workflow_event_id")
+    ]
+    window_event_ids = {
+        str(row.get("workflow_event_id"))
+        for row in [*decisions, *candidates, *workflow_events]
+        if row.get("workflow_event_id")
+    }
+    joined_event_labels = [
+        row for row in joined_event_labels
+        if row.get("workflow_event_id") and str(row.get("workflow_event_id")) in window_event_ids
+    ]
 
     decisions_by_id = {
         row.get("decision_id"): row
@@ -117,7 +143,7 @@ def build_report(
     claimed_ping_ids = {
         str(row.get("decision_id"))
         for row in deliveries
-        if row.get("delivery_action") == "claimed" and row.get("decision_id")
+        if row.get("delivery_action") in {"claimed", "displayed_ack"} and row.get("decision_id")
     }
     decision_ids = {str(row.get("decision_id")) for row in decisions if row.get("decision_id")}
     claimed_ping_ids &= decision_ids
@@ -136,17 +162,15 @@ def build_report(
             "n_claimed_pings": len(claimed_ping_ids),
             "n_outcomes": len(outcomes),
             "n_traces": n_traces,
-            "n_explicit_labels": len(labels),
-            "n_event_labels": sum(
-                1 for row in labels
-                if row.get("label_scope") == "workflow_event" or row.get("workflow_event_id")
-            ),
+            "n_explicit_labels": len(joined_candidate_labels),
+            "n_labels_in_window": len(labels),
+            "n_event_labels": len(joined_event_labels),
             "n_implicit_labels": len(weak_labels),
             "n_implicit_usable": sum(1 for row in weak_labels if row.get("usable_for_training")),
             "trace_completeness_for_pings": _ratio(pings_with_trace, len(pings)),
             "outcome_capture_rate_for_pings": _ratio(pings_with_outcome, len(pings)),
             "outcome_capture_rate_for_claimed_pings": _ratio(claimed_with_outcome, len(claimed_ping_ids)),
-            "explicit_label_coverage": _ratio(len(labels), len(decisions)),
+            "explicit_label_coverage": _ratio(len(joined_candidate_labels), len(decisions)),
             "implicit_usable_coverage": _ratio(
                 sum(1 for row in weak_labels if row.get("usable_for_training")),
                 len(decisions),
@@ -324,7 +348,13 @@ def classify_decision(
                 "Policy chose ping and trace exists, but no delivery state is recorded yet; likely in-flight, failed realization, or daemon interruption.",
                 "medium",
             )
-        if delivery and delivery.get("delivery_action") == "claimed":
+        if delivery and delivery.get("delivery_action") == "displayed_timeout_no_outcome":
+            return _cls("displayed_no_outcome_timeout", "The ping was displayed but no outcome arrived before the pending TTL.", "medium")
+        if delivery and delivery.get("delivery_action") in {"never_displayed_expired", "dequeued_expired", "expired_unclaimed"}:
+            return _cls("expired_before_display", "The pending ping expired before a confirmed display/outcome.", "medium")
+        if delivery and delivery.get("delivery_action") == "displayed_inferred":
+            return _cls("inferred_display_missing_outcome", "Outcome/display evidence was inferred rather than confirmed by client ack.", "low")
+        if delivery and delivery.get("delivery_action") in {"claimed", "displayed_ack"}:
             return _cls("missing_outcome_signal", "Notch claimed this ping but no outcome was recorded.", "medium")
         if trace_delivery.get("pushed") is False or trace_delivery.get("channel") in {"skipped", "blocked_by_critic"}:
             return _cls("undelivered_ping", "Policy chose ping, but delivery was skipped or blocked before display.", "low")
@@ -370,7 +400,7 @@ def _taxonomy_rows(taxonomy: Counter, severity: Counter, total: int) -> dict[str
 
 def _variant_report(policy: str, window: str) -> dict[str, Any]:
     try:
-        return shadow_eval.compare(policy=policy, since=window, labeled_only=True)
+        return shadow_eval.compare(policy=policy, since=window, labeled_only=True, holdout_only=True)
     except Exception as e:
         return {"error": str(e), "policy": policy, "window": window, "variants": []}
 
@@ -422,6 +452,14 @@ def _gap_checklist(
     implicit = metrics.get("implicit") or {}
     trace_funnel = metrics.get("trace_funnel") or {}
     variants = variant_report.get("variants") or []
+    variant_label_n = max(
+        [
+            int(((row.get("labels") or {}).get("n")) or 0)
+            + int(((row.get("event_labels") or {}).get("n")) or 0)
+            for row in variants
+        ],
+        default=0,
+    )
     return [
         {
             "name": "decision_trace_completeness",
@@ -455,9 +493,16 @@ def _gap_checklist(
         },
         {
             "name": "policy_variant_comparison",
-            "status": "pass" if variants else "missing",
-            "detail": "Shadow variants should be comparable against labels.",
-            "value": len(variants),
+            "status": (
+                "pass"
+                if variants and variant_label_n >= 20
+                else "insufficient_data"
+                if variants
+                else "missing"
+            ),
+            "detail": "Shadow variants should be comparable against enough in-window labels.",
+            "value": variant_label_n,
+            "variants": len(variants),
         },
         {
             "name": "decision_volume",
@@ -497,6 +542,22 @@ def _trace_payloads_for_decisions(
         for row in metrics_mod._read_payloads("traces", "traces.jsonl", since_iso=since_iso)
         if (row.get("action") or {}).get("decision_id") in wanted
     ]
+
+
+def _workflow_event_payloads_in_window(since: str) -> list[dict[str, Any]]:
+    rows = metrics_mod._read_payloads("workflow_events", "workflow_events.jsonl")
+    return [
+        row for row in rows
+        if _row_overlaps_window(row, since)
+    ]
+
+
+def _row_overlaps_window(row: dict[str, Any], since: str) -> bool:
+    for key in ("last_ts", "end_ts", "ts", "start_ts"):
+        value = row.get(key)
+        if value and str(value) >= since:
+            return True
+    return False
 
 
 def _ratio(num: float, den: float) -> float | None:

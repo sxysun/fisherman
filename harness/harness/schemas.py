@@ -171,6 +171,7 @@ class Delivery:
     pushed: bool = False
     channel: str = ""
     displayed_at: Optional[str] = None
+    error: Optional[str] = None
 
 
 @dataclass

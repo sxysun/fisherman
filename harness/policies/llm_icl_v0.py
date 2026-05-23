@@ -24,6 +24,7 @@ from harness import kg_priors as kg_priors_mod
 from harness import metrics as metrics_mod
 from harness import model_audit
 from harness import privacy
+from harness.policy_contract import HARD_NO_PING_REASONS
 from harness import sql_store
 from harness import trust
 from harness.realizer import chat_completions_url
@@ -33,17 +34,6 @@ from policies import rule_v0
 
 
 POLICY_VERSION = "llm_icl_v0"
-
-HARD_NO_PING_REASONS = {
-    "in_call",
-    "snoozed",
-    "quiet_hours",
-    "cooldown",
-    "sensitive_scene",
-    "stale_context",
-    "resume_from_idle",
-    "recent_negative_feedback",
-}
 
 _last_call_ts = 0.0
 
@@ -67,11 +57,12 @@ def decide(
 
     base_url = (cfg.get("base_url") or "").rstrip("/")
     model = cfg.get("model") or ""
-    if not base_url or not model:
+    offline_eval = bool(cfg.get("offline_eval"))
+    if not offline_eval and (not base_url or not model):
         return _fallback_decision(baseline, "llm_unconfigured")
 
-    trust_check = trust.check_model_endpoint(base_url, config.get("privacy") or {})
-    if not trust_check.allowed:
+    trust_check = trust.check_model_endpoint(base_url, config.get("privacy") or {}) if not offline_eval else None
+    if trust_check is not None and not trust_check.allowed:
         _audit(
             cfg=cfg,
             base_url=base_url,
@@ -82,11 +73,16 @@ def decide(
         )
         return _fallback_decision(baseline, "llm_untrusted_endpoint")
 
-    examples = _few_shot_examples(limit=int(cfg.get("max_examples") or 16))
-    prompt = _build_prompt(event, memory, recent_outcomes, baseline, examples, config)
+    max_examples = int(cfg.get("max_examples") or 16)
+    examples = _examples_for_policy(cfg, event=event, limit=max_examples, cutoff_ts=event.ts)
+    kg_priors = _kg_priors_for_event(event, cfg, config)
+    prompt = _build_prompt(event, memory, recent_outcomes, baseline, examples, kg_priors, config)
     started = time.time()
     try:
-        result = _call_model(cfg, base_url, model, prompt)
+        if offline_eval:
+            result = _offline_eval_decision(event, baseline, examples, kg_priors)
+        else:
+            result = _call_model(cfg, base_url, model, prompt)
     except Exception as e:
         _audit(
             cfg=cfg,
@@ -144,12 +140,23 @@ def _rate_limited_ok(min_interval_sec: float) -> bool:
     return True
 
 
-def _few_shot_examples(limit: int = 16) -> list[dict[str, Any]]:
-    decisions = [row for row in iter_jsonl("decisions.jsonl") if row.get("decision_id")]
+def _few_shot_examples(limit: int = 16, cutoff_ts: str | None = None) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    decisions = [
+        row for row in iter_jsonl("decisions.jsonl")
+        if row.get("decision_id") and _at_or_before_cutoff(row, cutoff_ts)
+    ]
     decisions_by_id = {row.get("decision_id"): row for row in decisions}
     decisions_by_candidate = {row.get("candidate_id"): row for row in decisions if row.get("candidate_id")}
-    labels = metrics_mod.latest_label_rows(list(iter_jsonl("retro_labels.jsonl")))
-    outcomes = list(iter_jsonl("outcomes.jsonl"))
+    labels = metrics_mod.latest_label_rows([
+        row for row in iter_jsonl("retro_labels.jsonl")
+        if _at_or_before_cutoff(row, cutoff_ts)
+    ])
+    outcomes = [
+        row for row in iter_jsonl("outcomes.jsonl")
+        if _at_or_before_cutoff(row, cutoff_ts)
+    ]
     weak = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
 
     pending: list[tuple[dict[str, Any], dict[str, Any], str, str, float]] = []
@@ -192,6 +199,82 @@ def _few_shot_examples(limit: int = 16) -> list[dict[str, Any]]:
     ]
     rows.sort(key=lambda row: (row.get("ts") or "", row.get("confidence") or 0.0), reverse=True)
     return _balanced(rows, max(0, limit))
+
+
+def _examples_for_policy(
+    cfg: dict[str, Any],
+    *,
+    event: CandidateEvent,
+    limit: int,
+    cutoff_ts: str | None,
+) -> list[dict[str, Any]]:
+    frozen_rows = cfg.get("frozen_examples")
+    if isinstance(frozen_rows, list):
+        return _few_shot_examples_from_frozen(frozen_rows, event=event, limit=limit, cutoff_ts=cutoff_ts)
+    return _few_shot_examples(limit=limit, cutoff_ts=cutoff_ts)
+
+
+def _few_shot_examples_from_frozen(
+    rows: list[Any],
+    *,
+    event: CandidateEvent,
+    limit: int,
+    cutoff_ts: str | None,
+) -> list[dict[str, Any]]:
+    examples: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        if not _strictly_before_cutoff(raw, cutoff_ts):
+            continue
+        if _same_eval_unit(raw, event):
+            continue
+        target = raw.get("target")
+        if target not in {"notch_ping", "no_ping"}:
+            continue
+        ctx = raw.get("context") or {}
+        examples.append({
+            "target": target,
+            "source": raw.get("source") or "unknown",
+            "confidence": round(float(raw.get("confidence") or 0.0), 3),
+            "ts": raw.get("ts"),
+            "actual_policy_action": raw.get("policy_action"),
+            "reason_codes": ctx.get("reason_codes") or raw.get("reason_codes") or [],
+            "context": {
+                "app": ctx.get("app"),
+                "scene": ctx.get("scene"),
+                "ocr_snippet": privacy.redact_text(str(ctx.get("ocr_snippet") or ctx.get("ocr_preview") or ""))[:240],
+            },
+            "label": raw.get("label"),
+            "implicit_direction": raw.get("implicit_direction"),
+        })
+    examples.sort(key=lambda row: (row.get("ts") or "", row.get("confidence") or 0.0), reverse=True)
+    return _balanced(examples, max(0, limit))
+
+
+def _strictly_before_cutoff(row: dict[str, Any], cutoff_ts: str | None) -> bool:
+    if not cutoff_ts:
+        return True
+    ts = row.get("ts") or row.get("created_at")
+    if not ts:
+        return True
+    return str(ts) < str(cutoff_ts)
+
+
+def _same_eval_unit(row: dict[str, Any], event: CandidateEvent) -> bool:
+    return any((
+        bool(row.get("candidate_id") and row.get("candidate_id") == event.candidate_id),
+        bool(row.get("workflow_event_id") and row.get("workflow_event_id") == event.workflow_event_id),
+    ))
+
+
+def _at_or_before_cutoff(row: dict[str, Any], cutoff_ts: str | None) -> bool:
+    if not cutoff_ts:
+        return True
+    ts = row.get("ts") or row.get("created_at")
+    if not ts:
+        return True
+    return str(ts) < str(cutoff_ts)
 
 
 def _trace_rows_for_decisions(decision_ids: list[str]) -> dict[str, dict[str, Any]]:
@@ -276,6 +359,7 @@ def _build_prompt(
     recent_outcomes: list[dict],
     baseline: ProactiveDecision,
     examples: list[dict[str, Any]],
+    kg_priors: dict[str, Any],
     config: dict,
 ) -> list[dict[str, str]]:
     daily_goal = (config.get("daily_goal") or "").strip()
@@ -310,7 +394,7 @@ def _build_prompt(
             "reason_codes": baseline.reason_codes,
             "why_now": baseline.why_now,
         },
-        "kg_priors": kg_priors_mod.priors_for_event(event, window=str(config.get("policy_learner", {}).get("kg_window", "30d"))),
+        "kg_priors": kg_priors,
     }
     system = (
         "You are the ping/not-ping policy learner for a proactive macOS harness. "
@@ -337,6 +421,80 @@ def _build_prompt(
         {"role": "system", "content": system},
         {"role": "user", "content": json.dumps(user, sort_keys=True)},
     ]
+
+
+def _kg_priors_for_event(event: CandidateEvent, cfg: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    if bool(cfg.get("frozen_eval")):
+        return _match_frozen_priors(event, cfg.get("frozen_kg_priors") or {})
+    return kg_priors_mod.priors_for_event(
+        event,
+        window=str(config.get("policy_learner", {}).get("kg_window", "30d")),
+    )
+
+
+def _match_frozen_priors(event: CandidateEvent, frozen_priors: Any) -> dict[str, Any]:
+    if not isinstance(frozen_priors, dict):
+        return {}
+    app = str(event.screen.frontmost_app or "unknown").lower()
+    scene = str(event.scene.label or "unknown").lower()
+
+    def pick(bucket: str, key: str) -> dict[str, Any]:
+        table = frozen_priors.get(bucket) or {}
+        if not isinstance(table, dict):
+            return {}
+        value = table.get(key) or table.get("unknown") or {}
+        return value if isinstance(value, dict) else {}
+
+    return {
+        "version": frozen_priors.get("version", "frozen_kg_priors_v1"),
+        "source": "frozen_manifest",
+        "app": pick("app", app),
+        "scene": pick("scene", scene),
+        "app_scene": pick("app_scene", f"{app}|{scene}"),
+    }
+
+
+def _offline_eval_decision(
+    event: CandidateEvent,
+    baseline: ProactiveDecision,
+    examples: list[dict[str, Any]],
+    kg_priors: dict[str, Any],
+) -> dict[str, Any]:
+    """Deterministic no-network scorer for official frozen eval.
+
+    This is not used live. It exists so frozen manifests can produce byte-stable
+    measurements without depending on an external LLM endpoint. It uses the
+    same bounded few-shot/prior context that the live prompt would receive.
+    """
+    if baseline.action == "notch_ping":
+        base_score = 0.6
+    else:
+        base_score = 0.4
+    app = str(event.screen.frontmost_app or "").lower()
+    scene = str(event.scene.label or "").lower()
+    matched = [
+        row for row in examples
+        if str((row.get("context") or {}).get("app") or "").lower() == app
+        or str((row.get("context") or {}).get("scene") or "").lower() == scene
+    ]
+    if matched:
+        total = sum(float(row.get("confidence") or 0.0) for row in matched) or float(len(matched))
+        positive = sum(float(row.get("confidence") or 0.0) for row in matched if row.get("target") == "notch_ping")
+        base_score = positive / total if total else base_score
+    for bucket in ("app_scene", "scene", "app"):
+        prior = kg_priors.get(bucket) if isinstance(kg_priors, dict) else None
+        if isinstance(prior, dict) and prior.get("help_rate") is not None:
+            base_score = (base_score + float(prior.get("help_rate") or 0.0)) / 2.0
+            break
+    action = "notch_ping" if base_score >= 0.55 else "no_ping"
+    return {
+        "action": action,
+        "confidence": round(max(base_score, 1.0 - base_score), 3),
+        "intent_category": "other",
+        "reason_codes": ["offline_frozen_eval"],
+        "why_now": "offline frozen scorer found similar helpful moments" if action == "notch_ping" else "",
+        "evidence": {"memory_priors_used": ["frozen_manifest"], "screen_fields_used": ["app", "scene"]},
+    }
 
 
 def _scene_dict(event: CandidateEvent) -> dict[str, Any]:
@@ -436,6 +594,8 @@ def _decision_from_result(
     reasons = ["llm_icl_policy", *returned_reasons]
     if baseline.action != action:
         reasons.append(f"rule_baseline_{baseline.action}")
+    evidence = _evidence(result.get("evidence"))
+    evidence["policy_learner_source"] = "offline_surrogate" if bool(cfg.get("offline_eval")) else "live_model"
     return ProactiveDecision(
         decision_id=f"pd_{event.candidate_id.split('_', 1)[-1]}",
         candidate_id=event.candidate_id,
@@ -448,7 +608,7 @@ def _decision_from_result(
         why_now=str(result.get("why_now") or ", ".join(reasons))[:240] if action == "notch_ping" else None,
         workflow_event_id=event.workflow_event_id,
         intent_category=_intent_category(result.get("intent_category")),
-        evidence=_evidence(result.get("evidence")),
+        evidence=evidence,
     )
 
 

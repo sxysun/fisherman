@@ -6,7 +6,7 @@ import time
 from typing import Optional
 
 from .schemas import Delivery, ProactiveDecision, Realization
-from .store import append_jsonl, write_pending
+from .store import append_jsonl, patch_trace, write_pending
 
 
 def _now_iso() -> str:
@@ -26,6 +26,28 @@ async def dispatch(
                           (kept as a fallback when the notch app isn't running).
     """
     channel = config.get("channel", "notch_pill")
+    if channel == "terminal_notifier":
+        payload = {
+            "decision_id": decision.decision_id,
+            "candidate_id": decision.candidate_id,
+            "intent": decision.intent,
+            "message": realization.message,
+            "channel": channel,
+            "claimable_by_notch": False,
+            "ts": _now_iso(),
+            "expires_at_unix": time.time() + float(config.get("auto_dismiss_sec", 8)),
+        }
+        write_pending(decision.decision_id, payload)
+        ok, error = await _push_terminal_notifier(decision, realization, config)
+        if ok:
+            _record_terminal_notifier_display(decision)
+        return Delivery(
+            pushed=ok,
+            channel=channel,
+            displayed_at=_now_iso() if ok else None,
+            error=error,
+        )
+
     payload = {
         "decision_id": decision.decision_id,
         "candidate_id": decision.candidate_id,
@@ -36,10 +58,6 @@ async def dispatch(
     }
     write_pending(decision.decision_id, payload)
 
-    if channel == "terminal_notifier":
-        await _push_terminal_notifier(decision, realization, config)
-    # notch_pill: no work here — the Swift app polls /pending
-
     return Delivery(pushed=True, channel=channel, displayed_at=_now_iso())
 
 
@@ -47,7 +65,7 @@ async def _push_terminal_notifier(
     decision: ProactiveDecision,
     realization: Realization,
     config: dict,
-) -> None:
+) -> tuple[bool, str | None]:
     binary = shutil.which("terminal-notifier")
     if not binary:
         append_jsonl(
@@ -59,7 +77,7 @@ async def _push_terminal_notifier(
                 "note": "terminal-notifier not installed",
             },
         )
-        return
+        return False, "terminal-notifier not installed"
 
     title = f"Fisherman · {decision.intent}"
     message = realization.message or "(empty realizer output)"
@@ -83,6 +101,9 @@ async def _push_terminal_notifier(
             stderr=asyncio.subprocess.DEVNULL,
         )
         await proc.wait()
+        if proc.returncode != 0:
+            return False, f"terminal-notifier exited {proc.returncode}"
+        return True, None
     except Exception as e:
         append_jsonl(
             "outcomes.jsonl",
@@ -93,3 +114,27 @@ async def _push_terminal_notifier(
                 "note": f"push_failed: {e}",
             },
         )
+        return False, f"push_failed: {e}"
+
+
+def _record_terminal_notifier_display(decision: ProactiveDecision) -> None:
+    """Record display evidence for terminal-notifier's direct callback path."""
+    delivery_row = {
+        "delivery_id": f"del_{decision.decision_id}_terminal_notifier_displayed",
+        "decision_id": decision.decision_id,
+        "candidate_id": decision.candidate_id,
+        "channel": "terminal_notifier",
+        "delivery_action": "displayed_ack",
+        "ack_source": "terminal_notifier_dispatch",
+        "pending_attempts": 0,
+        "pending_created_at": None,
+        "pending_claimed_at": None,
+        "ts": _now_iso(),
+    }
+    append_jsonl("deliveries.jsonl", delivery_row)
+    patch_trace(
+        decision.decision_id,
+        {"delivery": {"channel": "terminal_notifier", "pushed": True, "displayed_at": delivery_row["ts"]}},
+        lifecycle_stage="displayed_ack",
+        lifecycle_extra={"ack_source": "terminal_notifier_dispatch"},
+    )

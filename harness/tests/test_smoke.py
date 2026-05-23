@@ -269,7 +269,7 @@ def test_event_examples_mine_workflow_level_review_rows(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
-def test_freeze_eval_manifest_is_self_contained_and_evaluable(tmp_path):
+def test_freeze_eval_manifest_is_self_contained_and_evaluable(monkeypatch, tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path / "state"
     try:
@@ -342,8 +342,11 @@ def test_freeze_eval_manifest_is_self_contained_and_evaluable(tmp_path):
             out_dir=tmp_path / "frozen",
             limit=10,
         )
-        assert Path(manifest["source_candidates_path"]).exists()
-        assert Path(manifest["event_examples_path"]).exists()
+        assert not Path(manifest["source_candidates_path"]).is_absolute()
+        assert (tmp_path / "frozen" / manifest["source_candidates_path"]).exists()
+        assert (tmp_path / "frozen" / manifest["event_examples_path"]).exists()
+        assert (tmp_path / "frozen" / manifest["split_assignments_path"]).exists()
+        assert manifest["temporal_protocol"]["method"].endswith("stable_hash_tiebreak")
         report = frozen_eval_mod.evaluate_manifest(
             Path(tmp_path / "frozen" / "manifest.json"),
             policy="rule_v0",
@@ -352,24 +355,242 @@ def test_freeze_eval_manifest_is_self_contained_and_evaluable(tmp_path):
         assert report["source"]["n_candidates"] == 2
         assert report["candidate"]["overall"]["n"] >= 2
         assert report["leakage_checks"]["pass"] is True
+        assert report["leakage_checks"]["split_assignments"]["pass"] is True
+        assert report["policy_execution"]["measurement_kind"] == "deterministic_policy_replay"
         assert "by_app" in report["candidate"]
+
+        from policies import llm_icl_v0
+
+        def fail_live_read(_filename):
+            raise AssertionError("frozen llm eval must not read live jsonl examples")
+
+        def fail_live_priors(*_args, **_kwargs):
+            raise AssertionError("frozen llm eval must not read live kg priors")
+
+        def fail_model_call(*_args, **_kwargs):
+            raise AssertionError("official frozen eval should not require a live model endpoint")
+
+        monkeypatch.setattr(llm_icl_v0, "iter_jsonl", fail_live_read)
+        monkeypatch.setattr(llm_icl_v0.kg_priors_mod, "priors_for_event", fail_live_priors)
+        monkeypatch.setattr(llm_icl_v0, "_call_model", fail_model_call)
+        llm_icl_v0._last_call_ts = 0.0
+        llm_report = frozen_eval_mod.evaluate_manifest(
+            Path(tmp_path / "frozen" / "manifest.json"),
+            policy="llm_icl_v0",
+            config_overrides={
+                "policy_learner": {
+                    "enabled": True,
+                    "offline_eval": True,
+                    "eval_mode": "offline_surrogate",
+                    "min_interval_sec": 0,
+                    "max_examples": 8,
+                },
+                "privacy": {"allow_local_model_hosts": True, "block_untrusted_model_hosts": True},
+            },
+            bootstrap_samples=0,
+        )
+        assert llm_report["policy_execution"]["n_fatal_fallback_predictions"] == 0
+        assert llm_report["policy_execution"]["eval_mode"] == "offline_surrogate"
+        assert llm_report["policy_execution"]["measurement_kind"] == "offline_llm_policy_surrogate"
+        assert llm_report["policy_execution"]["exercises_live_model"] is False
+        assert llm_report["policy_execution"]["execution_counts"]["n_offline_surrogate_decisions"] > 0
+
+        def fake_model_call(*_args, **_kwargs):
+            return {
+                "action": "no_ping",
+                "confidence": 0.9,
+                "reason_codes": ["fixture_live_model"],
+                "why_now": "",
+            }
+
+        monkeypatch.setattr(llm_icl_v0, "_call_model", fake_model_call)
+        llm_icl_v0._last_call_ts = 0.0
+        live_report = frozen_eval_mod.evaluate_manifest(
+            Path(tmp_path / "frozen" / "manifest.json"),
+            policy="llm_icl_v0",
+            config_overrides={
+                "policy_learner": {
+                    "enabled": True,
+                    "eval_mode": "live_model",
+                    "base_url": "http://127.0.0.1:11434/v1",
+                    "model": "fake-live",
+                    "min_interval_sec": 0,
+                },
+                "privacy": {"allow_local_model_hosts": True, "block_untrusted_model_hosts": True},
+            },
+            bootstrap_samples=0,
+            require_live_model=True,
+        )
+        assert live_report["policy_execution"]["measurement_kind"] == "live_llm_policy_eval"
+        assert live_report["policy_execution"]["execution_counts"]["n_live_model_decisions"] > 0
+
+        source_path = tmp_path / "frozen" / manifest["source_candidates_path"]
+        hard_rows = []
+        for line in source_path.read_text().splitlines():
+            row = json.loads(line)
+            row.setdefault("scene", {})["strength"] = "weak"
+            row.setdefault("scene", {})["label"] = "unknown"
+            hard_rows.append(row)
+        source_path.write_text("\n".join(json.dumps(row) for row in hard_rows) + "\n")
+        try:
+            frozen_eval_mod.evaluate_manifest(
+                Path(tmp_path / "frozen" / "manifest.json"),
+                policy="llm_icl_v0",
+                config_overrides={
+                    "policy_learner": {
+                        "enabled": True,
+                        "eval_mode": "live_model",
+                        "base_url": "http://127.0.0.1:11434/v1",
+                        "model": "fake-live",
+                        "min_interval_sec": 0,
+                    },
+                    "privacy": {"allow_local_model_hosts": True, "block_untrusted_model_hosts": True},
+                },
+                bootstrap_samples=0,
+                require_live_model=True,
+            )
+            raise AssertionError("expected live-model attestation to fail without live model decisions")
+        except RuntimeError as e:
+            assert "no predictions carried live_model" in str(e)
+
+        try:
+            frozen_eval_mod.evaluate_manifest(
+                Path(tmp_path / "frozen" / "manifest.json"),
+                policy="llm_icl_v0",
+                config_overrides={"policy_learner": {"enabled": False}},
+                bootstrap_samples=0,
+            )
+            raise AssertionError("expected llm_icl_v0 frozen eval to fail closed without learner config")
+        except ValueError as e:
+            assert "policy_learner.enabled" in str(e)
     finally:
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_frozen_eval_missing_predictions_are_coverage_not_no_ping():
+    rows = [
+        {
+            "should_ping": True,
+            "did_ping": None,
+            "prediction_missing": True,
+            "confidence": 1.0,
+        },
+        {
+            "should_ping": True,
+            "did_ping": True,
+            "prediction_missing": False,
+            "confidence": 0.5,
+        },
+    ]
+    metrics = frozen_eval_mod._metrics(rows, bootstrap_samples=0)
+    assert metrics["n"] == 2
+    assert metrics["scored_n"] == 1
+    assert metrics["prediction_missing"] == 1
+    assert metrics["prediction_coverage"] == 0.5
+    assert metrics["tp"] == 1
+    assert metrics["fn"] == 0
+    weighted = frozen_eval_mod._weighted_metrics(rows)
+    assert weighted["weighting"] == "source_weight_v1"
+    assert weighted["weighted_n"] == 0.75
+    assert weighted["scored_weighted_n"] == 0.25
+    assert weighted["missing_weight"] == 0.5
+
+
+def test_replay_recent_outcomes_are_strictly_prior():
+    outcomes = [
+        {"decision_id": "pd_same", "user_action": "clicked", "ts": "2026-05-19T12:00:00Z"},
+        {"decision_id": "pd_prior", "user_action": "dismissed", "ts": "2026-05-19T11:59:59Z"},
+    ]
+    from eval import replay as replay_mod
+
+    recent = replay_mod._recent_outcomes_for(outcomes, "2026-05-19T12:00:00Z")
+    assert [row["decision_id"] for row in recent] == ["pd_prior"]
+
+
+def test_time_split_keeps_workflow_groups_isolated():
+    rows = [
+        {"example_id": "ex_a1", "workflow_event_id": "wev_a", "ts": "2026-05-19T12:00:00Z"},
+        {"example_id": "ex_a2", "workflow_event_id": "wev_a", "ts": "2026-05-19T12:10:00Z"},
+        {"example_id": "ex_b1", "workflow_event_id": "wev_b", "ts": "2026-05-19T12:20:00Z"},
+        {"example_id": "ex_b2", "workflow_event_id": "wev_b", "ts": "2026-05-19T12:30:00Z"},
+        {"example_id": "ex_c1", "workflow_event_id": "wev_c", "ts": "2026-05-19T12:40:00Z"},
+        {"example_id": "ex_c2", "workflow_event_id": "wev_c", "ts": "2026-05-19T12:50:00Z"},
+    ]
+    annotated = dataset_mod._annotate_split(rows)
+    by_event: dict[str, set[str]] = {}
+    for row in annotated:
+        by_event.setdefault(row["workflow_event_id"], set()).add(row["split"])
+    assert all(len(splits) == 1 for splits in by_event.values())
+    split = dataset_mod._time_split(rows)
+    assert split["method"].endswith("stable_hash_tiebreak")
+    assert split["split_seed"] == dataset_mod.SPLIT_SEED
+
+
+def test_frozen_llm_examples_are_strictly_prior_and_not_self():
+    from policies import llm_icl_v0
+
+    event = schemas.CandidateEvent(candidate_id="cand_now")
+    event.ts = "2026-05-19T12:10:00Z"
+    event.workflow_event_id = "wev_now"
+    rows = [
+        {
+            "candidate_id": "cand_prior",
+            "workflow_event_id": "wev_prior",
+            "ts": "2026-05-19T12:00:00Z",
+            "target": "notch_ping",
+            "source": "explicit",
+            "confidence": 1.0,
+            "context": {"app": "Chrome", "scene": "coding", "ocr_snippet": "prior"},
+        },
+        {
+            "candidate_id": "cand_now",
+            "workflow_event_id": "wev_now",
+            "ts": "2026-05-19T12:10:00Z",
+            "target": "no_ping",
+            "source": "explicit",
+            "confidence": 1.0,
+            "context": {"app": "Chrome", "scene": "coding", "ocr_snippet": "self"},
+        },
+        {
+            "candidate_id": "cand_future",
+            "workflow_event_id": "wev_future",
+            "ts": "2026-05-19T12:20:00Z",
+            "target": "no_ping",
+            "source": "explicit",
+            "confidence": 1.0,
+            "context": {"app": "Chrome", "scene": "coding", "ocr_snippet": "future"},
+        },
+    ]
+    examples = llm_icl_v0._few_shot_examples_from_frozen(
+        rows,
+        event=event,
+        limit=10,
+        cutoff_ts=event.ts,
+    )
+    assert [row["context"]["ocr_snippet"] for row in examples] == ["prior"]
+
+
 def test_config_load_merges_new_defaults(tmp_path):
+    from eval import replay as replay_mod
+
     old_path = config_mod.CONFIG_PATH
     config_mod.CONFIG_PATH = tmp_path / "config.toml"
     try:
         config_mod.CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         config_mod.CONFIG_PATH.write_text(
             "[realizer]\napi_key = \"local-key\"\nbase_url = \"http://localhost:9000\"\n"
+            "[policy_learner]\nbase_url = \"http://localhost:9001\"\nmodel = \"test-model\"\n"
         )
         cfg = config_mod.load()
         assert cfg["realizer"]["api_key"] == "local-key"
         assert cfg["realizer"]["base_url"] == "http://localhost:9000"
+        assert cfg["trainer"]["min_explicit_labels"] == 20
         assert cfg["experiment"]["enabled"] is True
         assert cfg["privacy"]["block_untrusted_model_hosts"] is True
+        replay_cfg = replay_mod._live_gate_config()
+        assert replay_cfg["policy_learner"]["base_url"] == "http://localhost:9001"
+        assert replay_cfg["policy_learner"]["model"] == "test-model"
+        assert replay_cfg["privacy"]["block_untrusted_model_hosts"] is True
     finally:
         config_mod.CONFIG_PATH = old_path
 
@@ -706,6 +927,12 @@ def test_experiment_holdout_suppresses_ping_with_counterfactual():
 
 
 def test_experiment_exploration_respects_hard_gates():
+    from harness.policy_contract import HARD_NO_PING_REASONS
+    from policies import llm_icl_v0
+
+    assert set(llm_icl_v0.HARD_NO_PING_REASONS) == set(HARD_NO_PING_REASONS)
+    assert set(experiments_mod.HARD_NO_PING_REASONS) == set(HARD_NO_PING_REASONS)
+
     event = schemas.CandidateEvent(candidate_id="cand_exp")
     hard = schemas.ProactiveDecision(
         decision_id="pd_hard",
@@ -716,6 +943,7 @@ def test_experiment_exploration_respects_hard_gates():
     )
     cfg = {"enabled": True, "salt": "test", "explore_ping_rate": 1.0}
     assert experiments_mod.apply(hard, event, cfg).action == "no_ping"
+    assert experiments_mod.apply(hard, event, cfg | {"respect_hard_gates": False}).action == "no_ping"
 
     soft = schemas.ProactiveDecision(
         decision_id="pd_soft",
@@ -1023,6 +1251,7 @@ def test_rule_v0_suppresses_resume_from_idle():
     blocked = rule_v0.decide(event, mem, [], cfg)
     assert blocked.action == "no_ping"
     assert "resume_from_idle" in blocked.reason_codes
+    assert "resume_from_idle" in experiments_mod.HARD_NO_PING_REASONS
 
 
 def test_rule_v0_snooze_expires():
@@ -1133,7 +1362,29 @@ def test_pending_claim_lease_and_completion(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
-def test_pending_claim_writes_delivery_and_claimed_capture_metric(tmp_path):
+def test_expired_pending_is_terminal_and_not_claimed(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.write_pending(
+            "pd_expired",
+            {
+                "decision_id": "pd_expired",
+                "candidate_id": "cand_expired",
+                "message": "stale",
+                "expires_at_unix": time.time() - 1,
+            },
+        )
+        assert store_mod.claim_pending(lease_sec=60) is None
+        assert not (tmp_path / "pending" / "pd_expired.json").exists()
+        deliveries = store_mod.tail_jsonl("deliveries.jsonl")
+        assert deliveries[-1]["decision_id"] == "pd_expired"
+        assert deliveries[-1]["delivery_action"] == "never_displayed_expired"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_pending_display_ack_writes_claimed_capture_metric(tmp_path):
     from aiohttp.test_utils import make_mocked_request
 
     old_dir = store_mod.HARNESS_DIR
@@ -1160,11 +1411,21 @@ def test_pending_claim_writes_delivery_and_claimed_capture_metric(tmp_path):
         assert body["decision_id"] == "pd_claimed"
         deliveries = store_mod.tail_jsonl("deliveries.jsonl")
         assert deliveries[-1]["decision_id"] == "pd_claimed"
-        assert deliveries[-1]["delivery_action"] == "claimed"
+        assert deliveries[-1]["delivery_action"] == "dequeued"
+
+        report = metrics_mod.compute(window="365d")
+        assert report["n_claimed_pings"] == 0
+        assert report["outcomes"]["capture_rate_for_pings"] == 0.0
+        assert report["outcomes"]["capture_rate_for_claimed_pings"] is None
+
+        ack_req = make_mocked_request("POST", "/delivery-ack?id=pd_claimed")
+        ack_resp = asyncio.run(server_mod.post_delivery_ack(ack_req))
+        assert json.loads(ack_resp.text)["ok"] is True
+        deliveries = store_mod.tail_jsonl("deliveries.jsonl")
+        assert deliveries[-1]["delivery_action"] == "displayed_ack"
 
         report = metrics_mod.compute(window="365d")
         assert report["n_claimed_pings"] == 1
-        assert report["outcomes"]["capture_rate_for_pings"] == 0.0
         assert report["outcomes"]["capture_rate_for_claimed_pings"] == 0.0
 
         store_mod.append_jsonl(
@@ -1177,6 +1438,218 @@ def test_pending_claim_writes_delivery_and_claimed_capture_metric(tmp_path):
         )
         report = metrics_mod.compute(window="365d")
         assert report["outcomes"]["capture_rate_for_claimed_pings"] == 1.0
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_outcome_validation_is_idempotent_and_rejects_stale(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        unknown = make_mocked_request("POST", "/outcome?id=pd_unknown&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(unknown))
+        assert resp.status == 404
+
+        store_mod.append_jsonl("decisions.jsonl", {
+            "decision_id": "pd_ok",
+            "candidate_id": "cand_ok",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": "notch_ping",
+        })
+        store_mod.write_pending("pd_ok", {
+            "decision_id": "pd_ok",
+            "candidate_id": "cand_ok",
+            "message": "hello",
+        })
+        not_dequeued = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(not_dequeued))
+        assert resp.status == 409
+        assert json.loads(resp.text)["error"] == "not_dequeued"
+
+        asyncio.run(server_mod.get_pending(make_mocked_request("GET", "/pending")))
+        needs_ack = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(needs_ack))
+        assert resp.status == 409
+        assert json.loads(resp.text)["error"] == "display_ack_required"
+        asyncio.run(server_mod.post_delivery_ack(make_mocked_request("POST", "/delivery-ack?id=pd_ok")))
+        first = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(first))
+        assert json.loads(resp.text)["ok"] is True
+        assert len(store_mod.tail_jsonl("outcomes.jsonl")) == 1
+        assert store_mod.tail_jsonl("deliveries.jsonl")[-1]["delivery_action"] == "displayed_ack"
+        assert store_mod.tail_jsonl("deliveries.jsonl")[-1]["ack_source"] == "client_ack"
+        duplicate = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(duplicate))
+        body = json.loads(resp.text)
+        assert body["ok"] is True
+        assert body["duplicate"] is True
+        assert len(store_mod.tail_jsonl("outcomes.jsonl")) == 1
+
+        store_mod.append_jsonl("decisions.jsonl", {
+            "decision_id": "pd_expired_outcome",
+            "candidate_id": "cand_expired_outcome",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": "notch_ping",
+        })
+        store_mod.write_pending("pd_expired_outcome", {
+            "decision_id": "pd_expired_outcome",
+            "candidate_id": "cand_expired_outcome",
+            "message": "stale",
+            "expires_at_unix": time.time() - 1,
+        })
+        assert store_mod.sweep_expired_pending() == 1
+        stale = make_mocked_request("POST", "/outcome?id=pd_expired_outcome&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(stale))
+        assert resp.status == 409
+        assert json.loads(resp.text)["error"] == "terminal_delivery_expired"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_displayed_ping_late_outcome_rejected_after_timeout(tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.append_jsonl("decisions.jsonl", {
+            "decision_id": "pd_late",
+            "candidate_id": "cand_late",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": "notch_ping",
+        })
+        store_mod.write_pending("pd_late", {
+            "decision_id": "pd_late",
+            "candidate_id": "cand_late",
+            "message": "hello",
+            "expires_at_unix": time.time() + 60,
+        })
+        assert json.loads(asyncio.run(server_mod.get_pending(make_mocked_request("GET", "/pending"))).text)["decision_id"] == "pd_late"
+        assert json.loads(asyncio.run(server_mod.post_delivery_ack(make_mocked_request("POST", "/delivery-ack?id=pd_late"))).text)["ok"] is True
+
+        p = tmp_path / "pending" / "pd_late.json"
+        payload = json.loads(p.read_text())
+        payload["expires_at_unix"] = time.time() - 1
+        p.write_text(json.dumps(payload))
+        assert store_mod.sweep_expired_pending() == 1
+        assert store_mod.tail_jsonl("deliveries.jsonl")[-1]["delivery_action"] == "displayed_timeout_no_outcome"
+
+        resp = asyncio.run(server_mod.post_outcome(make_mocked_request("POST", "/outcome?id=pd_late&user_action=clicked")))
+        assert resp.status == 409
+        assert json.loads(resp.text)["error"] == "terminal_delivery_expired"
+        assert store_mod.tail_jsonl("outcomes.jsonl") == []
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_terminal_notifier_display_allows_callback_outcome(monkeypatch, tmp_path):
+    from aiohttp.test_utils import make_mocked_request
+
+    class FakeProc:
+        returncode = 0
+
+        async def wait(self):
+            return None
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeProc()
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        monkeypatch.setattr(push_mod.shutil, "which", lambda _name: "/usr/local/bin/terminal-notifier")
+        monkeypatch.setattr(push_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        decision = schemas.ProactiveDecision(
+            decision_id="pd_terminal",
+            candidate_id="cand_terminal",
+            policy_version="rule_v0",
+            action="notch_ping",
+            intent="goal_aware",
+        )
+        realization = schemas.Realization(
+            model="fixture",
+            base_url="local",
+            prompt_version="fixture",
+            message="Terminal notifier fallback",
+        )
+        store_mod.append_jsonl("decisions.jsonl", {
+            **decision.to_dict(),
+            "ts": "2026-05-19T12:00:00Z",
+        })
+        delivery = asyncio.run(push_mod.dispatch(
+            decision,
+            realization,
+            {"channel": "terminal_notifier", "harness_port": 7893},
+        ))
+        assert delivery.pushed is True
+        deliveries = store_mod.tail_jsonl("deliveries.jsonl")
+        assert deliveries[-1]["channel"] == "terminal_notifier"
+        assert deliveries[-1]["delivery_action"] == "displayed_ack"
+        assert deliveries[-1]["ack_source"] == "terminal_notifier_dispatch"
+        assert (tmp_path / "pending" / "pd_terminal.json").exists()
+
+        resp = asyncio.run(server_mod.post_outcome(make_mocked_request(
+            "GET",
+            "/outcome?id=pd_terminal&user_action=clicked",
+        )))
+        assert resp.status == 200
+        assert json.loads(resp.text)["ok"] is True
+        assert store_mod.tail_jsonl("outcomes.jsonl")[-1]["decision_id"] == "pd_terminal"
+        assert not (tmp_path / "pending" / "pd_terminal.json").exists()
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_terminal_notifier_ignored_ping_expires_to_terminal_delivery(monkeypatch, tmp_path):
+    class FakeProc:
+        returncode = 0
+
+        async def wait(self):
+            return None
+
+    async def fake_create_subprocess_exec(*_args, **_kwargs):
+        return FakeProc()
+
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        monkeypatch.setattr(push_mod.shutil, "which", lambda _name: "/usr/local/bin/terminal-notifier")
+        monkeypatch.setattr(push_mod.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+        decision = schemas.ProactiveDecision(
+            decision_id="pd_terminal_ignored",
+            candidate_id="cand_terminal_ignored",
+            policy_version="rule_v0",
+            action="notch_ping",
+            intent="goal_aware",
+        )
+        realization = schemas.Realization(
+            model="fixture",
+            base_url="local",
+            prompt_version="fixture",
+            message="Terminal notifier fallback",
+        )
+        store_mod.append_jsonl("decisions.jsonl", {
+            **decision.to_dict(),
+            "ts": "2026-05-19T12:00:00Z",
+        })
+        delivery = asyncio.run(push_mod.dispatch(
+            decision,
+            realization,
+            {"channel": "terminal_notifier", "harness_port": 7893, "auto_dismiss_sec": 60},
+        ))
+        assert delivery.pushed is True
+        pending_path = tmp_path / "pending" / "pd_terminal_ignored.json"
+        payload = json.loads(pending_path.read_text())
+        assert payload["claimable_by_notch"] is False
+        assert store_mod.claim_pending() is None
+        payload["expires_at_unix"] = time.time() - 1
+        pending_path.write_text(json.dumps(payload))
+        assert store_mod.sweep_expired_pending() == 1
+        deliveries = store_mod.tail_jsonl("deliveries.jsonl")
+        assert deliveries[-1]["channel"] == "terminal_notifier"
+        assert deliveries[-1]["delivery_action"] == "displayed_timeout_no_outcome"
     finally:
         store_mod.HARNESS_DIR = old_dir
 
@@ -2028,7 +2501,70 @@ def test_eval_report_distinguishes_trace_gap_from_claimed_missing_outcome(tmp_pa
         store_mod.HARNESS_DIR = old_dir
 
 
-def test_trainer_proposes_canary_from_implicit_signal(tmp_path):
+def test_eval_report_event_labels_join_to_decision_window(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.append_jsonl("decisions.jsonl", {
+            "decision_id": "pd_recent_event",
+            "candidate_id": "cand_recent_event",
+            "workflow_event_id": "wev_recent",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": "no_ping",
+        })
+        store_mod.append_jsonl("workflow_events.jsonl", {
+            "workflow_event_id": "wev_recent",
+            "ts": "2026-05-19T12:00:00Z",
+            "last_ts": "2026-05-19T12:00:00Z",
+            "app": "Chrome",
+        })
+        store_mod.append_jsonl("workflow_events.jsonl", {
+            "workflow_event_id": "wev_missed_without_decision",
+            "ts": "2026-05-19T12:06:00Z",
+            "last_ts": "2026-05-19T12:06:00Z",
+            "app": "Chrome",
+        })
+        store_mod.append_jsonl("workflow_events.jsonl", {
+            "workflow_event_id": "wev_out_of_window",
+            "ts": "2024-05-19T12:06:00Z",
+            "last_ts": "2024-05-19T12:06:00Z",
+            "app": "Chrome",
+        })
+        store_mod.append_jsonl("retro_labels.jsonl", {
+            "label_id": "lab_old_event",
+            "workflow_event_id": "wev_old",
+            "label_scope": "workflow_event",
+            "label": "would_help",
+            "ts": "2024-05-19T12:05:00Z",
+        })
+        store_mod.append_jsonl("retro_labels.jsonl", {
+            "label_id": "lab_recent_event",
+            "workflow_event_id": "wev_recent",
+            "label_scope": "workflow_event",
+            "label": "would_help",
+            "ts": "2026-05-19T12:05:00Z",
+        })
+        store_mod.append_jsonl("retro_labels.jsonl", {
+            "label_id": "lab_missed_event",
+            "workflow_event_id": "wev_missed_without_decision",
+            "label_scope": "workflow_event",
+            "label": "would_help",
+            "ts": "2026-05-19T12:06:00Z",
+        })
+        store_mod.append_jsonl("retro_labels.jsonl", {
+            "label_id": "lab_out_of_window_event",
+            "workflow_event_id": "wev_out_of_window",
+            "label_scope": "workflow_event",
+            "label": "would_help",
+            "ts": "2026-05-19T12:07:00Z",
+        })
+        report = eval_report_mod.build_report(window="365d")
+        assert report["data"]["n_event_labels"] == 2
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_trainer_blocks_canary_from_implicit_signal_without_label_rigor(tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path
     try:
@@ -2075,21 +2611,20 @@ def test_trainer_proposes_canary_from_implicit_signal(tmp_path):
                 },
             )
 
-        result = trainer_mod.run_trainer(window="365d", min_implicit_usable=2)
-        canary = result["canary_policy"]
-        assert canary["status"] == "proposed"
-        assert canary["variant"]
-        state = store_mod.read_policy_state()
-        assert state["canary_policy"]["status"] == "proposed"
+        default_result = trainer_mod.run_trainer(window="365d", min_implicit_usable=2, write=False)
+        assert default_result["canary_policy"]["status"] == "insufficient_data"
 
-        activated = trainer_mod.activate_canary()
-        assert activated["active_policy"] == "canary"
-        trainer_mod.run_trainer(window="365d", min_implicit_usable=2)
+        result = trainer_mod.run_trainer(
+            window="365d",
+            min_implicit_usable=2,
+            min_explicit_labels=0,
+        )
+        canary = result["canary_policy"]
+        assert canary["status"] == "insufficient_data"
+        assert canary["variant"] is None
+        assert result["calibration"]["readiness"]["comparison_status"] == "insufficient_explicit_labels"
         state = store_mod.read_policy_state()
-        assert state["canary_policy"]["status"] == "active"
-        assert state["next_canary_policy"]["status"] == "proposed"
-        rolled_back = trainer_mod.rollback_canary()
-        assert rolled_back["active_policy"] == "rule_v0"
+        assert state["canary_policy"]["status"] == "insufficient_data"
     finally:
         store_mod.HARNESS_DIR = old_dir
 
@@ -2101,6 +2636,7 @@ def test_shadow_eval_compares_policy_variants_against_labels(tmp_path):
     candidates = [
         {
             "candidate_id": "cand_should_ping",
+            "workflow_event_id": "wev_shadow_ping",
             "ts": "2026-05-19T12:00:00Z",
             "screen": {"frame_age_sec": 5, "ocr_snippet": "TODO ship harness"},
             "scene": {"label": "coding_with_todo_in_view", "strength": "strong", "source": "rule"},
@@ -2109,19 +2645,40 @@ def test_shadow_eval_compares_policy_variants_against_labels(tmp_path):
         },
         {
             "candidate_id": "cand_should_stay_quiet",
+            "workflow_event_id": "wev_shadow_quiet",
             "ts": "2026-05-19T12:05:00Z",
             "screen": {"frame_age_sec": 5, "ocr_snippet": ""},
             "scene": {"label": "unknown", "strength": "unknown", "source": "unknown"},
             "context": {},
             "user_pref": {},
         },
+        {
+            "candidate_id": "cand_old_labeled",
+            "ts": "2026-05-01T12:05:00Z",
+            "screen": {"frame_age_sec": 5, "ocr_snippet": "old"},
+            "scene": {"label": "unknown", "strength": "unknown", "source": "unknown"},
+            "context": {},
+            "user_pref": {},
+        },
     ]
     labels = [
+        {"candidate_id": "cand_should_ping", "label": "would_annoy", "ts": "2026-05-19T12:00:30Z"},
         {"candidate_id": "cand_should_ping", "label": "would_help", "ts": "2026-05-19T12:10:00Z"},
         {
             "candidate_id": "cand_should_stay_quiet",
-            "label": "good_no_ping",
+            "label": "should_not_ping",
             "ts": "2026-05-19T12:11:00Z",
+        },
+        {
+            "candidate_id": "cand_old_labeled",
+            "label": "would_help",
+            "ts": "2026-05-01T12:11:00Z",
+        },
+        {
+            "workflow_event_id": "wev_shadow_ping",
+            "label_scope": "workflow_event",
+            "label": "should_ping",
+            "ts": "2026-05-19T12:12:00Z",
         },
     ]
     candidates_path.write_text("\n".join(json.dumps(row) for row in candidates) + "\n")
@@ -2129,19 +2686,75 @@ def test_shadow_eval_compares_policy_variants_against_labels(tmp_path):
     outcomes_path.write_text("")
 
     report = shadow_eval_mod.compare(
-        since="365d",
+        since="2026-05-19T11:00:00Z",
         dataset=str(candidates_path),
         labels_path=str(labels_path),
         outcomes_path=str(outcomes_path),
         variants={"current": {}},
     )
     assert report["n_candidates"] == 2
+    assert report["n_labeled_candidates"] == 2
+    assert report["n_labeled_events"] == 1
     assert report["best_by_labeled_f1"] == "current"
     current = report["variants"][0]
     assert current["labels"]["n"] == 2
     assert current["labels"]["agreement_rate"] == 1.0
     assert current["labels"]["tp_should_ping_and_pinged"] == 1
     assert current["labels"]["tn_should_stay_quiet_and_silent"] == 1
+    assert current["event_labels"]["n"] == 1
+    assert current["event_labels"]["tp_should_ping_and_pinged"] == 1
+    assert report["label_support"]["n_units"] == 2
+    assert report["label_support"]["positive_units"] == 1
+    assert report["label_support"]["negative_units"] == 1
+
+
+def test_shadow_eval_holdout_is_temporal_and_replays_prior_context(tmp_path):
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "retro_labels.jsonl"
+    outcomes_path = tmp_path / "outcomes.jsonl"
+    candidates = []
+    labels = []
+    for i in range(5):
+        cid = f"cand_temporal_{i}"
+        candidates.append({
+            "candidate_id": cid,
+            "workflow_event_id": f"wev_temporal_{i}",
+            "ts": f"2026-05-19T12:0{i}:00Z",
+            "screen": {"frame_age_sec": 5, "ocr_snippet": "TODO ship harness" if i == 4 else "read notes"},
+            "scene": {
+                "label": "coding_with_todo_in_view" if i == 4 else "reading_browser",
+                "strength": "strong",
+                "source": "rule",
+            },
+            "context": {},
+            "user_pref": {},
+        })
+        labels.append({
+            "candidate_id": cid,
+            "label": "would_help" if i == 4 else "good_no_ping",
+            "ts": f"2026-05-19T12:1{i}:00Z",
+        })
+    candidates_path.write_text("\n".join(json.dumps(row) for row in candidates) + "\n")
+    labels_path.write_text("\n".join(json.dumps(row) for row in labels) + "\n")
+    outcomes_path.write_text("")
+
+    report = shadow_eval_mod.compare(
+        since="2026-05-19T11:00:00Z",
+        dataset=str(candidates_path),
+        labels_path=str(labels_path),
+        outcomes_path=str(outcomes_path),
+        variants={"current": {}},
+        holdout_only=True,
+        holdout_fraction=0.2,
+    )
+    protocol = report["holdout_protocol"]
+    assert protocol["method"] == "time_ordered_group_holdout"
+    assert protocol["strict_temporal"] is True
+    assert protocol["train_end_ts"] < protocol["start_ts"]
+    assert report["n_candidates"] == 1
+    assert report["n_replay_candidates"] == 5
+    assert report["n_labeled_candidates"] == 1
+    assert report["variants"][0]["labels"]["n"] == 1
 
 
 def test_model_audit_sanitizes_url_and_writes_recent_rows(tmp_path):

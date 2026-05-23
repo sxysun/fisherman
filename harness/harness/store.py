@@ -197,6 +197,12 @@ def claim_pending(lease_sec: float = 15.0) -> Optional[dict]:
         lease_until = float(payload.get("pending_lease_until_unix") or 0)
         if lease_until > now:
             continue
+        if _pending_expired(payload, now):
+            _record_expired_pending(payload, now)
+            p.unlink(missing_ok=True)
+            continue
+        if payload.get("claimable_by_notch") is False:
+            continue
         payload["pending_attempts"] = int(payload.get("pending_attempts") or 0) + 1
         payload["pending_claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
         payload["pending_lease_until_unix"] = now + float(lease_sec)
@@ -208,6 +214,73 @@ def claim_pending(lease_sec: float = 15.0) -> Optional[dict]:
     return None
 
 
+def _pending_expired(payload: dict, now: float) -> bool:
+    try:
+        expires_at = float(payload.get("expires_at_unix") or 0)
+    except (TypeError, ValueError):
+        return False
+    return expires_at > 0 and expires_at <= now
+
+
+def _record_expired_pending(payload: dict, now: float) -> None:
+    decision_id = str(payload.get("decision_id") or "")
+    if not decision_id:
+        return
+    actions = set(delivery_actions_for_decision(decision_id))
+    if actions & {"displayed_ack", "displayed_inferred", "claimed"}:
+        delivery_action = "displayed_timeout_no_outcome"
+        lifecycle_stage = "displayed_timeout_no_outcome"
+    elif "dequeued" in actions:
+        delivery_action = "dequeued_expired"
+        lifecycle_stage = "dequeued_expired"
+    else:
+        delivery_action = "never_displayed_expired"
+        lifecycle_stage = "never_displayed_expired"
+    row = {
+        "delivery_id": f"del_{decision_id}_{delivery_action}",
+        "decision_id": decision_id,
+        "candidate_id": payload.get("candidate_id"),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "channel": payload.get("channel") or "notch_pill",
+        "delivery_action": delivery_action,
+        "pending_attempts": payload.get("pending_attempts", 0),
+        "pending_created_at": payload.get("pending_created_at"),
+        "expires_at_unix": payload.get("expires_at_unix"),
+    }
+    append_jsonl("deliveries.jsonl", row)
+    patch_trace(
+        decision_id,
+        {"delivery": row},
+        lifecycle_stage=lifecycle_stage,
+        lifecycle_extra={"pending_attempts": payload.get("pending_attempts", 0)},
+    )
+
+
+def sweep_expired_pending(now: float | None = None) -> int:
+    """Expire stale pending notifications without depending on a client poll.
+
+    Lab-grade outcome accounting needs every queued ping to reach a terminal
+    state even if the native capsule is closed, crashes, or never polls again.
+    """
+    ensure_dirs()
+    now = time.time() if now is None else now
+    expired = 0
+    pending_dir = HARNESS_DIR / "pending"
+    for p in sorted(pending_dir.glob("*.json"), key=lambda path: path.stat().st_mtime):
+        try:
+            with open(p) as f:
+                payload = json.load(f)
+        except Exception:
+            p.unlink(missing_ok=True)
+            continue
+        if not _pending_expired(payload, now):
+            continue
+        _record_expired_pending(payload, now)
+        p.unlink(missing_ok=True)
+        expired += 1
+    return expired
+
+
 def complete_pending(decision_id: str) -> bool:
     ensure_dirs()
     p = HARNESS_DIR / "pending" / f"{decision_id}.json"
@@ -215,6 +288,47 @@ def complete_pending(decision_id: str) -> bool:
         return False
     p.unlink(missing_ok=True)
     return True
+
+
+def pending_payload(decision_id: str) -> dict | None:
+    ensure_dirs()
+    p = HARNESS_DIR / "pending" / f"{decision_id}.json"
+    if not p.exists():
+        return None
+    try:
+        with open(p) as f:
+            payload = json.load(f)
+        if _pending_expired(payload, time.time()):
+            _record_expired_pending(payload, time.time())
+            p.unlink(missing_ok=True)
+            return None
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        p.unlink(missing_ok=True)
+        return None
+
+
+def outcome_for_decision(decision_id: str) -> dict | None:
+    latest: dict | None = None
+    for row in iter_jsonl("outcomes.jsonl"):
+        if row.get("decision_id") == decision_id:
+            latest = row
+    return latest
+
+
+def delivery_actions_for_decision(decision_id: str) -> list[str]:
+    out: list[str] = []
+    for row in iter_jsonl("deliveries.jsonl"):
+        if row.get("decision_id") == decision_id and row.get("delivery_action"):
+            out.append(str(row.get("delivery_action")))
+    return out
+
+
+def decision_exists(decision_id: str) -> bool:
+    for row in iter_jsonl("decisions.jsonl"):
+        if row.get("decision_id") == decision_id:
+            return True
+    return False
 
 
 def pop_pending() -> Optional[dict]:
@@ -228,6 +342,10 @@ def pop_pending() -> Optional[dict]:
     try:
         with open(p) as f:
             payload = json.load(f)
+        if _pending_expired(payload, time.time()):
+            _record_expired_pending(payload, time.time())
+            p.unlink(missing_ok=True)
+            return None
         p.unlink(missing_ok=True)
         return payload
     except Exception:
@@ -239,11 +357,18 @@ def list_pending() -> list[dict]:
     ensure_dirs()
     pending_dir = HARNESS_DIR / "pending"
     out: list[dict] = []
+    now = time.time()
     for p in sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
         try:
             with open(p) as f:
-                out.append(json.load(f))
+                payload = json.load(f)
+            if _pending_expired(payload, now):
+                _record_expired_pending(payload, now)
+                p.unlink(missing_ok=True)
+                continue
+            out.append(payload)
         except Exception:
+            p.unlink(missing_ok=True)
             continue
     return out
 

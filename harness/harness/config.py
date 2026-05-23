@@ -47,7 +47,7 @@ window = "30d"
 interval_hours = 24
 initial_delay_sec = 60
 min_implicit_usable = 20
-min_explicit_labels = 0
+min_explicit_labels = 20
 
 [policy_learner]
 # LLM in-context policy. rule_v0 still runs first for hard safety gates and

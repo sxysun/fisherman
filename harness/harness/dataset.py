@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import calendar
+import hashlib
 import re
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from .store import iter_jsonl
 
 
 DATASET_VERSION = "harness_eval_dataset_v1"
+SPLIT_SEED = "harness_eval_time_split_v1"
 AI_HELP_RE = re.compile(r"\b(chatgpt|claude|perplexity|cursor|copilot|stackoverflow|stack overflow)\b", re.I)
 
 
@@ -320,24 +322,37 @@ def freeze_eval_dataset(
     with open(source_outcomes_path, "w") as f:
         for row in source_outcomes:
             f.write(json.dumps(row, sort_keys=True) + "\n")
+    candidate_split = _time_split(report["examples"])
+    event_split = _time_split(event_report["examples"])
+    candidate_examples = _annotate_split(report["examples"], split=candidate_split)
+    workflow_event_examples = _annotate_split(event_report["examples"], split=event_split)
+
     examples_path = out_dir / "examples.jsonl"
     with open(examples_path, "w") as f:
-        for row in _annotate_split(report["examples"]):
+        for row in candidate_examples:
             f.write(json.dumps(row, sort_keys=True) + "\n")
     event_examples_path = out_dir / "event_examples.jsonl"
     with open(event_examples_path, "w") as f:
-        for row in _annotate_split(event_report["examples"]):
+        for row in workflow_event_examples:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    split_assignments_path = out_dir / "split_assignments.jsonl"
+    with open(split_assignments_path, "w") as f:
+        for row in [
+            *_split_assignment_rows(candidate_examples, unit="candidate"),
+            *_split_assignment_rows(workflow_event_examples, unit="workflow_event"),
+        ]:
             f.write(json.dumps(row, sort_keys=True) + "\n")
     manifest = {
         "version": DATASET_VERSION,
         "created_at": report["generated_at"],
         "window": window,
         "since": report["since"],
-        "source_candidates_path": str(source_candidates_path),
-        "source_workflow_events_path": str(source_workflow_events_path),
-        "source_outcomes_path": str(source_outcomes_path),
-        "examples_path": str(examples_path),
-        "event_examples_path": str(event_examples_path),
+        "source_candidates_path": source_candidates_path.name,
+        "source_workflow_events_path": source_workflow_events_path.name,
+        "source_outcomes_path": source_outcomes_path.name,
+        "examples_path": examples_path.name,
+        "event_examples_path": event_examples_path.name,
+        "split_assignments_path": split_assignments_path.name,
         "summary": report["summary"],
         "event_summary": event_report["summary"],
         "source_summary": {
@@ -345,14 +360,17 @@ def freeze_eval_dataset(
             "n_workflow_events": len(source_workflow_events),
             "n_outcomes": len(source_outcomes),
         },
-        "split": _time_split(report["examples"]),
-        "event_split": _time_split(event_report["examples"]),
+        "split": candidate_split,
+        "event_split": event_split,
         "temporal_protocol": {
-            "method": "time_ordered_70_15_15",
+            "method": candidate_split["method"],
+            "split_seed": SPLIT_SEED,
+            "group_key_priority": ["workflow_event_id", "candidate_id", "decision_id", "example_id"],
+            "stable_hash_role": "tie_break_only; time remains primary",
             "no_future_leakage": True,
-            "memory_rule": "policy replay may use only candidates, outcomes, labels, priors, and workflow events with ts <= example.ts",
-            "candidate_split_bounds": _split_bounds(report["examples"]),
-            "event_split_bounds": _split_bounds(event_report["examples"]),
+            "memory_rule": "policy replay may use only candidates, outcomes, labels, priors, and workflow events with ts < example.ts unless they are the current observation itself",
+            "candidate_split_bounds": _split_bounds(candidate_examples),
+            "event_split_bounds": _split_bounds(workflow_event_examples),
         },
         "privacy": {
             "raw_ocr_exported": False,
@@ -778,8 +796,8 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {"n": len(rows), "by_type": by_type, "by_target": by_target, "by_unit": by_unit}
 
 
-def _annotate_split(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    split = _time_split(rows)
+def _annotate_split(rows: list[dict[str, Any]], *, split: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    split = split or _time_split(rows)
     by_id: dict[str, str] = {}
     for name in ("train", "validation", "test"):
         for example_id in split.get(name) or []:
@@ -790,35 +808,91 @@ def _annotate_split(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         next_row.setdefault("unit", "candidate")
         next_row.setdefault("memory_cutoff_ts", next_row.get("ts"))
         next_row["split"] = by_id.get(str(next_row.get("example_id")), "unassigned")
+        next_row["split_group_key"] = _split_group_key(next_row)
+        next_row["split_seed"] = SPLIT_SEED
         annotated.append(next_row)
     return annotated
 
 
 def _time_split(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    ordered = sorted(rows, key=lambda row: row.get("ts") or "")
-    n = len(ordered)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(_split_group_key(row), []).append(row)
+    ordered_groups = sorted(
+        groups.items(),
+        key=lambda item: (
+            min(str(row.get("ts") or "") for row in item[1]),
+            _stable_hash(item[0]),
+        ),
+    )
+    n = sum(len(group) for _, group in ordered_groups)
     train_end = int(n * 0.7)
     val_end = int(n * 0.85)
+    assigned = {"train": [], "validation": [], "test": []}
+    seen = 0
+    for _, group in ordered_groups:
+        if seen < train_end:
+            split_name = "train"
+        elif seen < val_end:
+            split_name = "validation"
+        else:
+            split_name = "test"
+        assigned[split_name].extend(row.get("example_id") for row in group)
+        seen += len(group)
     return {
-        "method": "time_ordered_70_15_15",
-        "train": [row.get("example_id") for row in ordered[:train_end]],
-        "validation": [row.get("example_id") for row in ordered[train_end:val_end]],
-        "test": [row.get("example_id") for row in ordered[val_end:]],
+        "method": "time_ordered_group_isolated_70_15_15_stable_hash_tiebreak",
+        "split_seed": SPLIT_SEED,
+        "n_total": n,
+        "n_groups": len(groups),
+        "counts": {name: len(ids) for name, ids in assigned.items()},
+        **assigned,
     }
 
 
+def _split_group_key(row: dict[str, Any]) -> str:
+    for key in ("workflow_event_id", "candidate_id", "decision_id", "example_id"):
+        if row.get(key):
+            return f"{key}:{row.get(key)}"
+    return f"row:{id(row)}"
+
+
+def _stable_hash(value: str) -> str:
+    return hashlib.sha256(f"{SPLIT_SEED}:{value}".encode("utf-8")).hexdigest()
+
+
+def _split_assignment_rows(rows: list[dict[str, Any]], *, unit: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        group_key = str(row.get("split_group_key") or _split_group_key(row))
+        out.append({
+            "unit": unit,
+            "example_id": row.get("example_id"),
+            "candidate_id": row.get("candidate_id"),
+            "workflow_event_id": row.get("workflow_event_id"),
+            "ts": row.get("ts"),
+            "split": row.get("split") or "unassigned",
+            "split_group_key": group_key,
+            "split_seed": SPLIT_SEED,
+            "split_hash": _stable_hash(group_key),
+        })
+    out.sort(key=lambda row: (str(row.get("ts") or ""), str(row.get("split_hash") or "")))
+    return out
+
+
 def _split_bounds(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    ordered = sorted(rows, key=lambda row: row.get("ts") or "")
+    ordered = sorted(rows, key=lambda row: (row.get("ts") or "", row.get("split_group_key") or ""))
     if not ordered:
         return {"train": None, "validation": None, "test": None}
-    split = _time_split(ordered)
     by_id = {row.get("example_id"): row for row in ordered}
 
     def _bounds(name: str) -> dict[str, Any] | None:
-        ids = split.get(name) or []
-        subset = [by_id.get(example_id) for example_id in ids if by_id.get(example_id)]
+        subset = [
+            row for row in ordered
+            if row.get("split") == name and by_id.get(row.get("example_id"))
+        ]
         if not subset:
             return None
+        subset.sort(key=lambda row: row.get("ts") or "")
         return {
             "start_ts": subset[0].get("ts"),
             "end_ts": subset[-1].get("ts"),

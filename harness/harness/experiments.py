@@ -4,23 +4,11 @@ import hashlib
 from dataclasses import replace
 from typing import Any
 
+from .policy_contract import HARD_NO_PING_REASONS
 from .schemas import CandidateEvent, ProactiveDecision
 
 
 EXPERIMENT_VERSION = "experiment_v1"
-
-# Never convert these no-ping decisions into random exploration pings. They
-# represent user state, privacy, recency, or direct negative feedback rather
-# than weak policy uncertainty.
-HARD_NO_PING_REASONS = {
-    "in_call",
-    "snoozed",
-    "quiet_hours",
-    "cooldown",
-    "sensitive_scene",
-    "stale_context",
-    "recent_negative_feedback",
-}
 
 
 def apply(
@@ -122,7 +110,7 @@ def apply(
 
 def _explore_eligible(decision: ProactiveDecision, cfg: dict[str, Any]) -> bool:
     reasons = set(decision.reason_codes or [])
-    if bool(cfg.get("respect_hard_gates", True)) and reasons & HARD_NO_PING_REASONS:
+    if reasons & HARD_NO_PING_REASONS:
         return False
     configured = cfg.get("explore_eligible_reasons", ["no_clear_help"])
     allowed = {str(reason) for reason in configured if str(reason)}

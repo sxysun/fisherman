@@ -61,13 +61,13 @@ def compute(window: str = "24h") -> dict[str, Any]:
     }
     ping_decision_ids.discard(None)
     pings_with_outcome = sum(1 for did in ping_decision_ids if did in outcomes_by_decision)
-    claimed_ping_ids = {
+    displayed_ping_ids = {
         row.get("decision_id")
         for row in deliveries
-        if row.get("delivery_action") == "claimed" and row.get("decision_id")
+        if row.get("delivery_action") in {"claimed", "displayed_ack"} and row.get("decision_id")
     }
-    claimed_ping_ids &= ping_decision_ids
-    claimed_with_outcome = sum(1 for did in claimed_ping_ids if did in outcomes_by_decision)
+    displayed_ping_ids &= ping_decision_ids
+    claimed_with_outcome = sum(1 for did in displayed_ping_ids if did in outcomes_by_decision)
     pings_with_trace = sum(1 for did in ping_decision_ids if did in traced_decision_ids)
 
     candidate_labels = [
@@ -77,6 +77,11 @@ def compute(window: str = "24h") -> dict[str, Any]:
     event_labels = [
         label for label in labels
         if label.get("label_scope") == "workflow_event" or label.get("workflow_event_id")
+    ]
+    window_event_ids = {decision.get("workflow_event_id") for decision in decisions if decision.get("workflow_event_id")}
+    joined_event_labels_for_window = [
+        label for label in event_labels
+        if label.get("workflow_event_id") in window_event_ids
     ]
 
     joined_labels: list[tuple[dict, dict | None]] = []
@@ -89,9 +94,10 @@ def compute(window: str = "24h") -> dict[str, Any]:
         if decision is None and cid:
             decision = decisions_by_candidate.get(cid)
         joined_labels.append((label, decision))
+    joined_candidate_labels = [label for label, decision in joined_labels if decision is not None and decision in decisions]
 
     label_quality = _label_quality(joined_labels)
-    event_label_quality = _event_label_quality(event_labels, all_decisions)
+    event_label_quality = _event_label_quality(joined_event_labels_for_window, all_decisions)
     weak_labels = implicit_mod.weak_labels_from_outcomes(outcomes, decisions_by_id)
     implicit_summary = implicit_mod.summarize(weak_labels)
     reward_summary = reward_mod.aggregate_rewards(outcomes)
@@ -118,15 +124,15 @@ def compute(window: str = "24h") -> dict[str, Any]:
         "n_traces": n_traces,
         "n_pings": n_pings,
         "n_no_pings": n_no_pings,
-        "n_claimed_pings": len(claimed_ping_ids),
+        "n_claimed_pings": len(displayed_ping_ids),
         "ping_rate": _ratio(n_pings, len(decisions)),
-        "explicit_label_coverage": _ratio(len(candidate_labels), len(decisions)),
-        "event_label_coverage": _ratio(len(event_labels), len(decisions)),
+        "explicit_label_coverage": _ratio(len(joined_candidate_labels), len(decisions)),
+        "event_label_coverage": _ratio(len(joined_event_labels_for_window), len(decisions)),
         "outcomes": {
             "n": len(outcomes),
             "capture_rate_for_pings": _ratio(pings_with_outcome, n_pings),
-            "capture_rate_for_claimed_pings": _ratio(claimed_with_outcome, len(claimed_ping_ids)),
-            "claimed_pings": len(claimed_ping_ids),
+            "capture_rate_for_claimed_pings": _ratio(claimed_with_outcome, len(displayed_ping_ids)),
+            "claimed_pings": len(displayed_ping_ids),
             "user_actions": dict(outcome_counts),
             "intent_signals": dict(intent_signal_counts),
             "total_reward": total_reward,
@@ -136,13 +142,13 @@ def compute(window: str = "24h") -> dict[str, Any]:
         "trace_funnel": {
             "pings_with_trace": pings_with_trace,
             "trace_completeness_for_pings": _ratio(pings_with_trace, n_pings),
-            "claimed_pings": len(claimed_ping_ids),
-            "claimed_capture_rate": _ratio(claimed_with_outcome, len(claimed_ping_ids)),
+            "claimed_pings": len(displayed_ping_ids),
+            "claimed_capture_rate": _ratio(claimed_with_outcome, len(displayed_ping_ids)),
         },
         "labels": {
             "n": len(candidate_labels),
-            "event_n": len(event_labels),
-            "total_n": len(labels),
+            "event_n": len(joined_event_labels_for_window),
+            "total_n": len(joined_candidate_labels) + len(joined_event_labels_for_window),
             "counts": dict(label_counts),
             **label_quality,
             "event": event_label_quality,

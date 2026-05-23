@@ -11,6 +11,10 @@ from .store import (
     append_jsonl,
     claim_pending,
     complete_pending,
+    decision_exists,
+    delivery_actions_for_decision,
+    outcome_for_decision,
+    pending_payload,
     list_pending,
     patch_trace,
     read_policy_state,
@@ -34,7 +38,11 @@ def _apply_snooze_from_outcome(row: dict, duration: str = "30m") -> None:
 
 
 async def get_pending(request: web.Request) -> web.Response:
-    """Return the oldest unleased pending push. Outcome completion removes it."""
+    """Return the oldest unleased pending push. Outcome completion removes it.
+
+    Polling is a dequeue/lease, not proof that the native UI rendered the ping.
+    The capsule sends /delivery-ack after it has actually presented the surface.
+    """
     payload = claim_pending()
     if payload is None:
         return web.json_response(None)
@@ -43,7 +51,7 @@ async def get_pending(request: web.Request) -> web.Response:
         "decision_id": payload.get("decision_id"),
         "candidate_id": payload.get("candidate_id"),
         "channel": "notch_pill",
-        "delivery_action": "claimed",
+        "delivery_action": "dequeued",
         "pending_attempts": payload.get("pending_attempts", 0),
         "pending_created_at": payload.get("pending_created_at"),
         "pending_claimed_at": payload.get("pending_claimed_at"),
@@ -54,10 +62,39 @@ async def get_pending(request: web.Request) -> web.Response:
         patch_trace(
             str(payload.get("decision_id")),
             {},
-            lifecycle_stage="claimed",
+            lifecycle_stage="dequeued",
             lifecycle_extra={"pending_attempts": payload.get("pending_attempts", 0)},
         )
     return web.json_response(payload)
+
+
+async def post_delivery_ack(request: web.Request) -> web.Response:
+    """Record that the native capsule actually displayed a pending ping."""
+    params = dict(request.query)
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                params.update({k: str(v) for k, v in body.items()})
+        except Exception:
+            pass
+    decision_id = params.get("id") or params.get("decision_id")
+    if not decision_id:
+        return web.json_response({"error": "missing decision_id"}, status=400)
+    existing = set(delivery_actions_for_decision(decision_id))
+    if "displayed_ack" in existing or "claimed" in existing:
+        return web.json_response({"ok": True, "duplicate": True})
+    payload = pending_payload(decision_id)
+    if payload is None:
+        return web.json_response({"error": "not_pending", "decision_id": decision_id}, status=409)
+    _append_display_ack(
+        decision_id=decision_id,
+        candidate_id=payload.get("candidate_id"),
+        pending_attempts=payload.get("pending_attempts", 0),
+        pending_created_at=payload.get("pending_created_at"),
+        pending_claimed_at=payload.get("pending_claimed_at"),
+    )
+    return web.json_response({"ok": True})
 
 
 async def post_outcome(request: web.Request) -> web.Response:
@@ -85,6 +122,12 @@ async def post_outcome(request: web.Request) -> web.Response:
     decision_id = params.get("id") or params.get("decision_id")
     if not decision_id:
         return web.json_response({"error": "missing decision_id"}, status=400)
+    existing_outcome = outcome_for_decision(decision_id)
+    if existing_outcome is not None:
+        return web.json_response({"ok": True, "duplicate": True, "outcome": existing_outcome})
+    validation = _validate_outcome_target(decision_id)
+    if validation is not None:
+        return validation
     row: dict = {
         "decision_id": decision_id,
         "user_action": params.get("user_action", "clicked"),
@@ -108,6 +151,66 @@ async def post_outcome(request: web.Request) -> web.Response:
     attach_outcome_to_trace(decision_id, row, reward)
     complete_pending(decision_id)
     return web.json_response({"ok": True})
+
+
+def _validate_outcome_target(decision_id: str) -> web.Response | None:
+    if not decision_exists(decision_id):
+        return web.json_response({"error": "unknown_decision", "decision_id": decision_id}, status=404)
+    actions = set(delivery_actions_for_decision(decision_id))
+    terminal_expiry = {
+        "displayed_timeout_no_outcome",
+        "never_displayed_expired",
+        "dequeued_expired",
+        "expired_unclaimed",
+    }
+    if actions & terminal_expiry:
+        return web.json_response({
+            "error": "terminal_delivery_expired",
+            "decision_id": decision_id,
+            "terminal_actions": sorted(actions & terminal_expiry),
+        }, status=409)
+    if actions & {"displayed_ack", "claimed"}:
+        return None
+    if pending_payload(decision_id) is not None and "dequeued" in actions:
+        return web.json_response({"error": "display_ack_required", "decision_id": decision_id}, status=409)
+    if pending_payload(decision_id) is not None:
+        return web.json_response({"error": "not_dequeued", "decision_id": decision_id}, status=409)
+    if actions & {"displayed_ack", "claimed"}:
+        return None
+    return web.json_response({"error": "not_in_flight", "decision_id": decision_id}, status=409)
+
+
+def _append_display_ack(
+    *,
+    decision_id: str,
+    candidate_id: object = None,
+    pending_attempts: object = 0,
+    pending_created_at: object = None,
+    pending_claimed_at: object = None,
+) -> None:
+    action = "displayed_ack"
+    delivery_row = {
+        "delivery_id": f"del_{decision_id}_{action}_{pending_attempts or 0}",
+        "decision_id": decision_id,
+        "candidate_id": candidate_id,
+        "channel": "notch_pill",
+        "delivery_action": action,
+        "ack_source": "client_ack",
+        "pending_attempts": pending_attempts or 0,
+        "pending_created_at": pending_created_at,
+        "pending_claimed_at": pending_claimed_at,
+        "ts": _now_iso(),
+    }
+    append_jsonl("deliveries.jsonl", delivery_row)
+    patch_trace(
+        decision_id,
+        {},
+        lifecycle_stage=action,
+        lifecycle_extra={
+            "pending_attempts": pending_attempts or 0,
+            "ack_source": "client_ack",
+        },
+    )
 
 
 def _summarize_interactions(events: list) -> dict:
@@ -515,6 +618,7 @@ def _compute_snooze_until(duration: str) -> str:
 def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app = web.Application()
     app.router.add_get("/pending", get_pending)
+    app.router.add_post("/delivery-ack", post_delivery_ack)
     app.router.add_get("/outcome", post_outcome)  # GET form for terminal-notifier
     app.router.add_post("/outcome", post_outcome)
     app.router.add_get("/history", get_history)

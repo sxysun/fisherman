@@ -762,6 +762,7 @@ def freeze_eval(since: str, limit: int, out: Optional[str]) -> None:
 @click.option("--policy", default="rule_v0", help="Policy module to replay, e.g. rule_v0.")
 @click.option("--overrides", default=None, help="JSON dict merged into gate config.")
 @click.option("--bootstrap", default=400, help="Bootstrap samples for confidence intervals.")
+@click.option("--require-live-model", is_flag=True, default=False, help="Fail unless llm_icl_v0 uses eval_mode=live_model.")
 @click.option("--out", default=None, help="Write full JSON report to this path.")
 @click.option("--json", "as_json", is_flag=True, default=False, help="Emit full JSON.")
 def eval_manifest(
@@ -769,6 +770,7 @@ def eval_manifest(
     policy: str,
     overrides: Optional[str],
     bootstrap: int,
+    require_live_model: bool,
     out: Optional[str],
     as_json: bool,
 ) -> None:
@@ -781,6 +783,7 @@ def eval_manifest(
         policy=policy,
         config_overrides=config_overrides,
         bootstrap_samples=max(0, int(bootstrap)),
+        require_live_model=require_live_model,
     )
     serialized = json.dumps(report, indent=2)
     if out:
@@ -796,6 +799,11 @@ def eval_manifest(
     click.echo(
         f"eval_manifest: policy={policy} source={report['source']['n_candidates']} candidates "
         f"manifest={Path(manifest).name}"
+    )
+    exec_info = report.get("policy_execution") or {}
+    click.echo(
+        f"measurement: {exec_info.get('measurement_kind') or exec_info.get('eval_mode')} "
+        f"attestation={exec_info.get('attestation') or 'n/a'}"
     )
     click.echo(
         "candidate: "

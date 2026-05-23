@@ -57,6 +57,15 @@ final class HarnessClient {
         }.resume()
     }
 
+    func postDeliveryAck(decisionID: String) {
+        let url = baseURL.appendingPathComponent("delivery-ack")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": decisionID])
+        session.dataTask(with: req).resume()
+    }
+
     func postOutcome(
         decisionID: String,
         action: String,

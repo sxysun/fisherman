@@ -20,3 +20,9 @@ website/dist/
 .DS_Store
 .gstack/
 .claude/
+
+# Smithers runtime state
+.smithers/
+smithers.db
+smithers.db-shm
+smithers.db-wal
