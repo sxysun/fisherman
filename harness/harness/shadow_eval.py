@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import math
-import os
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
 from eval import replay as replay_mod
+from . import store as store_mod
 from . import sql_store
 
 
@@ -32,13 +32,15 @@ def compare(
     holdout_fraction: float = 0.2,
 ) -> dict[str, Any]:
     variants = variants or DEFAULT_VARIANTS
-    dataset_path = Path(dataset or os.path.expanduser("~/.harness/candidates.jsonl"))
-    outcomes_file = Path(outcomes_path or os.path.expanduser("~/.harness/outcomes.jsonl"))
-    labels_file = Path(labels_path or os.path.expanduser("~/.harness/retro_labels.jsonl"))
+    dataset_path = Path(dataset) if dataset is not None else store_mod.path("candidates.jsonl")
+    outcomes_file = Path(outcomes_path) if outcomes_path is not None else store_mod.path("outcomes.jsonl")
+    labels_file = Path(labels_path) if labels_path is not None else store_mod.path("retro_labels.jsonl")
 
     since_iso = replay_mod._parse_since(since)
     if dataset is None and _table_has_rows("candidates"):
         rows = sql_store.payload_rows("candidates", since_iso=since_iso)
+    elif dataset is None and not dataset_path.exists():
+        rows = []
     else:
         rows = replay_mod._load_dataset(dataset_path, since_iso)
     rows = sorted(rows, key=_row_sort_key)
