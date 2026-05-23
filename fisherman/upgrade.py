@@ -34,12 +34,14 @@ kept; older ones are pruned automatically.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -52,6 +54,7 @@ DEFAULT_INSTALL_DIR = Path.home() / ".fisherman"
 BACKUP_DIRNAME = ".backup"
 KEEP_BACKUPS = 3
 DEFAULT_CONTROL_PORT = 7892
+DEFAULT_RELEASE_REPO = "sxysun/fisherman"
 PYTHON_PACKAGES = ("fisherman", "mirror", "relay")
 
 
@@ -74,6 +77,7 @@ class InstalledVersion:
     source_kind:  Optional[str]   # "git" | "local" | None
     has_venv:     bool
     has_app:      bool            # /Applications/Fisherman.app exists
+    version:      Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -103,6 +107,7 @@ def detect_installed(install_dir: Path = DEFAULT_INSTALL_DIR) -> InstalledVersio
             source_kind=stamp.get("source"),
             has_venv=(install_dir / ".venv" / "bin" / "fisherman").exists(),
             has_app=Path("/Applications/Fisherman.app").exists(),
+            version=stamp.get("version"),
         )
 
     commit = branch = subject = None
@@ -117,6 +122,7 @@ def detect_installed(install_dir: Path = DEFAULT_INSTALL_DIR) -> InstalledVersio
         installed_at=None, source_kind=None,
         has_venv=(install_dir / ".venv" / "bin" / "fisherman").exists(),
         has_app=Path("/Applications/Fisherman.app").exists(),
+        version=None,
     )
 
 
@@ -590,6 +596,119 @@ def launch_app(retries: int = 3) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# GitHub Release DMG upgrades
+# ---------------------------------------------------------------------------
+
+def latest_dmg_release(repo: str | None = None) -> dict:
+    """Return metadata for the latest GitHub Release DMG asset."""
+    repo = repo or os.environ.get("FISHERMAN_RELEASE_REPO") or DEFAULT_RELEASE_REPO
+    api_url = os.environ.get(
+        "FISHERMAN_RELEASE_API_URL",
+        f"https://api.github.com/repos/{repo}/releases/latest",
+    )
+    release = _fetch_json(api_url)
+    assets = release.get("assets") or []
+    dmg = next(
+        (
+            a for a in assets
+            if str(a.get("name") or "").startswith("Fisherman-")
+            and str(a.get("name") or "").endswith(".dmg")
+        ),
+        None,
+    )
+    if not dmg:
+        raise RuntimeError("latest GitHub Release has no Fisherman-*.dmg asset")
+
+    sha = next(
+        (
+            a for a in assets
+            if str(a.get("name") or "") == f"{dmg.get('name')}.sha256"
+            or str(a.get("name") or "").endswith(".dmg.sha256")
+        ),
+        None,
+    )
+    if not sha:
+        raise RuntimeError("latest GitHub Release has no DMG .sha256 asset")
+
+    tag = str(release.get("tag_name") or "")
+    return {
+        "tag_name": tag,
+        "version": tag[1:] if tag.startswith("v") else tag,
+        "name": release.get("name") or tag,
+        "published_at": release.get("published_at"),
+        "html_url": release.get("html_url"),
+        "dmg_name": dmg.get("name"),
+        "dmg_url": dmg.get("browser_download_url"),
+        "sha256_name": sha.get("name"),
+        "sha256_url": sha.get("browser_download_url"),
+    }
+
+
+def install_dmg_release(install_dir: Path, release: dict | None = None) -> dict:
+    """Download the latest release DMG, install its app, and run its bootstrap."""
+    release = release or latest_dmg_release()
+    dmg_url = release.get("dmg_url")
+    sha_url = release.get("sha256_url")
+    if not dmg_url or not sha_url:
+        raise RuntimeError("release metadata is missing DMG or checksum URL")
+
+    backup = make_backup(install_dir)
+    mount_point: Path | None = None
+    with tempfile.TemporaryDirectory(prefix="fisherman-release-") as tmp:
+        tmp_path = Path(tmp)
+        dmg_path = tmp_path / str(release.get("dmg_name") or "Fisherman.dmg")
+        sha_path = tmp_path / str(release.get("sha256_name") or "Fisherman.dmg.sha256")
+        mount_point = tmp_path / "mount"
+        mount_point.mkdir()
+
+        _download_file(dmg_url, dmg_path)
+        _download_file(sha_url, sha_path)
+        _verify_sha256(dmg_path, sha_path)
+
+        try:
+            subprocess.run(
+                [
+                    "hdiutil", "attach", "-readonly", "-nobrowse",
+                    "-mountpoint", str(mount_point), str(dmg_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            app = mount_point / "Fisherman.app"
+            resources = app / "Contents" / "Resources"
+            bootstrap = resources / "bootstrap-user-install.sh"
+            source = resources / "fisherman-source"
+            release_json = resources / "fisherman-release.json"
+            if not app.is_dir() or not bootstrap.is_file() or not source.is_dir():
+                raise RuntimeError("DMG is missing Fisherman.app bootstrap resources")
+
+            stop_daemon()
+            subprocess.run(
+                [
+                    "/bin/bash", str(bootstrap), str(source),
+                    str(install_dir), str(release_json),
+                ],
+                check=True,
+            )
+            install_app(app)
+        except Exception:
+            restore_backup(install_dir, backup)
+            raise
+        finally:
+            if mount_point is not None:
+                subprocess.run(
+                    ["hdiutil", "detach", str(mount_point)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+
+    launch_app()
+    return {"release": release, "backup": str(backup)}
+
+
+# ---------------------------------------------------------------------------
 # Diagnostics
 # ---------------------------------------------------------------------------
 
@@ -830,6 +949,36 @@ def wait_for_daemon(port: int = DEFAULT_CONTROL_PORT,
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+def _request(url: str) -> urllib.request.Request:
+    headers = {
+        "Accept": "application/vnd.github+json, application/octet-stream;q=0.9, */*;q=0.8",
+        "User-Agent": "fisherman-updater",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("FISHERMAN_GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return urllib.request.Request(url, headers=headers)
+
+
+def _fetch_json(url: str) -> dict:
+    with urllib.request.urlopen(_request(url), timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _download_file(url: str, dst: Path) -> None:
+    with urllib.request.urlopen(_request(url), timeout=60) as resp:
+        with dst.open("wb") as f:
+            shutil.copyfileobj(resp, f)
+
+
+def _verify_sha256(path: Path, sha_file: Path) -> None:
+    expected = sha_file.read_text().strip().split()[0].lower()
+    actual = hashlib.sha256(path.read_bytes()).hexdigest().lower()
+    if actual != expected:
+        raise RuntimeError(
+            f"sha256 mismatch for {path.name}: expected {expected}, got {actual}"
+        )
 
 def _git(args: str, cwd: Path, check: bool = False) -> Optional[str]:
     try:

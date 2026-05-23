@@ -16,6 +16,7 @@ BUNDLE_VERSION="${BUNDLE_VERSION:-${GITHUB_RUN_NUMBER:-$VERSION}}"
 DMG_PATH="$BUILD_DIR/Fisherman-$VERSION.dmg"
 ZIP_PATH="$BUILD_DIR/Fisherman-$VERSION.app.zip"
 RELEASE_JSON="$APP_BUNDLE/Contents/Resources/fisherman-release.json"
+REPO_URL="${RELEASE_REPO_URL:-https://github.com/sxysun/fisherman.git}"
 
 log() {
     printf '[macos-dmg] %s\n' "$*"
@@ -56,37 +57,82 @@ codesign_path() {
     codesign "${args[@]}" "$path"
 }
 
-notarize_file() {
+have_notary_credentials() {
+    [ "${SKIP_NOTARIZE:-0}" != "1" ] \
+        && [ -n "${APPLE_ID:-}" ] \
+        && [ -n "${APPLE_TEAM_ID:-}" ] \
+        && [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]
+}
+
+submit_for_notarization() {
     local path="$1"
     if [ "${SKIP_NOTARIZE:-0}" = "1" ]; then
         log "notarization skipped for $path"
         return 0
     fi
-    if [ -z "${APPLE_ID:-}" ] || [ -z "${APPLE_TEAM_ID:-}" ] || [ -z "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+    if ! have_notary_credentials; then
         log "notarization credentials not set; skipping $path"
         return 0
     fi
 
-    log "submitting $path for notarization"
-    xcrun notarytool submit "$path" \
+    log "submitting $path for notarization with $APPLE_ID"
+    if xcrun notarytool submit "$path" \
         --apple-id "$APPLE_ID" \
         --team-id "$APPLE_TEAM_ID" \
         --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+        --wait; then
+        return 0
+    fi
+
+    local fallback_id="${APPLE_ID_FALLBACK:-}"
+    local fallback_password="${APPLE_APP_SPECIFIC_PASSWORD_FALLBACK:-${APPLE_APP_SPECIFIC_PASSWORD:-}}"
+    if [ -z "$fallback_id" ] || [ "$fallback_id" = "$APPLE_ID" ] || [ -z "$fallback_password" ]; then
+        return 1
+    fi
+
+    log "primary notarization account failed; retrying with $fallback_id"
+    xcrun notarytool submit "$path" \
+        --apple-id "$fallback_id" \
+        --team-id "$APPLE_TEAM_ID" \
+        --password "$fallback_password" \
         --wait
-    xcrun stapler staple "$path"
+}
+
+notarize_and_staple() {
+    local path="$1"
+    submit_for_notarization "$path"
+    if have_notary_credentials; then
+        xcrun stapler staple "$path"
+    fi
+}
+
+notarize_zip_for_app() {
+    local zip_path="$1"
+    local app_path="$2"
+    submit_for_notarization "$zip_path"
+    if have_notary_credentials; then
+        xcrun stapler staple "$app_path"
+        spctl --assess --type execute --verbose=4 "$app_path"
+    fi
 }
 
 write_release_json() {
-    local commit branch subject built_at
+    local full_commit commit current_branch branch subject built_at
+    full_commit="$(git_value 'rev-parse HEAD')"
     commit="$(git_value 'rev-parse --short HEAD')"
     if [ -n "$commit" ] && [ -n "$(git_value 'status --porcelain')" ]; then
         commit="${commit}-dirty"
+        full_commit="${full_commit}-dirty"
     fi
-    branch="$(git_value 'rev-parse --abbrev-ref HEAD')"
+    current_branch="$(git_value 'rev-parse --abbrev-ref HEAD')"
+    branch="${RELEASE_BRANCH:-$current_branch}"
+    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+        branch="main"
+    fi
     subject="$(git_value 'log -1 --pretty=%s')"
     built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
-    /usr/bin/python3 - "$RELEASE_JSON" "$VERSION" "$BUNDLE_VERSION" "$commit" "$branch" "$subject" "$built_at" <<'PY'
+    /usr/bin/python3 - "$RELEASE_JSON" "$VERSION" "$BUNDLE_VERSION" "$commit" "$full_commit" "$branch" "$subject" "$built_at" "$REPO_URL" <<'PY'
 import json
 import pathlib
 import sys
@@ -97,10 +143,12 @@ path.write_text(json.dumps({
     "version": sys.argv[2],
     "bundle_version": sys.argv[3],
     "commit": sys.argv[4],
-    "branch": sys.argv[5],
-    "subject": sys.argv[6],
-    "built_at": sys.argv[7],
+    "full_commit": sys.argv[5],
+    "branch": sys.argv[6],
+    "subject": sys.argv[7],
+    "built_at": sys.argv[8],
     "source": "dmg",
+    "repo_url": sys.argv[9],
 }, indent=2) + "\n")
 PY
 }
@@ -211,14 +259,11 @@ main() {
     if [ "$identity" != "-" ]; then
         log "zipping app for notarization"
         /usr/bin/ditto -c -k --keepParent "$APP_BUNDLE" "$ZIP_PATH"
-        notarize_file "$ZIP_PATH"
-        if [ "${SKIP_NOTARIZE:-0}" != "1" ]; then
-            xcrun stapler staple "$APP_BUNDLE" || true
-        fi
+        notarize_zip_for_app "$ZIP_PATH" "$APP_BUNDLE"
     fi
 
     create_dmg "$identity"
-    notarize_file "$DMG_PATH"
+    notarize_and_staple "$DMG_PATH"
 
     /usr/bin/shasum -a 256 "$DMG_PATH" | tee "$DMG_PATH.sha256"
 

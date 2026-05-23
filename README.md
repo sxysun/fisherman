@@ -29,23 +29,69 @@ Friend status is designed to work across all three modes through an
 end-to-end encrypted relay. The CLI and menubar use the relay friend
 store by default.
 
-## Install
+## Quick Start
 
-For the easiest macOS install, download the latest `Fisherman-*.dmg` from
-GitHub Releases, open it, drag `Fisherman.app` to Applications, and launch it.
-The app prepares `~/.fisherman` on first launch and starts in Local Only mode.
+Fisherman currently supports macOS 13+.
 
-The source installer remains available for development and shell-first installs:
+### Install the app
+
+For most users, install Fisherman from the signed macOS DMG:
+
+1. Open the [latest GitHub Release](https://github.com/sxysun/fisherman/releases/latest).
+2. Download `Fisherman-<version>.dmg`.
+3. Open the DMG.
+4. Drag `Fisherman.app` to Applications.
+5. Launch `Fisherman.app`.
+
+On first launch, Fisherman prepares `~/.fisherman`, installs its Python
+environment if needed, creates a private local identity, and starts in
+**Local Only** mode. In this mode your raw context stays on your laptop.
+
+### Finish first launch
+
+Fisherman runs from the menu bar. After launching it:
+
+1. Complete the welcome flow.
+2. Grant Screen Recording permission when macOS asks.
+3. If macOS sends you to System Settings, enable Fisherman under
+   `Privacy & Security -> Screen Recording`, then quit and reopen the app.
+4. Open the menu bar icon to view status, pause capture, configure backend
+   mode, add friends, or manage Agent Access.
+
+You can also check the local daemon from a terminal:
+
+```bash
+fisherman status --text
+fisherman doctor
+```
+
+If your shell cannot find `fisherman`, use `~/.local/bin/fisherman` or add
+`~/.local/bin` to your `PATH`.
+
+### Install from source
+
+Use the source installer for development, local hacking, or if a release DMG is
+not available yet:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sxysun/fisherman/main/install.sh | bash
+open /Applications/Fisherman.app
 ```
 
-This installs the Python daemon, the native macOS capture path, and the
-macOS menu bar app. New installs start in **Local Only** mode with a
-persistent identity key. Grant Screen Recording permission when macOS
-asks, then use Settings to choose Fisherman Cloud or Self-hosted if you
-want an always-on backend.
+The source installer builds the menu bar app locally, installs it to
+`/Applications/Fisherman.app`, creates `~/.fisherman/.env` if missing, and
+starts with the same Local Only defaults as the DMG.
+
+### Upgrade
+
+Use the app's Updates tab, or run:
+
+```bash
+fisherman upgrade
+```
+
+Upgrades preserve `~/.fisherman/.env`, identity keys, captures, friends, and
+agent access tokens.
 
 ## Backend Modes
 
@@ -336,6 +382,7 @@ cat docs/tee-deployment.md
 - [Context migration](docs/context-migration.md)
 - [Cloud operations](docs/cloud-operations.md)
 - [Google Drive backup](docs/drive-setup.md)
+- [macOS DMG releases](docs/macos-dmg-release.md)
 - [Website](website/README.md)
 
 ## Requirements

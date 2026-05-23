@@ -4,6 +4,7 @@ set -euo pipefail
 SOURCE_DIR="${1:?source dir required}"
 INSTALL_DIR="${2:-$HOME/.fisherman}"
 RELEASE_JSON="${3:-}"
+DEFAULT_REPO_URL="https://github.com/sxysun/fisherman.git"
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&2
@@ -14,6 +15,15 @@ json_value() {
     local file="$2"
     if [ -f "$file" ]; then
         /usr/bin/plutil -extract "$key" raw -o - "$file" 2>/dev/null || true
+    fi
+}
+
+normalize_branch() {
+    local branch="$1"
+    if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
+        printf '%s\n' "main"
+    else
+        printf '%s\n' "$branch"
     fi
 }
 
@@ -126,14 +136,57 @@ if release_path and release_path.is_file():
 
 stamp = {
     "commit": release.get("commit"),
+    "full_commit": release.get("full_commit"),
     "branch": release.get("branch"),
     "subject": release.get("subject"),
     "version": release.get("version"),
     "source": "dmg",
     "installed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
 }
+
 (install_dir / ".fisherman-version").write_text(json.dumps(stamp, indent=2) + "\n")
 PY
+}
+
+ensure_git_metadata() {
+    local full_commit="$1"
+    local branch="$2"
+    local repo_url="$3"
+
+    if [ -z "$full_commit" ] || [[ "$full_commit" == *-dirty ]]; then
+        log "release commit unavailable or dirty; skipping git metadata setup"
+        return 0
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+        log "git not found; skipping git metadata setup"
+        return 0
+    fi
+
+    branch="$(normalize_branch "$branch")"
+    repo_url="${repo_url:-$DEFAULT_REPO_URL}"
+
+    (
+        cd "$INSTALL_DIR"
+        if [ ! -d .git ]; then
+            git init -q
+        fi
+        if git remote get-url origin >/dev/null 2>&1; then
+            git remote set-url origin "$repo_url"
+        else
+            git remote add origin "$repo_url"
+        fi
+
+        git fetch --quiet --depth 1 origin "$full_commit" \
+            || git fetch --quiet --depth 1 origin "$branch" \
+            || git fetch --quiet --depth 1 origin main
+
+        if git cat-file -e "$full_commit^{commit}" 2>/dev/null; then
+            git checkout -q -f -B "$branch" "$full_commit"
+            git reset -q --hard "$full_commit"
+        else
+            log "fetched origin but could not find $full_commit; embedded source remains usable"
+        fi
+    ) || log "git metadata setup failed; embedded source remains usable"
 }
 
 sync_source() {
@@ -211,9 +264,14 @@ main() {
 
     log "bootstrap starting from $SOURCE_DIR"
 
-    local release_commit release_version current_commit current_source current_version
+    local release_commit release_full_commit release_branch release_version release_repo_url current_commit current_source current_version
     release_commit="$(json_value commit "$RELEASE_JSON")"
+    release_full_commit="$(json_value full_commit "$RELEASE_JSON")"
+    release_branch="$(json_value branch "$RELEASE_JSON")"
     release_version="$(json_value version "$RELEASE_JSON")"
+    release_repo_url="$(json_value repo_url "$RELEASE_JSON")"
+    release_full_commit="${release_full_commit:-$release_commit}"
+    release_repo_url="${FISHERMAN_REPO_URL:-${release_repo_url:-$DEFAULT_REPO_URL}}"
     current_commit="$(json_value commit "$INSTALL_DIR/.fisherman-version")"
     current_source="$(json_value source "$INSTALL_DIR/.fisherman-version")"
     current_version="$(json_value version "$INSTALL_DIR/.fisherman-version")"
@@ -222,12 +280,14 @@ main() {
         && [ "$current_source" = "dmg" ] \
         && { [ -n "$release_commit" ] && [ "$current_commit" = "$release_commit" ] || [ -n "$release_version" ] && [ "$current_version" = "$release_version" ]; }; then
         write_default_env
+        ensure_git_metadata "$release_full_commit" "$release_branch" "$release_repo_url"
         ensure_cli_link
         log "bundled release already installed"
         exit 0
     fi
 
     sync_source
+    ensure_git_metadata "$release_full_commit" "$release_branch" "$release_repo_url"
     write_default_env
 
     local uv

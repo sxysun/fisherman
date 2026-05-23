@@ -31,8 +31,10 @@ jobs:
       P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERT_PASSWORD }}
       KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_ID_FALLBACK: ${{ secrets.APPLE_ID_FALLBACK || vars.APPLE_ID_FALLBACK }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || vars.APPLE_TEAM_ID || 'DC9JH5DRMY' }}
       APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_APP_SPECIFIC_PASSWORD_FALLBACK: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD_FALLBACK }}
       APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
     steps:
       - uses: actions/checkout@v6
@@ -68,6 +70,7 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security default-keychain -s "$KEYCHAIN"
+          echo "FISHERMAN_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
 
           if ! printf '%s' "$P12_BASE64" | base64 --decode > "$CERT" 2>/dev/null; then
             printf '%s' "$P12_BASE64" | base64 -D > "$CERT"
@@ -80,6 +83,8 @@ jobs:
         env:
           SKIP_NOTARIZE: ${{ steps.mode.outputs.unsigned == 'true' && '1' || '0' }}
           CODE_SIGN_IDENTITY: ${{ steps.mode.outputs.unsigned == 'true' && '-' || secrets.APPLE_CODESIGN_IDENTITY }}
+          RELEASE_BRANCH: main
+          RELEASE_REPO_URL: https://github.com/sxysun/fisherman.git
         run: |
           TAG="${GITHUB_REF_NAME:-}"
           if [[ "$TAG" == v* ]]; then
@@ -87,6 +92,12 @@ jobs:
           else
             ./scripts/build-macos-dmg.sh
           fi
+
+      - name: Smoke test DMG
+        env:
+          EXPECT_SIGNED: ${{ steps.mode.outputs.unsigned == 'true' && '0' || '1' }}
+        run: |
+          ./scripts/smoke-macos-dmg.sh "$(ls dist/macos/Fisherman-*.dmg | head -1)"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -115,3 +126,8 @@ jobs:
               --title "Fisherman $TAG" \
               --notes-file "$NOTES"
           fi
+
+      - name: Clean up signing keychain
+        if: always() && env.FISHERMAN_SIGNING_KEYCHAIN != ''
+        run: |
+          security delete-keychain "$FISHERMAN_SIGNING_KEYCHAIN" || true

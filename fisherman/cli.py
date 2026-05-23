@@ -957,6 +957,7 @@ def _version_payload() -> dict:
             "commit": inst.git_commit,
             "branch": inst.git_branch,
             "subject": inst.git_subject,
+            "version": inst.version,
             "installed_at": inst.installed_at,
             "source_kind": inst.source_kind,
             "has_venv": inst.has_venv,
@@ -1149,24 +1150,45 @@ def update_status(as_json: bool, timeout: float):
     installed = _up.detect_installed()
     latest = None
     update_error = None
-    try:
-        src = _up.fetch_source_from_git(installed.install_dir)
-        latest = _latest_code_source_from_git(installed.install_dir, src.git_branch) or {
-            "commit": src.git_commit,
-            "branch": src.git_branch,
-            "subject": src.git_subject,
-            "source_kind": "git",
-        }
-    except Exception as e:
-        update_error = str(e)
+    if installed.source_kind == "dmg":
+        try:
+            rel = _up.latest_dmg_release()
+            latest = {
+                "commit": rel.get("tag_name") or rel.get("version"),
+                "branch": "GitHub Release",
+                "subject": rel.get("name") or "",
+                "source_kind": "dmg",
+                "version": rel.get("version"),
+                "html_url": rel.get("html_url"),
+            }
+        except Exception as e:
+            update_error = str(e)
+    else:
+        try:
+            src = _up.fetch_source_from_git(installed.install_dir)
+            latest = _latest_code_source_from_git(installed.install_dir, src.git_branch) or {
+                "commit": src.git_commit,
+                "branch": src.git_branch,
+                "subject": src.git_subject,
+                "source_kind": "git",
+            }
+        except Exception as e:
+            update_error = str(e)
     payload["latest"] = latest
     payload["update_error"] = update_error
-    payload["update_available"] = bool(
-        latest
-        and installed.git_commit
-        and not _same_commit(installed.git_commit, latest.get("commit"))
-        and not _installed_has_latest(installed.install_dir, latest.get("full_commit"), installed.git_commit)
-    )
+    if installed.source_kind == "dmg":
+        payload["update_available"] = bool(
+            latest
+            and latest.get("version")
+            and installed.version != latest.get("version")
+        )
+    else:
+        payload["update_available"] = bool(
+            latest
+            and installed.git_commit
+            and not _same_commit(installed.git_commit, latest.get("commit"))
+            and not _installed_has_latest(installed.install_dir, latest.get("full_commit"), installed.git_commit)
+        )
     payload["backend"] = _backend_version_payload(timeout=timeout)
 
     if as_json:
@@ -2331,6 +2353,10 @@ def upgrade(from_local, from_branch, assume_yes, rollback, skip_app,
             f"Run install.sh first.", fg="red"))
         sys.exit(2)
 
+    if not from_local and not from_branch and inst.source_kind == "dmg":
+        _upgrade_from_dmg_release(_up, inst, assume_yes)
+        return
+
     # ----- 1. Resolve source -----
     try:
         if from_local:
@@ -2498,6 +2524,61 @@ def upgrade(from_local, from_branch, assume_yes, rollback, skip_app,
     click.echo("    fisherman version                    # confirm what's installed")
     click.echo("    fisherman audit https://fisherman.teleport.computer")
     click.echo("    fisherman upgrade --rollback         # if something's wrong")
+
+
+def _upgrade_from_dmg_release(_up, inst, assume_yes):
+    click.echo("Checking GitHub Releases for the latest Fisherman DMG...")
+    try:
+        release = _up.latest_dmg_release()
+    except Exception as e:
+        click.echo(click.style(f"error: couldn't check GitHub Releases: {e}", fg="red"))
+        sys.exit(2)
+
+    click.echo("")
+    click.echo(f"  installed: {inst.version or inst.git_commit or '?'}  [dmg]")
+    click.echo(f"  latest:    {release.get('tag_name') or release.get('version') or '?'}")
+    if release.get("html_url"):
+        click.echo(f"             {release['html_url']}")
+
+    if inst.version and release.get("version") and inst.version == release.get("version"):
+        click.echo(click.style(
+            "  already at the latest DMG release — nothing to do "
+            "(pass --yes to reinstall anyway)", fg="green"))
+        if not assume_yes:
+            return
+
+    if not assume_yes:
+        click.echo("")
+        if not click.confirm("Download and install this DMG release?", default=True):
+            click.echo("aborted.")
+            return
+
+    try:
+        result = _up.install_dmg_release(inst.install_dir, release)
+    except Exception as e:
+        click.echo(click.style(f"error: DMG release install failed: {e}", fg="red"))
+        sys.exit(1)
+
+    click.echo(f"  → installed {release.get('dmg_name')}")
+    click.echo(f"  → backup: {result.get('backup')}")
+    status = _up.wait_for_daemon(timeout=30.0)
+    if status is None:
+        click.echo(click.style(
+            "  → app installed, but daemon did not answer within 30s. "
+            "Open Fisherman.app or check ~/.fisherman/logs/.",
+            fg="yellow"))
+    else:
+        click.echo(click.style(
+            f"  → daemon up: paused={status.get('paused')}, "
+            f"frames_sent={status.get('frames_sent')}", fg="green"))
+
+    sym_status, sym_path = _up.ensure_path_symlink(inst.install_dir)
+    if sym_status == "created":
+        click.echo(f"  → linked {sym_path} → {inst.install_dir}/.venv/bin/fisherman")
+    pruned = _up.prune_backups(inst.install_dir)
+    if pruned:
+        click.echo(f"  → pruned {pruned} old backup(s)")
+    click.echo(click.style("  ✓ release update complete", fg="green", bold=True))
 
 
 def _do_rollback(_up, inst, skip_app):
