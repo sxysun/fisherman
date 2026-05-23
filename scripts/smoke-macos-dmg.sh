@@ -63,9 +63,20 @@ require_path "$SOURCE/fisherman/daemon.py"
 
 log "checking app signature and release metadata"
 codesign --verify --deep --strict --verbose=2 "$APP"
-plutil -p "$RELEASE_JSON" >/dev/null
-plutil -extract version raw -o - "$RELEASE_JSON" >/dev/null
-plutil -extract commit raw -o - "$RELEASE_JSON" >/dev/null
+/usr/bin/python3 - "$RELEASE_JSON" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+missing = [key for key in ("version", "source", "repo_url") if not data.get(key)]
+if missing:
+    raise SystemExit(f"release metadata missing: {', '.join(missing)}")
+if data.get("source") != "dmg":
+    raise SystemExit(f"expected release source=dmg, got {data.get('source')!r}")
+PY
 
 if [ "$EXPECT_SIGNED" = "1" ]; then
     log "checking Gatekeeper assessment"
@@ -82,12 +93,27 @@ require_path "$INSTALL_DIR/.fisherman-version"
 
 VERSION_JSON="$TEST_HOME/version.json"
 HOME="$TEST_HOME" "$INSTALL_DIR/.venv/bin/fisherman" version --json > "$VERSION_JSON"
-plutil -p "$VERSION_JSON" >/dev/null
+/usr/bin/python3 - "$VERSION_JSON" <<'PY'
+import json
+import sys
 
-SOURCE_KIND="$(plutil -extract installed.source_kind raw -o - "$VERSION_JSON" 2>/dev/null || true)"
-[ "$SOURCE_KIND" = "dmg" ] || die "expected installed.source_kind=dmg, got ${SOURCE_KIND:-missing}"
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
 
-FULL_COMMIT="$(plutil -extract full_commit raw -o - "$RELEASE_JSON" 2>/dev/null || true)"
+source_kind = (data.get("installed") or {}).get("source_kind")
+if source_kind != "dmg":
+    raise SystemExit(f"expected installed.source_kind=dmg, got {source_kind!r}")
+PY
+
+FULL_COMMIT="$(/usr/bin/python3 - "$RELEASE_JSON" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    print(json.load(f).get("full_commit") or "")
+PY
+)"
 if [ -n "$FULL_COMMIT" ] && [[ "$FULL_COMMIT" != *-dirty ]]; then
     require_path "$INSTALL_DIR/.git"
     git -C "$INSTALL_DIR" rev-parse --verify "$FULL_COMMIT^{commit}" >/dev/null

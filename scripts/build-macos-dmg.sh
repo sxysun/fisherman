@@ -119,17 +119,26 @@ notarize_zip_for_app() {
 write_release_json() {
     local full_commit commit current_branch branch subject built_at
     full_commit="$(git_value 'rev-parse HEAD')"
+    if [ -z "$full_commit" ] && [ -n "${GITHUB_SHA:-}" ]; then
+        full_commit="$GITHUB_SHA"
+    fi
     commit="$(git_value 'rev-parse --short HEAD')"
+    if [ -z "$commit" ] && [ -n "${GITHUB_SHA:-}" ]; then
+        commit="${GITHUB_SHA:0:7}"
+    fi
     if [ -n "$commit" ] && [ -n "$(git_value 'status --porcelain')" ]; then
         commit="${commit}-dirty"
         full_commit="${full_commit}-dirty"
     fi
     current_branch="$(git_value 'rev-parse --abbrev-ref HEAD')"
-    branch="${RELEASE_BRANCH:-$current_branch}"
+    branch="${RELEASE_BRANCH:-${GITHUB_REF_NAME:-$current_branch}}"
     if [ -z "$branch" ] || [ "$branch" = "HEAD" ]; then
         branch="main"
     fi
     subject="$(git_value 'log -1 --pretty=%s')"
+    if [ -z "$subject" ]; then
+        subject="${GITHUB_REF_NAME:-release build}"
+    fi
     built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
     /usr/bin/python3 - "$RELEASE_JSON" "$VERSION" "$BUNDLE_VERSION" "$commit" "$full_commit" "$branch" "$subject" "$built_at" "$REPO_URL" <<'PY'

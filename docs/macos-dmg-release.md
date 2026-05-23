@@ -10,8 +10,8 @@ Python source tree and a bootstrap script, so a new user can launch
 2. Tag a release:
 
    ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v<version>
+   git push origin v<version>
    ```
 
 3. GitHub Actions runs `.github/workflows/macos-release.yml`.
@@ -42,7 +42,7 @@ Python source tree and a bootstrap script, so a new user can launch
 
 ```bash
 ./scripts/build-macos-dmg.sh
-./scripts/smoke-macos-dmg.sh dist/macos/Fisherman-0.1.0.dmg
+./scripts/smoke-macos-dmg.sh "$(ls dist/macos/Fisherman-*.dmg | head -1)"
 ```
 
 Without a Developer ID certificate, the script creates an ad-hoc signed DMG for
