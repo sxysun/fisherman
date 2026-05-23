@@ -805,6 +805,7 @@ def test_daemon_realizer_exception_records_skipped_trace(monkeypatch, tmp_path):
     try:
         async def fake_synthesize(fc, user_pref, minutes_since_last_push):
             event = schemas.CandidateEvent(candidate_id="cand_realizer_fail")
+            event.ts = "2026-05-19T12:00:00Z"
             event.user_pref = user_pref
             event.screen.frontmost_app = "Cursor"
             event.screen.ocr_snippet = "TODO ship harness notification"
@@ -879,6 +880,7 @@ def test_rule_v0_pings_on_high_switch():
     from policies import rule_v0
 
     event = schemas.CandidateEvent()
+    event.ts = "2026-05-19T12:00:00Z"
     event.screen.frame_age_sec = 5.0
     event.scene = schemas.SceneTag(
         label="rapid_context_switching", strength="strong", source="rule"
@@ -962,6 +964,7 @@ def test_rule_v0_negative_feedback_backoff_is_time_bounded():
     from policies import rule_v0
 
     event = schemas.CandidateEvent()
+    event.ts = "2026-05-19T12:10:00Z"
     event.screen.frame_age_sec = 5.0
     event.screen.ocr_snippet = "ship harness"
     event.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
@@ -985,7 +988,7 @@ def test_rule_v0_negative_feedback_backoff_is_time_bounded():
     stale = [{"user_action": "dismissed", "ts": "2000-01-01T00:00:00Z"}]
     recent = [{
         "user_action": "dismissed",
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ts": "2026-05-19T12:00:00Z",
     }]
 
     assert rule_v0.decide(event, mem, stale, cfg).action == "notch_ping"
@@ -998,6 +1001,7 @@ def test_rule_v0_soft_reject_hover_backoff_is_live_signal():
     from policies import rule_v0
 
     event = schemas.CandidateEvent()
+    event.ts = "2026-05-19T12:10:00Z"
     event.screen.frame_age_sec = 5.0
     event.screen.ocr_snippet = "ship harness"
     event.scene = schemas.SceneTag(label="reading_browser", strength="medium", source="rule")
@@ -1019,7 +1023,7 @@ def test_rule_v0_soft_reject_hover_backoff_is_live_signal():
     }
     soft_reject = [{
         "user_action": "timed_out",
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ts": "2026-05-19T12:00:00Z",
         "interaction_summary": {"intent_signal": "rejection_considered"},
     }]
 
@@ -1104,6 +1108,7 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
     llm_icl_v0._last_call_ts = 0.0
     try:
         event = schemas.CandidateEvent(candidate_id="cand_llm")
+        event.ts = "2026-05-19T12:00:00Z"
         event.screen.frame_age_sec = 5.0
         event.screen.frontmost_app = "Chrome"
         event.screen.ocr_snippet = "drafting harness policy learner"
@@ -1224,6 +1229,7 @@ def test_rule_v0_suppresses_resume_from_idle():
     from policies import rule_v0
 
     event = schemas.CandidateEvent()
+    event.ts = "2026-05-19T12:00:00Z"
     event.screen.frame_age_sec = 5.0
     event.screen.capture_gap_sec = 240.0
     event.screen.ocr_snippet = "ship harness"
