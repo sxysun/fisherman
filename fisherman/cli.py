@@ -2780,7 +2780,7 @@ def friend_add(code: str, name: str | None, audience: str, policy_prompt: str | 
               default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def friend_list(as_text: bool, source_pref: str | None):
     """List your friends."""
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         rows = _remote_call("friends", {}, source_pref=source_pref) or []
     else:
         from fisherman.friends import list_friends
@@ -2891,7 +2891,7 @@ def friend_status(
     from fisherman.ledger import fetch_friend_status, LedgerError
 
     since_ts = _parse_since_to_ts(since)
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         out = _remote_call(
             "friend-status",
             {
@@ -3092,7 +3092,7 @@ def publish_status(emoji, category, status, flow, from_stdin, recipients, source
             click.echo("nothing to publish: pass --emoji/--category/--status or --from-stdin", err=True)
             sys.exit(2)
 
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         result = _remote_call(
             "publish-status",
             {"digest": digest, "recipients": list(recipients)},
@@ -3368,6 +3368,27 @@ def _deputy_config_path() -> str | None:
 
 def _is_remote_mode() -> bool:
     return _deputy_config_path() is not None
+
+
+def _has_local_owner_state() -> bool:
+    """Return True when this machine looks like the user's Fisherman install.
+
+    Deputy configs can also exist on the owner laptop for agent access. Their
+    presence alone should not make local UI/CLI commands route through remote
+    relay credentials.
+    """
+    from fisherman import config as _cfg
+    from fisherman import friends as _friends
+
+    return _cfg.user_env_path().exists() or os.path.exists(_friends._resolve_path(None))
+
+
+def _should_use_remote_mode(source_pref: str | None) -> bool:
+    if not _is_remote_mode():
+        return False
+    if source_pref in ("primary", "secondary"):
+        return True
+    return not _has_local_owner_state()
 
 
 _DIRECT_BACKEND_COMMANDS = {"status", "query", "transcripts", "screenshot"}

@@ -481,6 +481,51 @@ class ConfigIdentityTests(unittest.TestCase):
         local.assert_not_called()
         remote.assert_called_once_with("status", {}, source_pref="secondary")
 
+    def test_friend_list_prefers_local_owner_state_over_deputy_config(self) -> None:
+        local_friends = [{"name": "Seven", "pubkey_hex": "aa" * 32}]
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_has_local_owner_state", return_value=True), \
+             mock.patch("fisherman.friends.list_friends", return_value=local_friends), \
+             mock.patch.object(cli, "_remote_call") as remote:
+            result = CliRunner().invoke(cli.main, ["friend", "list"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output), local_friends)
+        remote.assert_not_called()
+
+    def test_friend_status_prefers_local_owner_state_over_deputy_config(self) -> None:
+        local_friends = [{
+            "name": "Seven",
+            "pubkey_hex": "aa" * 32,
+            "encryption_pubkey": "bb" * 32,
+            "relay_url": "https://relay.example",
+        }]
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_has_local_owner_state", return_value=True), \
+             mock.patch("fisherman.friends.list_friends", return_value=local_friends), \
+             mock.patch.object(cli, "_load_keys", return_value=(None, b"\\x11" * 32, object(), None)), \
+             mock.patch("fisherman.ledger.fetch_friend_status", return_value=[]), \
+             mock.patch.object(cli, "_remote_call") as remote:
+            result = CliRunner().invoke(cli.main, ["friend", "status", "--limit", "1"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output), [])
+        remote.assert_not_called()
+
+    def test_friend_status_forced_source_uses_remote_mode(self) -> None:
+        remote_rows = [{"friend": "Seven", "pubkey": "aa" * 32, "digest": {"status": "remote"}}]
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_has_local_owner_state", return_value=True), \
+             mock.patch.object(cli, "_remote_call", return_value=remote_rows) as remote:
+            result = CliRunner().invoke(
+                cli.main,
+                ["friend", "status", "--source", "primary", "--limit", "1"],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output), remote_rows)
+        remote.assert_called_once()
+
     def test_remote_secondary_with_backend_url_rejects_unsupported_command_locally(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             cfg_path = Path(home_dir) / "deputy.json"
