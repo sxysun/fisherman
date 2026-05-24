@@ -244,7 +244,7 @@ def status(port: int, as_text: bool, source_pref: str | None):
               default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def pause(port: int, source_pref: str | None):
     """Pause screen capture."""
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         _remote_call("pause", {}, source_pref=source_pref)
         click.echo("Paused.")
         return
@@ -258,7 +258,7 @@ def pause(port: int, source_pref: str | None):
               default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def resume(port: int, source_pref: str | None):
     """Resume screen capture."""
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         _remote_call("resume", {}, source_pref=source_pref)
         click.echo("Resumed.")
         return
@@ -283,7 +283,7 @@ def query(since, until, app, bundle, search, limit, as_text, port, source_pref):
     Auto-routes via the relay when a deputy config is present
     (~/.fisherman-deputy/<name>.json or FISHERMAN_DEPUTY_CONFIG env).
     """
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         rows = _remote_call("query", {
             "since_ts": _parse_since_to_ts(since),
             "until_ts": _parse_since_to_ts(until),
@@ -324,7 +324,7 @@ def query(since, until, app, bundle, search, limit, as_text, port, source_pref):
               default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def transcripts(since, until, meeting_app, search, limit, as_text, port, source_pref):
     """Read meeting audio transcripts captured during calls."""
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         rows = _remote_call("transcripts", {
             "since_ts": _parse_since_to_ts(since),
             "until_ts": _parse_since_to_ts(until),
@@ -372,7 +372,7 @@ def screenshot(
 ):
     """Fetch a raw screenshot JPEG. Defaults to the newest frame with an image."""
     args = {"ts_ms": ts_ms, "frame_id": frame_id}
-    if _is_remote_mode():
+    if _should_use_remote_mode(source_pref):
         payload = _remote_call("screenshot", args, source_pref=source_pref)
     else:
         payload = _local_screenshot_payload(ts_ms, port)
@@ -2772,6 +2772,32 @@ def friend_add(code: str, name: str | None, audience: str, policy_prompt: str | 
         policy_prompt=policy_prompt,
     )
     click.echo(f"added: {record['name']} ({record['pubkey_hex'][:12]}…)")
+    _ensure_friend_status_schedule()
+
+
+def _ensure_friend_status_schedule() -> None:
+    from fisherman import processor as _p
+
+    schedule_id = "friend-status-loop"
+    schedule_path = _p.SCHEDULE_PATH
+    if any(row.get("id") == schedule_id for row in _p.list_schedules(schedule_path)):
+        return
+    try:
+        row = _p.add_schedule(
+            schedule_id,
+            "status-loop",
+            every="5m",
+            since="5m",
+            limit=20,
+            path=schedule_path,
+        )
+    except _p.ProcessorError as e:
+        click.echo(f"warning: could not schedule friend status publisher: {e}", err=True)
+        return
+    click.echo(
+        f"scheduled friend status publisher: {row['id']} every {row['every']}",
+        err=True,
+    )
 
 
 @friend_group.command(name="list")

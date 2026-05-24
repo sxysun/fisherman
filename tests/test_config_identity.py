@@ -75,6 +75,25 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertEqual(cfg.status_relay_url, config_mod.DEFAULT_STATUS_RELAY_URL)
             self.assertEqual(cfg.capture_backend, "native")
 
+    def test_shell_sourced_bundle_lists_do_not_break_config(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            os.environ["FISH_TEXT_HEAVY_BUNDLES"] = "[com.apple.Terminal,com.googlecode.iterm2]"
+            os.environ["FISH_EXCLUDED_BUNDLES"] = "[]"
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(
+                cfg.text_heavy_bundles,
+                ["com.apple.Terminal", "com.googlecode.iterm2"],
+            )
+            self.assertEqual(cfg.excluded_bundles, [])
+
     def test_cli_formats_backend_iso_timestamps(self) -> None:
         rendered = cli._fmt_ts("2026-05-11T17:48:35+00:00")
         self.assertRegex(rendered, r"^2026-05-11 \d\d:\d\d:\d\d$")
@@ -480,6 +499,35 @@ class ConfigIdentityTests(unittest.TestCase):
         self.assertEqual(json.loads(result.output), remote_status)
         local.assert_not_called()
         remote.assert_called_once_with("status", {}, source_pref="secondary")
+
+    def test_query_prefers_local_owner_state_over_deputy_config(self) -> None:
+        local_rows = [{"app": "Terminal", "window": "debug", "ocr_text": "friend relay"}]
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_has_local_owner_state", return_value=True), \
+             mock.patch.object(cli, "_control_request", return_value=local_rows) as local, \
+             mock.patch.object(cli, "_remote_call") as remote:
+            result = CliRunner().invoke(cli.main, ["query", "--since", "5m", "--limit", "1"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output), local_rows)
+        local.assert_called_once()
+        remote.assert_not_called()
+
+    def test_query_forced_source_uses_remote_mode(self) -> None:
+        remote_rows = [{"app": "Remote", "ocr_text": "from deputy"}]
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_has_local_owner_state", return_value=True), \
+             mock.patch.object(cli, "_control_request") as local, \
+             mock.patch.object(cli, "_remote_call", return_value=remote_rows) as remote:
+            result = CliRunner().invoke(
+                cli.main,
+                ["query", "--source", "secondary", "--since", "5m", "--limit", "1"],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output), remote_rows)
+        local.assert_not_called()
+        remote.assert_called_once()
 
     def test_friend_list_prefers_local_owner_state_over_deputy_config(self) -> None:
         local_friends = [{"name": "Seven", "pubkey_hex": "aa" * 32}]

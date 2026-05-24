@@ -9,6 +9,8 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
+from click.testing import CliRunner
+
 from fisherman import cli
 from fisherman import friends
 from fisherman import keys
@@ -79,6 +81,34 @@ class FriendCliTests(unittest.TestCase):
         self.assertEqual(parsed["pubkey_hex"], signing_pub.hex())
         self.assertEqual(parsed["encryption_pubkey"], x_pub.hex())
         self.assertNotIn("g", payload)
+
+    def test_friend_add_auto_schedules_status_loop(self) -> None:
+        seed = bytes.fromhex("01" * 32)
+        _signing_priv, signing_pub = keys.signing_keypair(seed)
+        _x_priv, x_pub = keys.encryption_keypair(seed)
+        code = friends.encode_code(
+            "alice",
+            signing_pub.hex(),
+            x_pub.hex(),
+            "https://relay.example",
+        )
+
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            friends_path = home / ".fisherman" / "friends.json"
+            schedule_path = home / ".fisherman" / "processor-schedules.json"
+
+            with mock.patch("fisherman.friends._DEFAULT_PATH", str(friends_path)), \
+                 mock.patch("fisherman.processor.SCHEDULE_PATH", schedule_path):
+                result = CliRunner().invoke(cli.main, ["friend", "add", code])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            schedule = json.loads(schedule_path.read_text(encoding="utf-8"))
+            rows = schedule["schedules"]
+            self.assertEqual(rows[0]["id"], "friend-status-loop")
+            self.assertEqual(rows[0]["processor"], "status-loop")
+            self.assertEqual(rows[0]["every"], "5m")
 
     def test_friend_policy_updates_audience_and_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:

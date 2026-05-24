@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from fisherman import agent_loop
 from fisherman import processor
 
 
@@ -84,6 +85,35 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(results[0]["ok"], True)
         self.assertEqual(rows[0]["last_run_at"], 1234)
         self.assertEqual(rows[0]["last_ok"], True)
+
+    def test_status_loop_uses_safe_fallback_without_llm_key(self) -> None:
+        published: list[tuple[dict, list[str]]] = []
+
+        def fake_publish(digest: dict, recipients: list[str]) -> bool:
+            published.append((digest, recipients))
+            return True
+
+        with mock.patch.object(
+            agent_loop,
+            "_run_query",
+            return_value=[{"app": "Terminal", "window": "zsh", "ocr_text": "secret text"}],
+        ), mock.patch.object(
+            agent_loop,
+            "list_friends",
+            return_value=[{
+                "name": "Seven",
+                "pubkey_hex": "aa" * 32,
+                "audience": "friends",
+            }],
+        ), mock.patch.object(agent_loop, "_publish", side_effect=fake_publish):
+            ok = agent_loop.run_once(None, "https://example.invalid", "model", since="5m")
+
+        self.assertTrue(ok)
+        digest, recipients = published[0]
+        self.assertEqual(recipients, ["aa" * 32])
+        self.assertEqual(digest["category"], "terminal")
+        self.assertEqual(digest["status"], "using terminal")
+        self.assertNotIn("secret", json.dumps(digest))
 
 
 if __name__ == "__main__":

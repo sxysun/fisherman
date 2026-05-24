@@ -7,7 +7,7 @@ glue, intended to run as its own process.
 Default LLM is OpenRouter (or any OpenAI-compatible endpoint) configured
 via env:
 
-    OPENAI_API_KEY    — required (your OpenRouter / OpenAI / Anthropic-via-OR key)
+    OPENAI_API_KEY    — optional; missing key uses a generic privacy-safe fallback
     OPENAI_BASE_URL   — defaults to https://openrouter.ai/api/v1
     AGENT_MODEL       — model id (default: mistralai/mistral-nemo)
 
@@ -86,7 +86,9 @@ def _build_context(rows: list[dict], max_rows: int = 8) -> str:
     return "\n".join(lines) or "(no recent context)"
 
 
-def _call_llm(api_key: str, base_url: str, model: str, prompt: str) -> dict | None:
+def _call_llm(api_key: str | None, base_url: str, model: str, prompt: str) -> dict | None:
+    if not api_key:
+        return None
     import urllib.request, urllib.error
     body = json.dumps({
         "model": model,
@@ -119,6 +121,41 @@ def _call_llm(api_key: str, base_url: str, model: str, prompt: str) -> dict | No
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         click.echo(f"  llm parse error: {e}", err=True)
         return None
+
+
+def _fallback_digest(rows: list[dict]) -> dict:
+    """Conservative no-key fallback based on app/window class, not OCR text."""
+    row = rows[0] if rows else {}
+    app = (row.get("app") or "").lower()
+    window = (row.get("window") or "").lower()
+    haystack = f"{app} {window}"
+    rules = [
+        (("cursor", "code", "xcode", "pycharm", "zed"), {
+            "emoji": "💻", "category": "coding", "status": "coding",
+        }),
+        (("terminal", "iterm", "warp"), {
+            "emoji": "⌨️", "category": "terminal", "status": "using terminal",
+        }),
+        (("slack", "discord", "messages", "wechat", "telegram", "whatsapp"), {
+            "emoji": "💬", "category": "chat", "status": "in chat",
+        }),
+        (("zoom", "meet", "teams", "facetime"), {
+            "emoji": "📞", "category": "meeting", "status": "in meeting",
+        }),
+        (("preview", "pdf", "books", "kindle"), {
+            "emoji": "📖", "category": "reading", "status": "reading",
+        }),
+        (("chrome", "safari", "arc", "browser", "firefox"), {
+            "emoji": "🌐", "category": "browsing", "status": "browsing",
+        }),
+        (("mail", "gmail", "outlook"), {
+            "emoji": "✉️", "category": "email", "status": "checking email",
+        }),
+    ]
+    for needles, digest in rules:
+        if any(needle in haystack for needle in needles):
+            return {**digest, "flow": False}
+    return {"emoji": "💻", "category": "working", "status": "active on Mac", "flow": False}
 
 
 def _run_query(since: str = "5m", limit: int = 10) -> list[dict]:
@@ -160,7 +197,7 @@ def _policy_prompt(audience: str, prompt: str) -> str:
     return rules
 
 
-def run_once(api_key: str, base_url: str, model: str, since: str = "5m") -> bool:
+def run_once(api_key: str | None, base_url: str, model: str, since: str = "5m") -> bool:
     rows = _run_query(since=since)
     if not rows:
         click.echo("  no recent context — skipping")
@@ -181,7 +218,11 @@ def run_once(api_key: str, base_url: str, model: str, since: str = "5m") -> bool
         prompt = _PROMPT.format(context=context) + "\n\n" + policy
         digest = _call_llm(api_key, base_url, model, prompt)
         if digest is None:
-            continue
+            digest = _fallback_digest(rows)
+            click.echo(
+                f"  using heuristic fallback for {audience}: "
+                f"{digest['emoji']} {digest['category']} {digest['status']}"
+            )
         # Drop unknown keys + clamp lengths
         digest = {
             "emoji": (digest.get("emoji") or "?")[:8],
@@ -213,13 +254,12 @@ def run_once(api_key: str, base_url: str, model: str, since: str = "5m") -> bool
 def main(interval, since, model, once):
     """Run a status-publishing loop using OpenRouter/OpenAI."""
     api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        click.echo("OPENAI_API_KEY not set", err=True)
-        sys.exit(2)
     base_url = os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL)
     model = model or os.environ.get("AGENT_MODEL", _DEFAULT_MODEL)
 
     click.echo(f"agent loop: model={model} every {interval}s window={since}")
+    if not api_key:
+        click.echo("agent loop: OPENAI_API_KEY not set; using safe heuristic fallback")
     if once:
         run_once(api_key, base_url, model, since=since)
         return

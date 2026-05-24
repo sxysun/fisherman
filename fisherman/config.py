@@ -1,8 +1,11 @@
+import json
 import os
 from urllib.parse import urlparse, urlunparse
 from pathlib import Path
+from typing import Annotated
 
-from pydantic_settings import BaseSettings
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 
 DEFAULT_SERVER_URL = "ws://localhost:9999/ingest"
@@ -12,6 +15,31 @@ DEFAULT_APP_AUTH_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
 DEFAULT_APP_AUTH_CONTRACT = "0x55b25eD5CA3c6ec9C05330F8958edcfCA3C9e922"
 BACKEND_MODES = {"local", "cloud", "self_hosted"}
 DEFAULT_STATUS_LLM_MODEL = "mistralai/mistral-nemo"
+
+
+def _parse_string_list_env(value):
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return value
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+    except json.JSONDecodeError:
+        pass
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    return [
+        item.strip().strip("\"'")
+        for item in raw.split(",")
+        if item.strip().strip("\"'")
+    ]
 
 
 def user_env_path() -> Path:
@@ -311,7 +339,7 @@ class FishermanConfig(BaseSettings):
     upload_queue_max: int = 1000
 
     # Privacy — password managers, auth apps, keychains excluded by default
-    excluded_bundles: list[str] = [
+    excluded_bundles: Annotated[list[str], NoDecode] = [
         "com.1password.1password",          # 1Password 8+
         "com.agilebits.onepassword7",       # 1Password 7
         "com.apple.keychainaccess",         # Keychain Access
@@ -322,10 +350,10 @@ class FishermanConfig(BaseSettings):
         "com.apple.systempreferences",      # System Settings (privacy screens)
         "com.apple.Passwords",              # macOS Passwords app
     ]
-    excluded_apps: list[str] = []
+    excluded_apps: Annotated[list[str], NoDecode] = []
 
     # Routing
-    text_heavy_bundles: list[str] = [
+    text_heavy_bundles: Annotated[list[str], NoDecode] = [
         "com.apple.Terminal",
         "com.googlecode.iterm2",
         "com.microsoft.VSCode",
@@ -339,6 +367,11 @@ class FishermanConfig(BaseSettings):
     ]
     dhash_escalation_threshold: int = 20  # 0–64; above = visual change too large for text-only routing
     ocr_min_text_length: int = 50  # below = probably visual content
+
+    @field_validator("excluded_bundles", "excluded_apps", "text_heavy_bundles", mode="before")
+    @classmethod
+    def _parse_bundle_lists(cls, value):
+        return _parse_string_list_env(value)
 
     # Local frame viewer
     frames_dir: str = "~/.fisherman/frames"
