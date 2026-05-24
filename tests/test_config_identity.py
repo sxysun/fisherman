@@ -453,6 +453,34 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertTrue(direct.call_args.kwargs["fail_hard"])
             urlopen.assert_not_called()
 
+    def test_status_prefers_local_daemon_when_deputy_config_exists(self) -> None:
+        local_status = {
+            "running": True,
+            "paused": False,
+            "capture_backend": "native",
+        }
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_try_control_request", return_value=(local_status, None)) as local, \
+             mock.patch.object(cli, "_remote_call") as remote:
+            result = CliRunner().invoke(cli.main, ["status"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output), local_status)
+        local.assert_called_once()
+        remote.assert_not_called()
+
+    def test_status_forced_source_uses_remote_mode(self) -> None:
+        remote_status = {"running": True, "source": "remote"}
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_try_control_request") as local, \
+             mock.patch.object(cli, "_remote_call", return_value=remote_status) as remote:
+            result = CliRunner().invoke(cli.main, ["status", "--source", "secondary"])
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(json.loads(result.output), remote_status)
+        local.assert_not_called()
+        remote.assert_called_once_with("status", {}, source_pref="secondary")
+
     def test_remote_secondary_with_backend_url_rejects_unsupported_command_locally(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             cfg_path = Path(home_dir) / "deputy.json"

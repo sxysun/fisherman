@@ -95,14 +95,26 @@ def start(server_url: str | None, backend_mode: str | None, backend_url: str | N
 
 
 def _control_request(method: str, path: str, port: int = 7892, timeout: float = 5.0):
+    data, error = _try_control_request(method, path, port, timeout)
+    if data is not None:
+        return data
+    click.echo(f"Could not connect to fisherman on port {port}: {error}", err=True)
+    sys.exit(1)
+
+
+def _try_control_request(
+    method: str,
+    path: str,
+    port: int = 7892,
+    timeout: float = 5.0,
+) -> tuple[dict | None, Exception | None]:
     url = f"http://127.0.0.1:{port}{path}"
     req = urllib.request.Request(url, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
+            return json.loads(resp.read()), None
     except Exception as e:
-        click.echo(f"Could not connect to fisherman on port {port}: {e}", err=True)
-        sys.exit(1)
+        return None, e
 
 
 def _build_query(**params) -> str:
@@ -194,8 +206,15 @@ def _fmt_ts(ts: object) -> str:
               default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
 def status(port: int, as_text: bool, source_pref: str | None):
     """Show daemon status."""
-    if _is_remote_mode():
+    if _is_remote_mode() and source_pref in ("primary", "secondary"):
         data = _remote_call("status", {}, source_pref=source_pref)
+    elif _is_remote_mode():
+        # Deputy configs can live on the same laptop as the user daemon. Prefer
+        # the local control API when it is reachable; fall back to relay/backend
+        # only when this process is actually acting as a remote deputy.
+        data, _ = _try_control_request("GET", "/status", port, timeout=1.0)
+        if data is None:
+            data = _remote_call("status", {}, source_pref=source_pref)
     else:
         data = _control_request("GET", "/status", port)
     if not as_text:

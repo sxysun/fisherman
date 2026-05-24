@@ -16,12 +16,10 @@ from fisherman import rpc as fisher_rpc
 from fisherman import storage_config
 from fisherman.audio_store import AudioStore
 from fisherman.blob_store import from_config as blob_store_from_config
-from fisherman.capture import capture_screen
 from fisherman.config import DEFAULT_SERVER_URL, FishermanConfig, ingest_url_from_backend_url
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
-from fisherman.ocr import maybe_extract_pdf_context, ocr_fast
 from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
 from fisherman.relay_client import RelayClient
@@ -36,6 +34,46 @@ from fisherman.upload_queue import UploadQueue
 log = structlog.get_logger()
 
 _SWIFT_CAPTURE = os.environ.get("FISHERMAN_SWIFT_CAPTURE", "") == "1"
+
+# Lazily populated callables. Tests and local harnesses may monkeypatch these
+# names without forcing daemon startup to import PyObjC/Pillow/OCR modules.
+capture_screen = None
+ocr_fast = None
+maybe_extract_pdf_context = None
+
+
+def _capture_screen_lazy(max_dim: int, jpeg_quality: int):
+    global capture_screen
+    if capture_screen is None:
+        from fisherman.capture import capture_screen as _capture_screen
+
+        capture_screen = _capture_screen
+
+    return capture_screen(max_dim, jpeg_quality)
+
+
+def _ocr_fast_lazy(jpeg_data: bytes) -> tuple[str, list[str]]:
+    global ocr_fast
+    if ocr_fast is None:
+        from fisherman.ocr import ocr_fast as _ocr_fast
+
+        ocr_fast = _ocr_fast
+
+    return ocr_fast(jpeg_data)
+
+
+def _maybe_extract_pdf_context_lazy(
+    app_name: str | None,
+    window_title: str | None,
+    jpeg_data: bytes,
+) -> tuple[str, list[str]]:
+    global maybe_extract_pdf_context
+    if maybe_extract_pdf_context is None:
+        from fisherman.ocr import maybe_extract_pdf_context as _maybe_extract_pdf_context
+
+        maybe_extract_pdf_context = _maybe_extract_pdf_context
+
+    return maybe_extract_pdf_context(app_name, window_title, jpeg_data)
 
 
 def _live_tls_fingerprint(url: str, timeout: float = 15.0) -> str | None:
@@ -239,7 +277,7 @@ class FishermanDaemon:
         try:
             pdf_text, pdf_urls = await loop.run_in_executor(
                 self._pool,
-                maybe_extract_pdf_context,
+                _maybe_extract_pdf_context_lazy,
                 frame.app_name,
                 frame.window_title,
                 frame.jpeg_data,
@@ -380,7 +418,7 @@ class FishermanDaemon:
             try:
                 # Capture in thread pool
                 frame = await loop.run_in_executor(
-                    self._pool, capture_screen, cfg.max_dimension, cfg.jpeg_quality
+                    self._pool, _capture_screen_lazy, cfg.max_dimension, cfg.jpeg_quality
                 )
                 if not self._capture_ok:
                     self._capture_ok = True
@@ -423,7 +461,7 @@ class FishermanDaemon:
             try:
                 # OCR in thread pool
                 ocr_text, urls = await loop.run_in_executor(
-                    self._pool, ocr_fast, frame.jpeg_data
+                    self._pool, _ocr_fast_lazy, frame.jpeg_data
                 )
             except Exception:
                 log.warning("ocr_failed", exc_info=True)
@@ -455,7 +493,7 @@ class FishermanDaemon:
             else:
                 try:
                     ocr_text, urls = await loop.run_in_executor(
-                        self._pool, ocr_fast, frame.jpeg_data
+                        self._pool, _ocr_fast_lazy, frame.jpeg_data
                     )
                     text_source = "python_ocr"
                 except Exception:

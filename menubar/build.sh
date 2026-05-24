@@ -87,6 +87,10 @@ if [ -n "$UV_BIN" ]; then
                 fi
             fi
             (cd "$DIR" && "$UV_BIN" "${SYNC_ARGS[@]}" 2>&1 | tail -5) && echo "Synced venv in $DIR"
+            # macOS can mark copied/synced venv paths hidden, which makes
+            # Python skip editable-install .pth files and breaks console
+            # entrypoints such as `.venv/bin/fisherman`.
+            chflags -R nohidden "$DIR/.venv" 2>/dev/null || true
         fi
     done
 fi

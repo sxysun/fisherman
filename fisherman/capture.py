@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 import os
 import subprocess
 import sys
@@ -6,6 +5,8 @@ import tempfile
 import time
 
 import structlog
+
+from fisherman.types import ScreenFrame
 
 if sys.platform == "darwin":
     import objc
@@ -29,17 +30,6 @@ else:
     NSSize = None
 
 log = structlog.get_logger()
-
-
-@dataclass
-class ScreenFrame:
-    jpeg_data: bytes
-    width: int
-    height: int
-    app_name: str | None
-    bundle_id: str | None
-    window_title: str | None
-    timestamp: float
 
 
 # Capture method state — re-evaluated periodically with exponential backoff

@@ -7,8 +7,8 @@ import time
 
 import structlog
 
-from fisherman.capture import ScreenFrame
 from fisherman.router import RoutingDecision
+from fisherman.types import ScreenFrame
 
 log = structlog.get_logger()
 

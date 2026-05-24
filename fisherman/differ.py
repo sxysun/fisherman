@@ -1,9 +1,6 @@
 import io
 from dataclasses import dataclass
 
-import imagehash
-from PIL import Image
-
 _MAX_DHASH_DISTANCE = 64  # 8x8 hash → 64 bits
 
 
@@ -16,10 +13,13 @@ class DiffResult:
 class FrameDiffer:
     def __init__(self, threshold: int = 6):
         self._threshold = threshold
-        self._last_hash: imagehash.ImageHash | None = None
+        self._last_hash = None
 
     def diff_frame(self, jpeg_data: bytes) -> DiffResult:
         """Compare frame against last accepted frame. ~1ms."""
+        import imagehash
+        from PIL import Image
+
         img = Image.open(io.BytesIO(jpeg_data))
         h = imagehash.dhash(img, hash_size=8)
         if self._last_hash is None:

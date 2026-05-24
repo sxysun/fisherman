@@ -347,7 +347,7 @@ class ControlServer:
         try:
             msg = json.loads(body)
             jpeg_data = base64.b64decode(msg["jpeg_b64"])
-            from fisherman.capture import ScreenFrame
+            from fisherman.types import ScreenFrame
 
             frame = ScreenFrame(
                 jpeg_data=jpeg_data,

@@ -37,6 +37,11 @@ final class ProcessManager: @unchecked Sendable {
     // MARK: - Fisherman daemon
 
     private func startFisherman() {
+        if let proc = fishermanProcess, proc.isRunning {
+            NSLog("[Fisherman] fisherman daemon process already running; waiting for /status")
+            return
+        }
+
         // Skip if fisherman is already running
         let port = Int(controlPort) ?? 7892
         if isFishermanAlive(port: port) {

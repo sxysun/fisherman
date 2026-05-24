@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from fisherman.audio_store import AudioStore
-from fisherman.capture import ScreenFrame
 from fisherman.config import FishermanConfig
 from fisherman.frame_store import FrameStore
+from fisherman.types import ScreenFrame
 
 
 ARCHIVE_FORMAT = "fisherman.context.v1"
