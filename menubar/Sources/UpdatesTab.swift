@@ -6,6 +6,7 @@ private struct InstalledSummary {
     var branch: String = "unknown"
     var subject: String = ""
     var installedAt: String = ""
+    var sourceKind: String = ""
     var hasApp = false
     var hasVenv = false
 }
@@ -104,6 +105,11 @@ struct UpdatesTab: View {
             Text("Updates are installed in place with a backup and rollback check. The menu app may close and reopen during the update.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(updateTrackExplanation)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if latest.checked {
@@ -237,6 +243,13 @@ struct UpdatesTab: View {
         }
     }
 
+    private var updateTrackExplanation: String {
+        if installed.sourceKind == "dmg" {
+            return "Release installs update from signed GitHub Release DMGs. Source installs update from the main branch."
+        }
+        return "Source installs update from the main branch. Release installs update from signed GitHub Release DMGs."
+    }
+
     private var backendStatusLabel: String {
         if config.backendMode == "local" { return "local" }
         if config.backendMode == "cloud" { return "managed" }
@@ -368,6 +381,7 @@ struct UpdatesTab: View {
             branch: string(installed["branch"]) ?? "unknown",
             subject: string(installed["subject"]) ?? "",
             installedAt: string(installed["installed_at"]) ?? "",
+            sourceKind: string(installed["source_kind"]) ?? "",
             hasApp: bool(installed["has_app"]),
             hasVenv: bool(installed["has_venv"])
         )

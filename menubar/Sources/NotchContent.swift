@@ -25,14 +25,15 @@ struct CompactTrailing: View {
             // Emoji + flow badge only — duration/timeline live in expanded view
             // to keep the compact strip narrow and the menu bar visible.
             ForEach(compactActivities.prefix(5)) { user in
+                let showFlow = user.id == "me" && user.inFlow
                 HStack(spacing: 1) {
                     Text(user.emoji)
                         .font(.system(size: 12))
                         .shadow(
-                            color: user.inFlow ? Color(nsColor: .systemRed).opacity(0.7) : .clear,
-                            radius: user.inFlow ? 3 : 0
+                            color: showFlow ? Color(nsColor: .systemRed).opacity(0.7) : .clear,
+                            radius: showFlow ? 3 : 0
                         )
-                    if user.inFlow {
+                    if showFlow {
                         Text("🔥")
                             .font(.system(size: 8))
                     }
@@ -197,7 +198,7 @@ struct ExpandedContent: View {
                             }
 
                             // Flow state badge
-                            if user.inFlow {
+                            if user.id == "me" && user.inFlow {
                                 Text("🔥")
                                     .font(.system(size: 10))
                                     .help("In the zone for 30+ min")
@@ -380,49 +381,64 @@ struct ExpandedContent: View {
             }
 
             ForEach(state.publishedFriendPreviews.prefix(3)) { preview in
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Text("to \(preview.friend)")
-                        .font(.system(size: 10, weight: .medium))
-                        .lineLimit(1)
-                    Text(preview.audience)
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
-                    Spacer(minLength: 4)
-                    if preview.published {
-                        Text(preview.timestamp.map(relativeTime) ?? "unknown")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(preview.isStale ? Color.orange : Color(nsColor: .tertiaryLabelColor))
-                    } else {
-                        Text("not yet")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(.orange)
-                    }
-                }
-
-                if preview.published {
-                    HStack(spacing: 4) {
-                        Text(preview.emoji)
-                            .font(.system(size: 10))
-                        Text(preview.category)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Color(nsColor: ActivityCategory.from(preview.category).color))
-                        if preview.flow {
-                            Text("🔥")
-                                .font(.system(size: 9))
-                        }
-                        Text("— \(preview.status)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .padding(.leading, 14)
-                }
+                publishedPreviewRow(preview)
             }
         }
         .padding(7)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .background(Color.black.opacity(0.22))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .help("This is the compact encrypted digest friends see, not your private local history.")
+    }
+
+    private func publishedPreviewRow(_ preview: PublishedFriendStatus) -> some View {
+        let accent = Color(nsColor: ActivityCategory.from(preview.category).color)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text("to \(preview.friend)")
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                Text(preview.audience)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                if preview.published {
+                    Text(preview.timestamp.map(relativeTime) ?? "unknown")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(preview.isStale ? Color.orange : Color(nsColor: .tertiaryLabelColor))
+                } else {
+                    Text("not yet")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            if preview.published {
+                HStack(spacing: 4) {
+                    Text(preview.emoji)
+                        .font(.system(size: 10))
+                    Text(preview.category)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(accent)
+                    Text("— \(preview.status)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.leading, 12)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .background(accent.opacity(preview.published ? 0.10 : 0.04))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(accent.opacity(preview.published ? 0.18 : 0.08), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private func relativeTime(_ date: Date) -> String {

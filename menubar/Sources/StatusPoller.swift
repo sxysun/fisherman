@@ -129,38 +129,61 @@ final class StatusPoller: @unchecked Sendable {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let friends = self.config.relayFriends
-            let result = CliBridge.run(["friend", "status", "--limit", "1"], timeout: 8)
+            let result = CliBridge.run(["friend", "status", "--limit", "8"], timeout: 8)
             guard result.exitCode == 0,
                   let data = result.stdout.data(using: .utf8),
                   let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
             else { return }
 
             let now = Date().timeIntervalSince1970
-            let activeByPubkey = Dictionary(
-                rows.compactMap { row -> (String, UserActivity)? in
-                    guard let friend = row["friend"] as? String,
-                          let pubkey = row["pubkey"] as? String,
-                          let ts = row["ts"] as? Double,
-                          let digest = row["digest"] as? [String: Any]
-                    else { return nil }
+            var eventsByPubkey: [String: [[String: Any]]] = [:]
+            for row in rows {
+                guard let pubkey = row["pubkey"] as? String else { continue }
+                eventsByPubkey[pubkey, default: []].append(row)
+            }
 
-                    let emoji = digest["emoji"] as? String ?? "?"
-                    let category = digest["category"] as? String ?? "idle"
-                    let status = digest["status"] as? String ?? ""
-                    let stale = now - ts > 15 * 60
-                    var activity = UserActivity(
-                        id: "relay:\(pubkey)",
-                        name: friend,
-                        emoji: emoji,
-                        category: category,
-                        status: status,
-                        stale: stale
+            var activeByPubkey: [String: UserActivity] = [:]
+            for (pubkey, events) in eventsByPubkey {
+                let sorted = events.sorted {
+                    ($0["ts"] as? Double ?? 0) > ($1["ts"] as? Double ?? 0)
+                }
+                guard let newest = sorted.first,
+                      let friend = newest["friend"] as? String,
+                      let ts = newest["ts"] as? Double,
+                      let digest = newest["digest"] as? [String: Any]
+                else { continue }
+
+                let emoji = digest["emoji"] as? String ?? "?"
+                let category = digest["category"] as? String ?? "idle"
+                let status = digest["status"] as? String ?? ""
+                let stale = now - ts > 15 * 60
+                let history: [ActivityEntry] = sorted.compactMap { event in
+                    guard let eventTs = event["ts"] as? Double,
+                          let eventDigest = event["digest"] as? [String: Any]
+                    else { return nil }
+                    return ActivityEntry(
+                        emoji: eventDigest["emoji"] as? String ?? "?",
+                        category: eventDigest["category"] as? String ?? "idle",
+                        status: eventDigest["status"] as? String ?? "",
+                        timestamp: Date(timeIntervalSince1970: eventTs)
                     )
-                    activity.inFlow = digest["flow"] as? Bool ?? false
-                    return (pubkey, activity)
-                },
-                uniquingKeysWith: { first, _ in first }
-            )
+                }
+                var activity = UserActivity(
+                    id: "relay:\(pubkey)",
+                    name: friend,
+                    emoji: emoji,
+                    category: category,
+                    status: status,
+                    stale: stale,
+                    history: history,
+                    sessionStart: Self.computeSessionStart(
+                        currentCategory: category,
+                        history: history
+                    )
+                )
+                activity.inFlow = digest["flow"] as? Bool ?? false
+                activeByPubkey[pubkey] = activity
+            }
 
             let activities: [UserActivity]
             if friends.isEmpty {
