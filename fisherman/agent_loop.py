@@ -5,11 +5,11 @@ no LLM client. This file is the optional "make my friends see live status"
 glue, intended to run as its own process.
 
 Default LLM is OpenRouter (or any OpenAI-compatible endpoint) configured
-via env:
+via Fisherman settings or env:
 
-    OPENAI_API_KEY    — optional; missing key uses a generic privacy-safe fallback
-    OPENAI_BASE_URL   — defaults to https://openrouter.ai/api/v1
-    AGENT_MODEL       — model id (default: mistralai/mistral-nemo)
+    FISH_STATUS_LLM_API_KEY or OPENAI_API_KEY — optional; missing key uses a generic privacy-safe fallback
+    FISH_STATUS_LLM_BASE_URL or OPENAI_BASE_URL
+    FISH_STATUS_LLM_MODEL or AGENT_MODEL/OPENAI_MODEL
 
 Loop: every --interval seconds, query recent context, build a prompt,
 call the LLM, parse {emoji,category,status,flow}, publish. Uses the
@@ -27,6 +27,7 @@ from typing import Any
 
 import click
 
+from fisherman.config import FishermanConfig
 from fisherman.friends import list_friends
 
 
@@ -51,6 +52,38 @@ STATUS RULES:
 
 PRIVACY — friends see this. Never include people's names, message content, health, finances, legal, or NSFW topics.
 """
+
+
+def _llm_settings(model_override: str | None = None) -> tuple[str | None, str, str, str]:
+    """Read the one status-LLM configuration used by Settings and the loop."""
+    cfg = FishermanConfig()
+    mode = (cfg.status_llm_mode or "managed").strip().lower()
+    if mode not in {"managed", "byo", "none"}:
+        mode = "managed"
+    base_url = (
+        os.environ.get("FISH_STATUS_LLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
+        or cfg.status_llm_base_url
+        or _DEFAULT_BASE_URL
+    ).strip()
+    model = (
+        model_override
+        or os.environ.get("FISH_STATUS_LLM_MODEL")
+        or cfg.status_llm_model
+        or os.environ.get("OPENAI_MODEL")
+        or os.environ.get("AGENT_MODEL")
+        or _DEFAULT_MODEL
+    ).strip()
+    api_key = ""
+    if mode != "none":
+        api_key = (
+            os.environ.get("FISH_STATUS_LLM_API_KEY")
+            or cfg.status_llm_api_key
+            or os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or ""
+        ).strip()
+    return api_key or None, base_url, model, mode
 
 _AUDIENCE_RULES = {
     "work": (
@@ -253,13 +286,11 @@ def run_once(api_key: str | None, base_url: str, model: str, since: str = "5m") 
 @click.option("--once", is_flag=True, help="Run a single iteration and exit")
 def main(interval, since, model, once):
     """Run a status-publishing loop using OpenRouter/OpenAI."""
-    api_key = os.environ.get("OPENAI_API_KEY")
-    base_url = os.environ.get("OPENAI_BASE_URL", _DEFAULT_BASE_URL)
-    model = model or os.environ.get("AGENT_MODEL", _DEFAULT_MODEL)
+    api_key, base_url, model, mode = _llm_settings(model)
 
-    click.echo(f"agent loop: model={model} every {interval}s window={since}")
+    click.echo(f"agent loop: mode={mode} model={model} every {interval}s window={since}")
     if not api_key:
-        click.echo("agent loop: OPENAI_API_KEY not set; using safe heuristic fallback")
+        click.echo("agent loop: status LLM key not set; using safe heuristic fallback")
     if once:
         run_once(api_key, base_url, model, since=since)
         return

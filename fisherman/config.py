@@ -392,3 +392,4 @@ class FishermanConfig(BaseSettings):
     status_llm_mode: str = "managed"  # managed | byo | none
     status_llm_base_url: str = "https://openrouter.ai/api/v1"
     status_llm_model: str = DEFAULT_STATUS_LLM_MODEL
+    status_llm_api_key: str = ""

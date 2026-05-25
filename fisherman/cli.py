@@ -2059,16 +2059,29 @@ def context_delete(home, since, until, all_records, limit, dry_run, confirm, tim
 
 def _local_status_llm_settings() -> dict:
     cfg = FishermanConfig()
+    api_key_configured = bool(_local_status_llm_api_key(cfg))
     return {
         "mode": cfg.status_llm_mode,
         "base_url": cfg.status_llm_base_url,
         "model": cfg.status_llm_model,
-        "api_key_configured": False,
-        "managed_key_configured": False,
+        "api_key_configured": api_key_configured,
+        "managed_key_configured": api_key_configured if cfg.status_llm_mode == "managed" else False,
         "external_llm_enabled": cfg.status_llm_mode != "none",
         "backend_mode": cfg.backend_mode,
         "backend_url": cfg.backend_url,
+        "key_source": "local_env" if api_key_configured else None,
     }
+
+
+def _local_status_llm_api_key(cfg: FishermanConfig | None = None) -> str:
+    cfg = cfg or FishermanConfig()
+    return (
+        os.environ.get("FISH_STATUS_LLM_API_KEY")
+        or cfg.status_llm_api_key
+        or os.environ.get("OPENROUTER_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
+        or ""
+    ).strip()
 
 
 @main.group(name="activity-status")
@@ -2134,6 +2147,10 @@ def activity_status_configure(
         _cfg.persist_user_env_var("FISH_STATUS_LLM_BASE_URL", base)
     if chosen_model:
         _cfg.persist_user_env_var("FISH_STATUS_LLM_MODEL", chosen_model)
+    if api_key:
+        _cfg.persist_user_env_var("FISH_STATUS_LLM_API_KEY", api_key)
+    if clear_api_key:
+        _cfg.persist_user_env_var("FISH_STATUS_LLM_API_KEY", "")
 
     body = {
         "mode": mode,
@@ -2146,9 +2163,14 @@ def activity_status_configure(
         body["clear_api_key"] = True
 
     if _active_backend_base_url(cfg):
-        out = _status_llm_backend_request("PUT", body)
-        out["backend_mode"] = cfg.backend_mode
-        out["backend_url"] = cfg.backend_url
+        try:
+            out = _status_llm_backend_request("PUT", body)
+            out["backend_mode"] = cfg.backend_mode
+            out["backend_url"] = cfg.backend_url
+        except click.ClickException as e:
+            out = _local_status_llm_settings()
+            out.update({"mode": mode, "base_url": base, "model": chosen_model, "ok": True})
+            out["backend_error"] = str(e)
     else:
         out = _local_status_llm_settings()
         out.update({"mode": mode, "base_url": base, "model": chosen_model, "ok": True})
@@ -2163,6 +2185,10 @@ def activity_status_configure(
         click.echo("  LLM:     disabled; heuristic status only")
     elif mode == "byo":
         click.echo(f"  key:     {'configured' if out.get('api_key_configured') else 'unchanged / missing'}")
+    elif out.get("api_key_configured"):
+        click.echo("  key:     configured locally")
+    if out.get("backend_error"):
+        click.echo(f"  warning: backend settings unavailable; using local settings ({out['backend_error']})", err=True)
     else:
         click.echo(f"  managed: {'configured' if out.get('managed_key_configured') else 'missing'}")
 

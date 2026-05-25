@@ -43,25 +43,25 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _managed_status_llm_api_key() -> str:
     return (
-        os.environ.get("OPENAI_API_KEY")
+        os.environ.get("FISH_STATUS_LLM_API_KEY")
         or os.environ.get("OPENROUTER_API_KEY")
-        or os.environ.get("FISH_STATUS_LLM_API_KEY")
+        or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
 
 
 def _managed_status_llm_base_url() -> str:
     return (
-        os.environ.get("OPENAI_BASE_URL")
-        or os.environ.get("FISH_STATUS_LLM_BASE_URL")
+        os.environ.get("FISH_STATUS_LLM_BASE_URL")
+        or os.environ.get("OPENAI_BASE_URL")
         or "https://openrouter.ai/api/v1"
     ).strip()
 
 
 def _managed_status_llm_model() -> str:
     return (
-        os.environ.get("OPENAI_MODEL")
-        or os.environ.get("FISH_STATUS_LLM_MODEL")
+        os.environ.get("FISH_STATUS_LLM_MODEL")
+        or os.environ.get("OPENAI_MODEL")
         or "mistralai/mistral-nemo"
     ).strip()
 

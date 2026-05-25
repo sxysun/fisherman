@@ -378,6 +378,8 @@ def test_freeze_eval_manifest_is_self_contained_and_evaluable(monkeypatch, tmp_p
             Path(tmp_path / "frozen" / "manifest.json"),
             policy="llm_icl_v0",
             config_overrides={
+                "quiet_hours_start": 3,
+                "quiet_hours_end": 4,
                 "policy_learner": {
                     "enabled": True,
                     "offline_eval": True,
@@ -409,6 +411,8 @@ def test_freeze_eval_manifest_is_self_contained_and_evaluable(monkeypatch, tmp_p
             Path(tmp_path / "frozen" / "manifest.json"),
             policy="llm_icl_v0",
             config_overrides={
+                "quiet_hours_start": 3,
+                "quiet_hours_end": 4,
                 "policy_learner": {
                     "enabled": True,
                     "eval_mode": "live_model",
@@ -437,6 +441,8 @@ def test_freeze_eval_manifest_is_self_contained_and_evaluable(monkeypatch, tmp_p
                 Path(tmp_path / "frozen" / "manifest.json"),
                 policy="llm_icl_v0",
                 config_overrides={
+                    "quiet_hours_start": 3,
+                    "quiet_hours_end": 4,
                     "policy_learner": {
                         "enabled": True,
                         "eval_mode": "live_model",
@@ -2696,7 +2702,7 @@ def test_shadow_eval_compares_policy_variants_against_labels(tmp_path):
         dataset=str(candidates_path),
         labels_path=str(labels_path),
         outcomes_path=str(outcomes_path),
-        variants={"current": {}},
+        variants={"current": {"quiet_hours_start": 3, "quiet_hours_end": 4}},
     )
     assert report["n_candidates"] == 2
     assert report["n_labeled_candidates"] == 2

@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from fisherman import agent_loop
+from fisherman import config as config_mod
 from fisherman import processor
 
 
@@ -114,6 +115,36 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(digest["category"], "terminal")
         self.assertEqual(digest["status"], "using terminal")
         self.assertNotIn("secret", json.dumps(digest))
+
+    def test_status_loop_reads_fish_status_llm_settings_file(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            env_path = home / ".fisherman" / ".env"
+            env_path.parent.mkdir(parents=True, exist_ok=True)
+            env_path.write_text(
+                "FISH_STATUS_LLM_API_KEY=sk-status\n"
+                "FISH_STATUS_LLM_BASE_URL=https://llm.example/v1\n"
+                "FISH_STATUS_LLM_MODEL=test-model\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "HOME": str(home),
+                    "OPENAI_API_KEY": "sk-wrong-global",
+                    "OPENROUTER_API_KEY": "",
+                    "OPENAI_BASE_URL": "",
+                    "OPENAI_MODEL": "",
+                    "AGENT_MODEL": "",
+                },
+            ), mock.patch.object(config_mod, "project_env_path", return_value=missing_project):
+                api_key, base_url, model, mode = agent_loop._llm_settings()
+
+        self.assertEqual(api_key, "sk-status")
+        self.assertEqual(base_url, "https://llm.example/v1")
+        self.assertEqual(model, "test-model")
+        self.assertEqual(mode, "managed")
 
 
 if __name__ == "__main__":

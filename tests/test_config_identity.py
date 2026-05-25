@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import click
 from click.testing import CliRunner
 
 from fisherman import cli
@@ -93,6 +94,41 @@ class ConfigIdentityTests(unittest.TestCase):
                 ["com.apple.Terminal", "com.googlecode.iterm2"],
             )
             self.assertEqual(cfg.excluded_bundles, [])
+
+    def test_activity_status_configure_persists_local_key_when_backend_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ), mock.patch.object(
+                cli, "_active_backend_base_url", return_value="https://backend.example"
+            ), mock.patch.object(
+                cli,
+                "_status_llm_backend_request",
+                side_effect=click.ClickException("backend down"),
+            ):
+                result = CliRunner().invoke(
+                    cli.main,
+                    [
+                        "activity-status",
+                        "configure",
+                        "--mode",
+                        "managed",
+                        "--api-key",
+                        "sk-local",
+                        "--json",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            out = json.loads(result.output)
+            self.assertTrue(out["api_key_configured"])
+            self.assertEqual(out["key_source"], "local_env")
+            env_text = self._home_env(home).read_text(encoding="utf-8")
+            self.assertIn("FISH_STATUS_LLM_API_KEY=sk-local", env_text)
 
     def test_cli_formats_backend_iso_timestamps(self) -> None:
         rendered = cli._fmt_ts("2026-05-11T17:48:35+00:00")
