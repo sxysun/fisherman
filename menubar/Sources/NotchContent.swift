@@ -25,7 +25,7 @@ struct CompactTrailing: View {
             // Emoji + flow badge only — duration/timeline live in expanded view
             // to keep the compact strip narrow and the menu bar visible.
             ForEach(compactActivities.prefix(5)) { user in
-                let showFlow = user.id == "me" && user.inFlow
+                let showFlow = user.inFlow
                 HStack(spacing: 1) {
                     Text(user.emoji)
                         .font(.system(size: 12))
@@ -198,7 +198,7 @@ struct ExpandedContent: View {
                             }
 
                             // Flow state badge
-                            if user.id == "me" && user.inFlow {
+                            if user.inFlow {
                                 Text("🔥")
                                     .font(.system(size: 10))
                                     .help("In the zone for 30+ min")
@@ -391,7 +391,7 @@ struct ExpandedContent: View {
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 7))
-        .help("This is the compact encrypted digest friends see, not your private local history.")
+        .help("This is the encrypted activity status friends see. Close friends receive the same sanitized activity history as your local activity row, not screenshots or OCR.")
     }
 
     private func publishedPreviewRow(_ preview: PublishedFriendStatus) -> some View {
@@ -423,6 +423,11 @@ struct ExpandedContent: View {
                     Text(preview.category)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(accent)
+                    if preview.flow {
+                        Text("🔥")
+                            .font(.system(size: 9))
+                            .help("In the zone for 30+ min")
+                    }
                     Text("— \(preview.status)")
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)

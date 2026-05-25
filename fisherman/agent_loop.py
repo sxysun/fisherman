@@ -23,12 +23,14 @@ import os
 import subprocess
 import sys
 import time
+import urllib.request
 from typing import Any
 
 import click
 
 from fisherman.config import FishermanConfig
 from fisherman.friends import list_friends
+from fisherman.timeline import _activity_api_url, _fishkey_header
 
 
 _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
@@ -52,6 +54,44 @@ STATUS RULES:
 
 PRIVACY — friends see this. Never include people's names, message content, health, finances, legal, or NSFW topics.
 """
+
+_CATEGORY_EMOJI = {
+    "coding": "💻",
+    "debugging": "🔎",
+    "code review": "🧾",
+    "reading docs": "📚",
+    "design": "🎨",
+    "writing": "✍️",
+    "chat": "💬",
+    "email": "✉️",
+    "meeting": "📅",
+    "browsing": "🌐",
+    "news": "📰",
+    "reading": "🧠",
+    "gaming": "🎲",
+    "terminal": "⌨️",
+    "idle": "😴",
+}
+
+_EMOJI_SHORTCODES = {
+    ":crossed_swords:": "⚔️",
+    ":game_die:": "🎲",
+    ":video_game:": "🎮",
+    ":computer:": "💻",
+    ":laptop:": "💻",
+    ":mag:": "🔎",
+    ":memo:": "🧾",
+    ":books:": "📚",
+    ":art:": "🎨",
+    ":speech_balloon:": "💬",
+    ":email:": "✉️",
+    ":calendar:": "📅",
+    ":globe_with_meridians:": "🌐",
+    ":newspaper:": "📰",
+    ":brain:": "🧠",
+    ":keyboard:": "⌨️",
+    ":zzz:": "😴",
+}
 
 
 def _llm_settings(model_override: str | None = None) -> tuple[str | None, str, str, str]:
@@ -117,6 +157,106 @@ def _build_context(rows: list[dict], max_rows: int = 8) -> str:
         ocr = (r.get("ocr_text") or "").replace("\n", " ")[:200]
         lines.append(f"  {app} — {win}: {ocr}")
     return "\n".join(lines) or "(no recent context)"
+
+
+def _activity_context(activity: dict | None) -> str:
+    if not activity:
+        return "(no recent context)"
+    category = activity.get("category") or "idle"
+    status = activity.get("status") or ""
+    return f"  current activity — {category}: {status}"
+
+
+def _sanitize_emoji(value: Any, category: str | None = None) -> str:
+    """Keep friend-visible emoji displayable even when an LLM returns shortcode text."""
+    raw = str(value or "").strip()
+    category_key = (category or "").strip().lower()
+    fallback = _CATEGORY_EMOJI.get(category_key, "💻")
+    if not raw:
+        return fallback
+
+    lowered = raw.lower()
+    if lowered in _EMOJI_SHORTCODES:
+        return _EMOJI_SHORTCODES[lowered]
+
+    # Common model failure: returns ":crossed_swords:" or truncated
+    # shortcode-looking ASCII instead of an actual emoji.
+    if raw.startswith(":") or raw.isascii():
+        return fallback
+
+    return raw[:8]
+
+
+def _sanitize_digest(digest: dict, *, flow: bool | None = None) -> dict:
+    category = str(digest.get("category") or "idle").strip()[:20] or "idle"
+    status = str(digest.get("status") or "").strip()[:30]
+    out = {
+        "emoji": _sanitize_emoji(digest.get("emoji"), category),
+        "category": category,
+        "status": status,
+        "flow": bool(digest.get("flow", False) if flow is None else flow),
+    }
+    return out
+
+
+def _activity_history_entries(limit: int = 8) -> list[dict]:
+    cfg = FishermanConfig()
+    if not cfg.private_key:
+        return []
+    url = _activity_api_url(cfg, f"/api/activity_history?limit={limit}")
+    auth = _fishkey_header(cfg.private_key)
+    if not url or not auth:
+        return []
+    req = urllib.request.Request(url, headers={"Authorization": auth})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return []
+    entries = []
+    for entry in data.get("entries") or []:
+        category = str(entry.get("category") or "idle").strip()[:20] or "idle"
+        status = str(entry.get("status") or "").strip()[:30]
+        timestamp = entry.get("timestamp") or entry.get("ts")
+        if not timestamp:
+            continue
+        entries.append({
+            "emoji": _sanitize_emoji(entry.get("emoji"), category),
+            "category": category,
+            "status": status,
+            "timestamp": timestamp,
+        })
+    return entries
+
+
+def _current_activity() -> dict | None:
+    cfg = FishermanConfig()
+    if not cfg.private_key:
+        return None
+    url = _activity_api_url(cfg, "/api/current_activity")
+    auth = _fishkey_header(cfg.private_key)
+    if not url or not auth:
+        return None
+    req = urllib.request.Request(url, headers={"Authorization": auth})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return None
+    if data.get("activity") is None and not data.get("category"):
+        return None
+    return data
+
+
+def _close_digest_from_activity(activity: dict | None, history: list[dict], fallback: dict) -> dict:
+    if not activity:
+        digest = dict(fallback)
+    else:
+        digest = _sanitize_digest(activity, flow=bool(activity.get("flow", False)))
+    if history:
+        digest["history"] = history
+        digest["view"] = "activity_history"
+    return digest
 
 
 def _call_llm(api_key: str | None, base_url: str, model: str, prompt: str) -> dict | None:
@@ -232,37 +372,50 @@ def _policy_prompt(audience: str, prompt: str) -> str:
 
 def run_once(api_key: str | None, base_url: str, model: str, since: str = "5m") -> bool:
     rows = _run_query(since=since)
-    if not rows:
+    current_activity = _current_activity()
+    deterministic_flow = (
+        bool(current_activity.get("flow", False))
+        if current_activity is not None else None
+    )
+
+    if not rows and not current_activity:
         click.echo("  no recent context — skipping")
         return False
     friends = list_friends()
     if not friends:
         click.echo("  no friends — skipping status publish")
         return False
+    has_close_friend = any(_policy_key(friend)[0] == "close" for friend in friends)
+    activity_history = (
+        _activity_history_entries(limit=8)
+        if has_close_friend and current_activity is not None else []
+    )
 
     by_policy: dict[tuple[str, str], list[dict]] = {}
     for friend in friends:
         by_policy.setdefault(_policy_key(friend), []).append(friend)
 
     ok_any = False
-    context = _build_context(rows)
+    context = _build_context(rows) if rows else _activity_context(current_activity)
     for (audience, custom_prompt), group in by_policy.items():
-        policy = _policy_prompt(audience, custom_prompt)
-        prompt = _PROMPT.format(context=context) + "\n\n" + policy
-        digest = _call_llm(api_key, base_url, model, prompt)
-        if digest is None:
-            digest = _fallback_digest(rows)
-            click.echo(
-                f"  using heuristic fallback for {audience}: "
-                f"{digest['emoji']} {digest['category']} {digest['status']}"
-            )
-        # Drop unknown keys + clamp lengths
-        digest = {
-            "emoji": (digest.get("emoji") or "?")[:8],
-            "category": (digest.get("category") or "idle")[:20],
-            "status": (digest.get("status") or "")[:30],
-            "flow": bool(digest.get("flow", False)),
-        }
+        if audience == "close":
+            if current_activity is None:
+                click.echo("  close audience skipped: current activity unavailable")
+                continue
+            # Close friends get the same sanitized activity status/history that
+            # drives the local card. No second LLM pass and no audience rewrite.
+            digest = _close_digest_from_activity(current_activity, activity_history, {})
+        else:
+            policy = _policy_prompt(audience, custom_prompt)
+            prompt = _PROMPT.format(context=context) + "\n\n" + policy
+            digest = _call_llm(api_key, base_url, model, prompt)
+            if digest is None:
+                digest = _fallback_digest(rows)
+                click.echo(
+                    f"  using heuristic fallback for {audience}: "
+                    f"{digest['emoji']} {digest['category']} {digest['status']}"
+                )
+            digest = _sanitize_digest(digest, flow=deterministic_flow)
         recipients = [friend["pubkey_hex"] for friend in group]
         ok = _publish(digest, recipients)
         ok_any = ok_any or ok

@@ -11,6 +11,7 @@ from unittest import mock
 
 from click.testing import CliRunner
 
+from fisherman import agent_loop
 from fisherman import cli
 from fisherman import friends
 from fisherman import keys
@@ -283,6 +284,108 @@ class FriendCliTests(unittest.TestCase):
         self.assertEqual(recipient_events[0]["digest"], digest)
         self.assertEqual(other_events, [])
         self.assertNotIn("pairwise envelope", json.dumps(stored))
+
+    def test_status_loop_sanitizes_shortcode_emoji(self) -> None:
+        self.assertEqual(
+            agent_loop._sanitize_digest({
+                "emoji": ":crossed_swords:",
+                "category": "gaming",
+                "status": "strategy",
+            })["emoji"],
+            "⚔️",
+        )
+        self.assertEqual(
+            agent_loop._sanitize_digest({
+                "emoji": ":crossed",
+                "category": "gaming",
+                "status": "strategy",
+            })["emoji"],
+            "🎲",
+        )
+        self.assertEqual(
+            agent_loop._sanitize_digest({
+                "emoji": "F",
+                "category": "coding",
+                "status": "deployment",
+            })["emoji"],
+            "💻",
+        )
+
+    def test_status_loop_close_reuses_backend_activity_without_llm(self) -> None:
+        current = {
+            "emoji": "💬",
+            "category": "chat",
+            "status": "WeChat conversation",
+            "flow": True,
+        }
+        history = [
+            {
+                "emoji": "💬",
+                "category": "chat",
+                "status": "WeChat conversation",
+                "timestamp": "2026-05-25T23:00:00+00:00",
+            }
+        ]
+
+        with mock.patch("fisherman.agent_loop._run_query", return_value=[]), \
+             mock.patch("fisherman.agent_loop._current_activity", return_value=current), \
+             mock.patch("fisherman.agent_loop._activity_history_entries", return_value=history), \
+             mock.patch("fisherman.agent_loop.list_friends", return_value=[
+                 {
+                     "name": "Seven",
+                     "pubkey_hex": "aa" * 32,
+                     "audience": "close",
+                     "policy_prompt": None,
+                 }
+             ]), \
+             mock.patch("fisherman.agent_loop._call_llm") as call_llm, \
+             mock.patch("fisherman.agent_loop._publish", return_value=True) as publish:
+            ok = agent_loop.run_once("key", "https://example.invalid/v1", "model")
+
+        self.assertTrue(ok)
+        call_llm.assert_not_called()
+        publish.assert_called_once()
+        digest, recipients = publish.call_args.args
+        self.assertEqual(recipients, ["aa" * 32])
+        self.assertEqual(digest["emoji"], "💬")
+        self.assertEqual(digest["category"], "chat")
+        self.assertEqual(digest["status"], "WeChat conversation")
+        self.assertTrue(digest["flow"])
+        self.assertEqual(digest["history"], history)
+
+    def test_status_loop_non_close_uses_deterministic_flow(self) -> None:
+        current = {
+            "emoji": "💬",
+            "category": "chat",
+            "status": "WeChat conversation",
+            "flow": True,
+        }
+
+        with mock.patch("fisherman.agent_loop._run_query", return_value=[
+                 {"app": "Cursor", "window": "main.py", "ocr_text": "deploy"}
+             ]), \
+             mock.patch("fisherman.agent_loop._current_activity", return_value=current), \
+             mock.patch("fisherman.agent_loop._activity_history_entries", return_value=[]), \
+             mock.patch("fisherman.agent_loop.list_friends", return_value=[
+                 {
+                     "name": "alice",
+                     "pubkey_hex": "bb" * 32,
+                     "audience": "friends",
+                     "policy_prompt": None,
+                 }
+             ]), \
+             mock.patch("fisherman.agent_loop._call_llm", return_value={
+                 "emoji": "💻",
+                 "category": "coding",
+                 "status": "deployment",
+                 "flow": False,
+             }), \
+             mock.patch("fisherman.agent_loop._publish", return_value=True) as publish:
+            ok = agent_loop.run_once("key", "https://example.invalid/v1", "model")
+
+        self.assertTrue(ok)
+        digest = publish.call_args.args[0]
+        self.assertTrue(digest["flow"])
 
 
 if __name__ == "__main__":

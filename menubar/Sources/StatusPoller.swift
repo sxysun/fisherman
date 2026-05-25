@@ -153,21 +153,24 @@ final class StatusPoller: @unchecked Sendable {
                       let digest = newest["digest"] as? [String: Any]
                 else { continue }
 
-                let emoji = digest["emoji"] as? String ?? "?"
                 let category = digest["category"] as? String ?? "idle"
+                let emoji = Self.displayEmoji(digest["emoji"] as? String, category: category)
                 let status = digest["status"] as? String ?? ""
                 let stale = now - ts > 15 * 60
-                let history: [ActivityEntry] = sorted.compactMap { event in
+                let eventHistory: [ActivityEntry] = sorted.compactMap { event in
                     guard let eventTs = event["ts"] as? Double,
                           let eventDigest = event["digest"] as? [String: Any]
                     else { return nil }
+                    let eventCategory = eventDigest["category"] as? String ?? "idle"
                     return ActivityEntry(
-                        emoji: eventDigest["emoji"] as? String ?? "?",
-                        category: eventDigest["category"] as? String ?? "idle",
+                        emoji: Self.displayEmoji(eventDigest["emoji"] as? String, category: eventCategory),
+                        category: eventCategory,
                         status: eventDigest["status"] as? String ?? "",
                         timestamp: Date(timeIntervalSince1970: eventTs)
                     )
                 }
+                let embeddedHistory = Self.embeddedActivityHistory(from: digest)
+                let history = embeddedHistory.isEmpty ? eventHistory : embeddedHistory
                 var activity = UserActivity(
                     id: "relay:\(pubkey)",
                     name: friend,
@@ -230,7 +233,10 @@ final class StatusPoller: @unchecked Sendable {
                     friend: friend,
                     pubkey: pubkey,
                     audience: audience,
-                    emoji: digest["emoji"] as? String ?? "…",
+                    emoji: Self.displayEmoji(
+                        digest["emoji"] as? String,
+                        category: digest["category"] as? String ?? "waiting"
+                    ),
                     category: digest["category"] as? String ?? "waiting",
                     status: digest["status"] as? String ?? "",
                     flow: digest["flow"] as? Bool ?? false,
@@ -554,6 +560,87 @@ final class StatusPoller: @unchecked Sendable {
             }
         }
         return sessionStart
+    }
+
+    private static func embeddedActivityHistory(from digest: [String: Any]) -> [ActivityEntry] {
+        guard let rawHistory = digest["history"] as? [[String: Any]] else { return [] }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let fallbackFormatter = ISO8601DateFormatter()
+        fallbackFormatter.formatOptions = [.withInternetDateTime]
+
+        return rawHistory.compactMap { entry in
+            guard let category = entry["category"] as? String,
+                  let status = entry["status"] as? String
+            else { return nil }
+            let timestamp: Date
+            if let ts = entry["ts"] as? Double {
+                timestamp = Date(timeIntervalSince1970: ts)
+            } else if let ts = entry["timestamp"] as? Double {
+                timestamp = Date(timeIntervalSince1970: ts)
+            } else if let ts = entry["timestamp"] as? String {
+                timestamp = formatter.date(from: ts)
+                    ?? fallbackFormatter.date(from: ts)
+                    ?? Date()
+            } else {
+                return nil
+            }
+            return ActivityEntry(
+                emoji: Self.displayEmoji(entry["emoji"] as? String, category: category),
+                category: category,
+                status: status,
+                timestamp: timestamp
+            )
+        }
+    }
+
+    private static func displayEmoji(_ raw: String?, category: String) -> String {
+        let fallback: String
+        switch category {
+        case "coding": fallback = "💻"
+        case "debugging": fallback = "🔎"
+        case "code review": fallback = "🧾"
+        case "reading docs": fallback = "📚"
+        case "design": fallback = "🎨"
+        case "writing": fallback = "✍️"
+        case "chat": fallback = "💬"
+        case "email": fallback = "✉️"
+        case "meeting": fallback = "📅"
+        case "browsing": fallback = "🌐"
+        case "news": fallback = "📰"
+        case "reading": fallback = "🧠"
+        case "gaming": fallback = "🎲"
+        case "terminal": fallback = "⌨️"
+        case "idle": fallback = "😴"
+        default: fallback = "💻"
+        }
+
+        let value = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { return fallback }
+        switch value.lowercased() {
+        case ":crossed_swords:": return "⚔️"
+        case ":game_die:": return "🎲"
+        case ":video_game:": return "🎮"
+        case ":computer:", ":laptop:": return "💻"
+        case ":mag:": return "🔎"
+        case ":memo:": return "🧾"
+        case ":books:": return "📚"
+        case ":art:": return "🎨"
+        case ":speech_balloon:": return "💬"
+        case ":email:": return "✉️"
+        case ":calendar:": return "📅"
+        case ":globe_with_meridians:": return "🌐"
+        case ":newspaper:": return "📰"
+        case ":brain:": return "🧠"
+        case ":keyboard:": return "⌨️"
+        case ":zzz:": return "😴"
+        default: break
+        }
+        if value.hasPrefix(":") || value.unicodeScalars.allSatisfy({ $0.isASCII }) {
+            return fallback
+        }
+        return value
     }
 
     /// Thread-safe collector for history polling results.

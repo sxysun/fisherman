@@ -3031,8 +3031,9 @@ def friend_preview(limit: int, as_json: bool):
     """Show the last status you published to each friend.
 
     This is the sender-side preview: it reads ~/.fisherman/status-log.jsonl,
-    maps recipients back to friends, and shows the compact digest friends see.
-    It does not fetch remote state and it does not expose screenshots/history.
+    maps recipients back to friends, and shows the encrypted activity digest
+    friends see. Close friends may receive sanitized activity history, but
+    never screenshots, OCR, queue stats, or raw local capture.
     """
     rows = _friend_preview_rows(limit=limit)
     if as_json:

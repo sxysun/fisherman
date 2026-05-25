@@ -768,7 +768,7 @@ struct SettingsView: View {
         let promptPart = trimmedPrompt.isEmpty
             ? "the \(audienceLabel(audience)) preset"
             : "the \(audienceLabel(audience)) preset plus your custom instruction"
-        return "Preview: when status-loop runs, \(name) uses \(promptPart). Fisherman sends a compact encrypted digest to \(encryptionPubkey.prefix(12))..., not your private card history. Seeing \(name)'s status requires them to add you and publish back."
+        return "Preview: when status-loop runs, \(name) uses \(promptPart). Close friends receive your sanitized activity row and recent activity timeline; other audiences receive a compact encrypted digest. Seeing \(name)'s status requires them to add you and publish back."
     }
 
     private func audienceLabel(_ audience: String) -> String {
@@ -785,7 +785,7 @@ struct SettingsView: View {
         case "work":
             return "Work shares only work-relevant activity, project area, tools, docs, and broad availability. It should hide personal apps, private messages, entertainment, health, finance, legal, and relationship context."
         case "close":
-            return "Close can share a richer one-line activity digest with a trusted person, but it still does not share your private local timeline, screenshots, OCR, queue stats, secrets, message content, health, finance, legal, NSFW, or sensitive document details."
+            return "Close shares the same sanitized current activity and recent activity timeline shown in your local activity row. It still does not share screenshots, OCR, queue stats, secrets, message content, health, finance, legal, NSFW, or sensitive document details."
         case "custom":
             return "Custom follows the instruction below after the baseline privacy rules. Use it for per-person conditions like \"only share work context\" or \"hide client names.\""
         default:
