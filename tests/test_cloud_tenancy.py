@@ -936,6 +936,24 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(get_body["api_key_configured"])
         self.assertIn(get_body["key_source"], {"client_provided", "server_wrapped"})
 
+    async def test_status_llm_get_reports_server_key_when_tenant_key_locked(self):
+        os.environ["FISH_CLOUD_ENROLLMENT_MODE"] = "open"
+        os.environ["FISH_CLOUD_KEY_MODE"] = "client_provided"
+        os.environ["FISH_STATUS_LLM_API_KEY"] = "sk-managed"
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+
+        resp = await ingest._http_get_status_llm(FakeRequest(_fishkey(SEED_A), db))
+        body = json.loads(resp.text)
+
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(body["mode"], "managed")
+        self.assertTrue(body["api_key_configured"])
+        self.assertTrue(body["managed_key_configured"])
+        self.assertEqual(body["key_source"], "server_env")
+        self.assertFalse(body["tenant_key_available"])
+        self.assertIn("tenant data key unavailable", body["tenant_key_error"])
+
     async def test_backend_deputy_query_requires_scope_and_filters_tenant(self):
         ingest = _load_ingest_module()
         db = RecordingPool()

@@ -1662,11 +1662,20 @@ async def _http_get_status_llm(request: "web.Request") -> "web.Response":
             request.headers.get("X-Fisherman-Tenant-Data-Key"),
         )
         settings = await _status_llm_settings(db, ctx.user_hex, data_key)
-        return web.json_response(_public_status_llm_settings(settings))
+        out = _public_status_llm_settings(settings)
+        out["tenant_key_available"] = True
+        return web.json_response(out)
     except TenantEnrollmentError as e:
         return _tenant_error_response(e)
     except TenantKeyUnavailableError as e:
-        return _tenant_key_error_response(e)
+        try:
+            settings = await _status_llm_settings(db, ctx.user_hex, None)
+            out = _public_status_llm_settings(settings)
+            out["tenant_key_available"] = False
+            out["tenant_key_error"] = str(e)
+            return web.json_response(out)
+        except Exception:
+            return _tenant_key_error_response(e)
     except Exception:
         log.error("http_get_status_llm_error", exc_info=True)
         return web.json_response({"error": "Internal server error"}, status=500)

@@ -2120,6 +2120,8 @@ def activity_status_status(as_json: bool):
         click.echo(f"managed:    {'configured' if out.get('managed_key_configured') else 'missing'}")
     if out.get("backend_error"):
         click.echo(f"warning:    {out['backend_error']}", err=True)
+    if out.get("tenant_key_error"):
+        click.echo(f"warning:    {out['tenant_key_error']}", err=True)
 
 
 @activity_status_group.command(name="configure")

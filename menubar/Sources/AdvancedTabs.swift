@@ -447,6 +447,12 @@ struct ActivityStatusTab: View {
             return "Status generation is intentionally model-free and uses the heuristic fallback."
         }
         if let backendError, !backendError.isEmpty {
+            if keySource == "server_env" {
+                return "The backend reports a server env key. Tenant-specific encrypted settings are locked until this device reconnects its tenant key. Backend note: \(backendError)"
+            }
+            if keySource == "client_provided" || keySource == "server_wrapped" {
+                return "The backend reports tenant-specific status settings, but the key is locked until this device reconnects its tenant key. Backend note: \(backendError)"
+            }
             if keySource == "local_env" {
                 return "Backend settings are unavailable, so this Mac is using FISH_STATUS_LLM_API_KEY from ~/.fisherman/.env. Backend error: \(backendError)"
             }
@@ -504,7 +510,7 @@ struct ActivityStatusTab: View {
                     managedKeyConfigured = object["managed_key_configured"] as? Bool ?? false
                     externalLLMEnabled = object["external_llm_enabled"] as? Bool ?? true
                     keySource = object["key_source"] as? String
-                    backendError = object["backend_error"] as? String
+                    backendError = (object["backend_error"] as? String) ?? (object["tenant_key_error"] as? String)
                     statusMessage = backendError
                 } else {
                     mode = config.statusLLMMode
@@ -553,7 +559,7 @@ struct ActivityStatusTab: View {
                     managedKeyConfigured = object["managed_key_configured"] as? Bool ?? managedKeyConfigured
                     externalLLMEnabled = object["external_llm_enabled"] as? Bool ?? externalLLMEnabled
                     keySource = object["key_source"] as? String
-                    backendError = object["backend_error"] as? String
+                    backendError = (object["backend_error"] as? String) ?? (object["tenant_key_error"] as? String)
                     apiKey = ""
                     statusMessage = savedMessage(object)
                 } else {
