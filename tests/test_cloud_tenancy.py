@@ -934,6 +934,7 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_resp.status, 200)
         self.assertEqual(get_body["mode"], "byo")
         self.assertTrue(get_body["api_key_configured"])
+        self.assertIn(get_body["key_source"], {"client_provided", "server_wrapped"})
 
     async def test_backend_deputy_query_requires_scope_and_filters_tenant(self):
         ingest = _load_ingest_module()

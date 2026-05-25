@@ -261,6 +261,10 @@ struct ExpandedContent: View {
                     .foregroundStyle(.secondary)
             }
 
+            if !state.publishedFriendPreviews.isEmpty {
+                sharedStatusPreview
+            }
+
             Divider()
 
             // Frame stats
@@ -361,6 +365,64 @@ struct ExpandedContent: View {
             Text(value)
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
         }
+    }
+
+    private var sharedStatusPreview: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                Text("Friend preview")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            ForEach(state.publishedFriendPreviews.prefix(3)) { preview in
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text("to \(preview.friend)")
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                    Text(preview.audience)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.tertiary)
+                    Spacer(minLength: 4)
+                    if preview.published {
+                        Text(preview.timestamp.map(relativeTime) ?? "unknown")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(preview.isStale ? Color.orange : Color(nsColor: .tertiaryLabelColor))
+                    } else {
+                        Text("not yet")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                if preview.published {
+                    HStack(spacing: 4) {
+                        Text(preview.emoji)
+                            .font(.system(size: 10))
+                        Text(preview.category)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color(nsColor: ActivityCategory.from(preview.category).color))
+                        if preview.flow {
+                            Text("🔥")
+                                .font(.system(size: 9))
+                        }
+                        Text("— \(preview.status)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.leading, 14)
+                }
+            }
+        }
+        .padding(7)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 7))
+        .help("This is the compact encrypted digest friends see, not your private local history.")
     }
 
     private func relativeTime(_ date: Date) -> String {

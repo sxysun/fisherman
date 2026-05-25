@@ -127,6 +127,7 @@ class ConfigIdentityTests(unittest.TestCase):
             out = json.loads(result.output)
             self.assertTrue(out["api_key_configured"])
             self.assertEqual(out["key_source"], "local_env")
+            self.assertFalse(out["managed_key_configured"])
             env_text = self._home_env(home).read_text(encoding="utf-8")
             self.assertIn("FISH_STATUS_LLM_API_KEY=sk-local", env_text)
 

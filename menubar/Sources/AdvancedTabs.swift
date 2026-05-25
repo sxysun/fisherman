@@ -256,6 +256,8 @@ struct ActivityStatusTab: View {
     @State private var apiKeyConfigured: Bool = false
     @State private var managedKeyConfigured: Bool = false
     @State private var externalLLMEnabled: Bool = true
+    @State private var keySource: String?
+    @State private var backendError: String?
     @State private var statusMessage: String?
     @State private var loading: Bool = false
     @State private var applying: Bool = false
@@ -324,6 +326,24 @@ struct ActivityStatusTab: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Effective LLM path")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    Text(effectiveKeyPathLabel)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(effectiveKeyPathColor)
+                }
+                Text(effectiveKeyPathCopy)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(8)
+            .background(effectiveKeyPathColor.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
             HStack {
                 Button(applying ? "Applying..." : "Apply") { apply() }
                     .buttonStyle(.borderedProminent)
@@ -343,6 +363,8 @@ struct ActivityStatusTab: View {
                 Text(statusMessage)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
         .onAppear { load() }
@@ -397,6 +419,53 @@ struct ActivityStatusTab: View {
         }
     }
 
+    private var effectiveKeyPathLabel: String {
+        if mode == "none" { return "No LLM" }
+        switch keySource {
+        case "server_env":
+            return "Server env key"
+        case "client_provided", "server_wrapped":
+            return "Backend stored key"
+        case "local_env":
+            return "Local env key"
+        case nil:
+            return apiKeyConfigured ? "Configured key" : "No key"
+        default:
+            return keySource ?? "Unknown"
+        }
+    }
+
+    private var effectiveKeyPathColor: Color {
+        if mode == "none" { return .secondary }
+        if keySource == "server_env" || keySource == "client_provided" || keySource == "server_wrapped" { return .green }
+        if keySource == "local_env" { return .orange }
+        return apiKeyConfigured ? .green : .red
+    }
+
+    private var effectiveKeyPathCopy: String {
+        if mode == "none" {
+            return "Status generation is intentionally model-free and uses the heuristic fallback."
+        }
+        if let backendError, !backendError.isEmpty {
+            if keySource == "local_env" {
+                return "Backend settings are unavailable, so this Mac is using FISH_STATUS_LLM_API_KEY from ~/.fisherman/.env. Backend error: \(backendError)"
+            }
+            return "Backend settings are unavailable and no usable local status key is visible. Backend error: \(backendError)"
+        }
+        switch keySource {
+        case "server_env":
+            return "The active backend reports a server-side provider key. The Mac app is not carrying the secret."
+        case "client_provided", "server_wrapped":
+            return "The active backend reports a user-provided key stored for this tenant."
+        case "local_env":
+            return "This Mac is using a local status key from ~/.fisherman/.env."
+        default:
+            return apiKeyConfigured
+                ? "A provider key is configured, but the source was not reported by the backend."
+                : "No provider key is configured; status-loop will use the heuristic fallback."
+        }
+    }
+
     private var byoCopy: String {
         switch config.backendMode {
         case "cloud":
@@ -434,13 +503,15 @@ struct ActivityStatusTab: View {
                     apiKeyConfigured = object["api_key_configured"] as? Bool ?? false
                     managedKeyConfigured = object["managed_key_configured"] as? Bool ?? false
                     externalLLMEnabled = object["external_llm_enabled"] as? Bool ?? true
-                    if let error = object["backend_error"] as? String {
-                        statusMessage = error
-                    }
+                    keySource = object["key_source"] as? String
+                    backendError = object["backend_error"] as? String
+                    statusMessage = backendError
                 } else {
                     mode = config.statusLLMMode
                     baseURL = config.statusLLMBaseURL
                     model = config.statusLLMModel
+                    keySource = nil
+                    backendError = nil
                     statusMessage = "Could not read backend status settings."
                 }
                 loading = false
@@ -481,6 +552,8 @@ struct ActivityStatusTab: View {
                     apiKeyConfigured = object["api_key_configured"] as? Bool ?? apiKeyConfigured
                     managedKeyConfigured = object["managed_key_configured"] as? Bool ?? managedKeyConfigured
                     externalLLMEnabled = object["external_llm_enabled"] as? Bool ?? externalLLMEnabled
+                    keySource = object["key_source"] as? String
+                    backendError = object["backend_error"] as? String
                     apiKey = ""
                     statusMessage = savedMessage(object)
                 } else {
@@ -495,6 +568,12 @@ struct ActivityStatusTab: View {
     private func savedMessage(_ object: [String: Any]) -> String {
         let backendMode = object["backend_mode"] as? String ?? config.backendMode
         let backendURL = object["backend_url"] as? String ?? config.backendURL
+        if let error = object["backend_error"] as? String, !error.isEmpty {
+            if object["key_source"] as? String == "local_env" {
+                return "Saved locally in ~/.fisherman/.env. Backend settings were not updated: \(error)"
+            }
+            return "Backend settings were not updated: \(error)"
+        }
         switch backendMode {
         case "cloud":
             return "Saved on Fisherman Cloud at \(backendURL). The Cloud status worker will use these settings."

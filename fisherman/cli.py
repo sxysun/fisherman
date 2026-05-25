@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 import click
 import structlog
@@ -2065,7 +2066,9 @@ def _local_status_llm_settings() -> dict:
         "base_url": cfg.status_llm_base_url,
         "model": cfg.status_llm_model,
         "api_key_configured": api_key_configured,
-        "managed_key_configured": api_key_configured if cfg.status_llm_mode == "managed" else False,
+        # This is a local fallback view. It can prove a local key exists, but
+        # it cannot honestly claim the remote server env key is configured.
+        "managed_key_configured": False,
         "external_llm_enabled": cfg.status_llm_mode != "none",
         "backend_mode": cfg.backend_mode,
         "backend_url": cfg.backend_url,
@@ -3017,6 +3020,109 @@ def _echo_friend_status(out: list[dict], as_text: bool) -> None:
         cat = d.get("category", "")
         status = d.get("status", "")
         click.echo(f"[{ts}] {ev.get('friend', '?'):18} {emoji}  {cat:12} {status}")
+
+
+@friend_group.command(name="preview")
+@click.option("--limit", default=20, show_default=True, help="Maximum status-log rows to scan per friend.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def friend_preview(limit: int, as_json: bool):
+    """Show the last status you published to each friend.
+
+    This is the sender-side preview: it reads ~/.fisherman/status-log.jsonl,
+    maps recipients back to friends, and shows the compact digest friends see.
+    It does not fetch remote state and it does not expose screenshots/history.
+    """
+    rows = _friend_preview_rows(limit=limit)
+    if as_json:
+        click.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    if not rows:
+        click.echo("(no friends yet)")
+        return
+    now = time.time()
+    for row in rows:
+        name = row.get("friend") or (row.get("pubkey") or "friend")[:8]
+        audience = row.get("audience") or "friends"
+        if not row.get("published"):
+            click.echo(f"{name:18} {audience:7}  no published status yet")
+            continue
+        digest = row.get("digest") or {}
+        age = _fmt_age(now - float(row.get("ts") or 0))
+        left = " ".join(
+            part for part in [
+                (digest.get("emoji") or "").strip(),
+                (digest.get("category") or "").strip(),
+            ]
+            if part
+        )
+        status = (digest.get("status") or "").strip()
+        flow = " flow" if digest.get("flow") else ""
+        click.echo(f"{name:18} {audience:7}  {age:>6}  {left}{flow} — {status}")
+
+
+def _friend_preview_rows(limit: int = 20) -> list[dict]:
+    from fisherman.friends import list_friends
+    from fisherman.ledger import status_log_path
+
+    friends_rows = list_friends()
+    latest_by_recipient: dict[str, dict] = {}
+    path = Path(status_log_path())
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                scan_count = max(limit * max(len(friends_rows), 1) * 4, 100)
+                lines = fh.readlines()[-scan_count:]
+        except OSError:
+            lines = []
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            recipient = row.get("recipient_pubkey")
+            if not recipient:
+                continue
+            ts = float(row.get("ts") or 0)
+            if ts >= float(latest_by_recipient.get(recipient, {}).get("ts") or 0):
+                latest_by_recipient[recipient] = row
+
+    out: list[dict] = []
+    now = time.time()
+    for friend in friends_rows:
+        pubkey = friend.get("pubkey_hex") or ""
+        published = latest_by_recipient.get(pubkey)
+        base = {
+            "friend": friend.get("name") or pubkey[:8],
+            "pubkey": pubkey,
+            "audience": friend.get("audience") or "friends",
+            "relay_url": friend.get("relay_url"),
+            "published": bool(published),
+        }
+        if published:
+            ts = float(published.get("ts") or 0)
+            base.update({
+                "ts": ts,
+                "age_seconds": max(0.0, now - ts),
+                "digest": published.get("digest") or {},
+                "event_id": published.get("event_id"),
+            })
+        out.append(base)
+
+    out.sort(key=lambda r: (not bool(r.get("published")), -(float(r.get("ts") or 0))))
+    return out
+
+
+def _fmt_age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
 
 
 def _parse_duration(s: str) -> float | None:

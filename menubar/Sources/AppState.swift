@@ -86,6 +86,24 @@ struct UserActivity: Identifiable {
     }
 }
 
+struct PublishedFriendStatus: Identifiable {
+    let id: String
+    let friend: String
+    let pubkey: String
+    let audience: String
+    let emoji: String
+    let category: String
+    let status: String
+    let flow: Bool
+    let published: Bool
+    let timestamp: Date?
+
+    var isStale: Bool {
+        guard let timestamp else { return true }
+        return Date().timeIntervalSince(timestamp) > 15 * 60
+    }
+}
+
 @Observable
 final class AppState {
     var status: AppStatus = .starting
@@ -116,6 +134,7 @@ final class AppState {
 
     // Multi-user activity
     var allActivity: [UserActivity] = []
+    var publishedFriendPreviews: [PublishedFriendStatus] = []
 
     // Hangout suggestion
     var hangoutSuggestion: String?   // e.g. "You and 2 friends are winding down"

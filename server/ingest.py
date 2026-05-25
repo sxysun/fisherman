@@ -648,6 +648,7 @@ async def _status_llm_settings(
         "api_key_configured": False,
         "managed_key_configured": bool(_managed_status_llm_api_key()),
         "external_llm_enabled": _external_llm_enabled(),
+        "key_source": "server_env" if _managed_status_llm_api_key() else None,
     }
     if not user_hex or user_hex == "unscoped":
         settings["api_key"] = _managed_status_llm_api_key()
@@ -678,6 +679,7 @@ async def _status_llm_settings(
 
     if mode == "byo":
         encrypted_key = _row_get(row, "status_llm_api_key")
+        settings["key_source"] = _row_get(row, "status_llm_key_source") or "client_provided"
         if encrypted_key:
             try:
                 api_key_data_key = data_key
@@ -693,6 +695,9 @@ async def _status_llm_settings(
     elif mode == "managed":
         settings["api_key"] = _managed_status_llm_api_key()
         settings["api_key_configured"] = bool(settings["api_key"])
+        settings["key_source"] = "server_env" if settings["api_key"] else None
+    elif mode == "none":
+        settings["key_source"] = None
 
     return settings
 
@@ -1639,6 +1644,7 @@ def _public_status_llm_settings(settings: dict) -> dict:
         "api_key_configured": bool(settings.get("api_key_configured")),
         "managed_key_configured": bool(settings.get("managed_key_configured")),
         "external_llm_enabled": bool(settings.get("external_llm_enabled")),
+        "key_source": settings.get("key_source"),
     }
 
 

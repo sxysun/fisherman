@@ -38,6 +38,7 @@ final class StatusPoller: @unchecked Sendable {
         pollAllActivity()
         if pollCycleCount % 5 == 0 {
             pollRelayFriendActivity()
+            pollPublishedFriendPreviews()
         }
 
         // Poll history every 20 cycles (~60s at 3s interval)
@@ -182,6 +183,41 @@ final class StatusPoller: @unchecked Sendable {
 
             DispatchQueue.main.async { [weak self] in
                 self?.commitActivities(activities, preservingRelay: false)
+            }
+        }
+    }
+
+    private func pollPublishedFriendPreviews() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = CliBridge.run(["friend", "preview", "--json"], timeout: 4)
+            guard result.exitCode == 0,
+                  let data = result.stdout.data(using: .utf8),
+                  let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+            else { return }
+
+            let previews: [PublishedFriendStatus] = rows.compactMap { row in
+                let friend = row["friend"] as? String ?? "friend"
+                let pubkey = row["pubkey"] as? String ?? friend
+                let audience = row["audience"] as? String ?? "friends"
+                let published = row["published"] as? Bool ?? false
+                let digest = row["digest"] as? [String: Any] ?? [:]
+                let ts = row["ts"] as? Double
+                return PublishedFriendStatus(
+                    id: pubkey,
+                    friend: friend,
+                    pubkey: pubkey,
+                    audience: audience,
+                    emoji: digest["emoji"] as? String ?? "…",
+                    category: digest["category"] as? String ?? "waiting",
+                    status: digest["status"] as? String ?? "",
+                    flow: digest["flow"] as? Bool ?? false,
+                    published: published,
+                    timestamp: ts.map { Date(timeIntervalSince1970: $0) }
+                )
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                self?.state.publishedFriendPreviews = previews
             }
         }
     }

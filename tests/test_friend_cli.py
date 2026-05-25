@@ -150,6 +150,71 @@ class FriendCliTests(unittest.TestCase):
                 self.assertEqual(stored["audience"], "work")
                 self.assertIsNone(stored["policy_prompt"])
 
+    def test_friend_preview_shows_last_published_digest_per_friend(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            fish_dir = home / ".fisherman"
+            fish_dir.mkdir()
+            friends_path = fish_dir / "friends.json"
+            status_log = fish_dir / "status-log.jsonl"
+
+            alice_pub = "aa" * 32
+            bob_pub = "cc" * 32
+            with mock.patch("fisherman.friends._DEFAULT_PATH", str(friends_path)):
+                friends.add_friend(
+                    name="alice",
+                    pubkey_hex=alice_pub,
+                    encryption_pubkey_hex="bb" * 32,
+                    relay_url="https://relay.example",
+                    audience="close",
+                )
+                friends.add_friend(
+                    name="bob",
+                    pubkey_hex=bob_pub,
+                    encryption_pubkey_hex="dd" * 32,
+                    relay_url="https://relay.example",
+                )
+                status_log.write_text(
+                    "\n".join([
+                        json.dumps({
+                            "ts": 10,
+                            "digest": {
+                                "emoji": "💻",
+                                "category": "coding",
+                                "status": "old",
+                                "flow": False,
+                            },
+                            "recipient_pubkey": alice_pub,
+                            "event_id": 1,
+                        }),
+                        json.dumps({
+                            "ts": 20,
+                            "digest": {
+                                "emoji": "💬",
+                                "category": "chat",
+                                "status": "new",
+                                "flow": True,
+                            },
+                            "recipient_pubkey": alice_pub,
+                            "event_id": 2,
+                        }),
+                    ]),
+                    encoding="utf-8",
+                )
+
+                result = CliRunner().invoke(cli.main, ["friend", "preview", "--json"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            rows = json.loads(result.output)
+            self.assertEqual(rows[0]["friend"], "alice")
+            self.assertEqual(rows[0]["audience"], "close")
+            self.assertTrue(rows[0]["published"])
+            self.assertEqual(rows[0]["digest"]["status"], "new")
+            self.assertEqual(rows[0]["event_id"], 2)
+            self.assertEqual(rows[1]["friend"], "bob")
+            self.assertFalse(rows[1]["published"])
+
     def test_pairwise_status_decrypts_only_for_recipient(self) -> None:
         author_seed = bytes.fromhex("11" * 32)
         recipient_seed = bytes.fromhex("22" * 32)
@@ -187,7 +252,9 @@ class FriendCliTests(unittest.TestCase):
             "status": "pairwise envelope",
             "flow": True,
         }
-        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with tempfile.TemporaryDirectory() as home_dir, \
+             mock.patch.dict(os.environ, {"HOME": home_dir}), \
+             mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
             event_id = ledger.publish_status(
                 "https://relay.example",
                 author_priv,
