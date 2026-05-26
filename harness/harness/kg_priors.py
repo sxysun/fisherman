@@ -7,7 +7,7 @@ from typing import Any
 
 from . import implicit as implicit_mod
 from . import metrics as metrics_mod
-from . import privacy
+from . import app_identity, privacy
 from .store import iter_jsonl
 
 
@@ -136,7 +136,7 @@ def _target(label: str | None) -> str | None:
 def _features(candidate: dict) -> list[str]:
     screen = candidate.get("screen") or {}
     scene = candidate.get("scene") or {}
-    app = _norm(screen.get("frontmost_app") or screen.get("bundle_id") or "")
+    app = _norm(app_identity.effective_app_from_candidate_dict(candidate) or screen.get("bundle_id") or "")
     label = _norm(scene.get("label") or "")
     features: list[str] = []
     if app:

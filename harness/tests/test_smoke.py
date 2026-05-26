@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from harness import candidate as candidate_mod
+from harness import app_identity as app_identity_mod
 from harness import config as config_mod
 from harness import context_packets as context_packets_mod
 from harness import critic as critic_mod
@@ -26,6 +27,7 @@ from harness import implicit as implicit_mod
 from harness import information_diet as information_diet_mod
 from harness import kg_priors as kg_priors_mod
 from harness import label_ui as label_ui_mod
+from harness import long_term_memory as long_term_memory_mod
 from harness import memory as memory_mod
 from harness import metrics as metrics_mod
 from harness import model_audit as model_audit_mod
@@ -50,6 +52,7 @@ def test_imports():
     assert schemas
     assert config_mod
     assert context_packets_mod
+    assert app_identity_mod
     assert eval_report_mod
     assert store_mod
     assert fc_mod
@@ -80,6 +83,7 @@ def test_imports():
     assert trainer_mod
     assert workflow_events_mod
     assert kg_priors_mod
+    assert long_term_memory_mod
 
 
 def test_schema_roundtrip():
@@ -132,6 +136,132 @@ def test_workflow_events_group_and_close_on_window_change():
     context = builder.recent_context(now_ts=calendar.timegm(time.strptime(third.ts, "%Y-%m-%dT%H:%M:%SZ")))
     assert [row["status"] for row in context] == ["closed", "open"]
     assert context[-1]["window_title"] == "Harness dashboard"
+
+
+def test_effective_app_uses_ocr_menu_when_frontmost_metadata_is_stale(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        event = schemas.CandidateEvent(candidate_id="cand_app_identity")
+        event.ts = "2026-05-19T12:00:00Z"
+        event.screen.frontmost_app = "Civilization V"
+        event.screen.bundle_id = "com.aspyr.civ5xp.steam"
+        event.screen.ocr_snippet = "Terminal Shell Edit View Window Help fisherman pytest"
+        event.screen.frame_age_sec = 1
+        event.scene = schemas.SceneTag(label="coding_focused", strength="strong")
+
+        identity = app_identity_mod.analyze_event(event)
+        assert identity["effective_app"] == "Terminal"
+        assert identity["raw_frontmost_app"] == "Civilization V"
+        assert "app_metadata_mismatch" in identity["flags"]
+
+        mem = memory_mod.SessionMemory(window_min=120)
+        mem.record(event)
+        assert mem.recent_apps() == ["Terminal"]
+
+        builder = workflow_events_mod.WorkflowEventBuilder(max_gap_sec=90)
+        assert builder.observe(event) is None
+        active = builder.active_snapshot()
+        assert active is not None
+        assert active["app"] == "Terminal"
+        assert "app_metadata_mismatch" in active["quality_flags"]
+
+        packet = context_packets_mod.build_packet(
+            event=event,
+            memory=mem.snapshot([], recent_workflow_events=builder.recent_context()),
+            recent_outcomes=[],
+            daily_goal="ship harness",
+            policy_name="test_policy",
+        )
+        obs = packet.current_observation
+        assert obs["frontmost_app"] == "Civilization V"
+        assert obs["effective_app"] == "Terminal"
+        assert obs["app_identity"]["source"] == "ocr_menu_bar"
+        assert "app_metadata_mismatch" in packet.quality_flags
+
+        browserish = app_identity_mod.analyze_screen(
+            frontmost_app="Civilization V",
+            bundle_id="com.aspyr.civ5xp.steam",
+            ocr_snippet="Element X File Edit View Window Help claude.ai/chat",
+        )
+        assert browserish["effective_app"] == "Element"
+        assert "app_metadata_mismatch" in browserish["flags"]
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_long_term_memory_disabled_by_default():
+    event = schemas.CandidateEvent(candidate_id="cand_memory_disabled")
+    event.screen.ocr_snippet = "Terminal Shell Edit View Window Help ship harness"
+    mem = schemas.MemorySnapshot.build([], [], [], 0, 0.0)
+    blocks = long_term_memory_mod.retrieve_policy_memory(
+        event=event,
+        memory=mem,
+        daily_goal="ship harness",
+        config={"long_term_memory": {"provider": "hermes_mind", "policy_retrieval_enabled": False}},
+        status="model_prompt",
+    )
+    assert blocks == []
+
+
+def test_long_term_memory_provider_chat_bridge(monkeypatch, tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        event = schemas.CandidateEvent(candidate_id="cand_memory_bridge")
+        event.screen.frontmost_app = "Chrome"
+        event.screen.ocr_snippet = "reading harness eval notes"
+        event.scene = schemas.SceneTag(label="reading_browser", strength="strong")
+        mem = schemas.MemorySnapshot.build(["Chrome"], ["reading_browser"], [], 0, 3.0)
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                payload = {
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "snippets": [{
+                                    "title": "Eval preference",
+                                    "summary": "User wants attention-conserving binary ping policy.",
+                                    "uri": "/home/ubuntu/mind/skills/mind-rolling-summary.md",
+                                    "relevance": "Prefer no-ping unless context is clearly useful.",
+                                    "confidence": 0.8,
+                                }]
+                            })
+                        }
+                    }]
+                }
+                return json.dumps(payload).encode("utf-8")
+
+        monkeypatch.setattr(long_term_memory_mod.urllib.request, "urlopen", lambda *a, **kw: FakeResp())
+        blocks = long_term_memory_mod.retrieve_policy_memory(
+            event=event,
+            memory=mem,
+            daily_goal="ship harness",
+            config={
+                "privacy": {"allow_local_model_hosts": True, "block_untrusted_model_hosts": True},
+                "long_term_memory": {
+                    "policy_retrieval_enabled": True,
+                    "base_url": "http://localhost:9000",
+                    "model": "hermes-agent",
+                    "max_blocks": 4,
+                    "timeout_sec": 1,
+                },
+            },
+            status="model_prompt",
+        )
+        assert blocks[0]["source"] == "hermes_mind"
+        assert blocks[0]["confidence"] == 0.8
+        assert "binary ping policy" in blocks[0]["summary"]
+        assert store_mod.tail_jsonl("model_calls.jsonl", n=1)[0]["purpose"] == "long_term_memory_retrieval"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
 
 
 def test_workflow_events_close_on_capture_gap_and_memory_snapshot(tmp_path):
@@ -1155,6 +1285,16 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
                 "min_interval_sec": 0,
                 "min_confidence_to_ping": 0.55,
             },
+            "long_term_memory": {
+                "policy_retrieval_enabled": False,
+                "policy_blocks": [{
+                    "source": "test_mind",
+                    "title": "Harness memory",
+                    "summary": "User cares about binary ping/not-ping eval rigor.",
+                    "relevance": "Helps avoid action-agent drift.",
+                    "confidence": 0.9,
+                }],
+            },
         }
 
         def fake_call(cfg, base_url, model, messages):
@@ -1164,6 +1304,8 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
             assert packet["current_observation"]["ocr_snippet"] == "drafting harness policy learner"
             assert packet["current_workflow_event"]["window_title"] == "Harness policy notes"
             assert packet["kg_priors"]
+            assert packet["retrieved_wiki_memory"][0]["source"] == "test_mind"
+            assert packet["retrieved_wiki_memory"][0]["confidence"] == 0.9
             return {
                 "action": "notch_ping",
                 "confidence": 0.82,

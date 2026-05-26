@@ -100,11 +100,15 @@ active_frame_max_age_sec = 60
 
 [long_term_memory]
 # The durable memory wiki already lives with Hermes/mind-rolling-summary
-# (`/home/ubuntu/mind` on the Hermes host). The live harness records whether
-# such memory was present in the policy packet, but does not query it directly
-# until a dedicated audited retrieval API exists.
+# (`/home/ubuntu/mind` on the Hermes host). Direct policy retrieval is disabled
+# by default; when enabled it is text-only, allowlist-checked, and writes the
+# exact returned snippets into the EventContextPacket for audit/ablation.
 provider = "hermes_mind"
 policy_retrieval_enabled = false
+mode = "provider_chat"
+max_blocks = 4
+timeout_sec = 5
+api_key_env = "HARNESS_REALIZER_KEY"
 policy_blocks = []
 
 [context_packets]

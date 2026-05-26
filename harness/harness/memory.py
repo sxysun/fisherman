@@ -5,6 +5,7 @@ import calendar
 from collections import deque
 from typing import Deque
 
+from . import app_identity
 from .schemas import CandidateEvent, MemorySnapshot
 from .store import append_jsonl, write_snapshot
 
@@ -57,7 +58,7 @@ class SessionMemory:
         append_jsonl("memory/session.jsonl", event.to_dict())
 
     def recent_apps(self, n: int = 30) -> list[str]:
-        return [e.screen.frontmost_app or "" for e in self._valid_events()[-n:]]
+        return [app_identity.effective_app(e) for e in self._valid_events()[-n:]]
 
     def recent_scenes(self, n: int = 30) -> list[str]:
         return [e.scene.label for e in self._valid_events()[-n:]]
@@ -69,7 +70,7 @@ class SessionMemory:
         switches = 0
         prev = None
         for e in recent:
-            app = e.screen.frontmost_app
+            app = app_identity.effective_app(e)
             if prev is not None and app != prev:
                 switches += 1
             prev = app
@@ -81,7 +82,7 @@ class SessionMemory:
         latest = self._events[-1]
         if not _is_valid_work_event(latest, self.active_frame_max_age_sec):
             return 0.0
-        current = latest.screen.frontmost_app
+        current = app_identity.effective_app(latest)
         start_ts = _event_ts(latest)
         last_ts = start_ts
         for e in reversed(list(self._events)[:-1]):
@@ -90,7 +91,7 @@ class SessionMemory:
                 break
             if not _is_valid_work_event(e, self.active_frame_max_age_sec):
                 break
-            if e.screen.frontmost_app != current:
+            if app_identity.effective_app(e) != current:
                 break
             capture_gap = float(getattr(e.screen, "capture_gap_sec", 0.0) or 0.0)
             if capture_gap > self.idle_boundary_sec:

@@ -528,8 +528,8 @@
     <div class="node"><strong>1. Fisherman capture</strong><small>Fisherman daemon exposes frames, OCR, app/window metadata, status, and query endpoints on localhost.</small></div>
     <div class="node"><strong>2. Candidate synthesis</strong><small><code>candidate.py</code> snapshots screen context and current user prefs into a typed <code>CandidateEvent</code>.</small></div>
     <div class="node"><strong>3. Scene reading</strong><small>Rules tag coarse scenes. Optional VLM overlay adds specificity, sensitivity, and intent signals.</small></div>
-    <div class="node"><strong>4. Short memory</strong><small><code>SessionMemory</code> tracks recent apps/scenes, switches, time on current app, and recent outcomes.</small></div>
-    <div class="node"><strong>5. Context packet</strong><small><code>EventContextPacket</code> freezes the exact short-horizon policy input: current screen, workflow run, 5-minute trajectory, examples, KG priors, and provenance.</small></div>
+    <div class="node"><strong>4. Short memory</strong><small><code>SessionMemory</code> tracks recent effective apps/scenes, switches, time on current app, and recent outcomes.</small></div>
+    <div class="node"><strong>5. Context packet</strong><small><code>EventContextPacket</code> freezes the exact policy input: current screen, raw/effective app identity, workflow run, 5-minute trajectory, examples, KG priors, optional wiki memory, and provenance.</small></div>
     <div class="node"><strong>6. Policy</strong><small><code>rule_v0</code> applies hard gates and fallback behavior; the default <code>llm_icl_v0</code> learner chooses ping/not-ping from the frozen packet.</small></div>
     <div class="node"><strong>7. Realizer</strong><small>OpenAI-compatible chat endpoint receives daily goal, why-now, compact state, and optionally the current JPEG. Hermes may use its own long-term mind server-side.</small></div>
     <div class="node"><strong>8. Critic</strong><small>Regex critic blocks obvious secrets, long quotes, verbose output, or empty/multi-paragraph messages. LLM critic is optional.</small></div>
@@ -543,7 +543,7 @@
     <div class="artifact">
       <strong>Screen tick</strong>
       <code>CandidateEvent</code>
-      <small>Atomic observation row. It carries the current screen slice, scene tag, lightweight context signals, prefs, and a workflow join id.</small>
+      <small>Atomic observation row. It carries the current screen slice, raw app metadata, scene tag, lightweight context signals, prefs, and a workflow join id.</small>
     </div>
     <div class="artifact">
       <strong>Workflow run</strong>
@@ -553,12 +553,12 @@
     <div class="artifact">
       <strong>Short memory</strong>
       <code>MemorySnapshot</code>
-      <small>Recent apps, scenes, outcomes, workflow runs, switch count, time-on-app, and idle-gap state. Passed to policy, not copied into the candidate row.</small>
+      <small>Recent effective apps, scenes, outcomes, workflow runs, switch count, time-on-app, and idle-gap state. Passed to policy, not copied into the candidate row.</small>
     </div>
     <div class="artifact">
       <strong>Policy input</strong>
       <code>EventContextPacket</code>
-      <small>Frozen decision example. It materializes exactly what the policy saw: current observation, workflow context, recent outcomes, few-shot examples, KG priors, privacy state, and provenance.</small>
+      <small>Frozen decision example. It materializes exactly what the policy saw: current observation, app identity, workflow context, recent outcomes, few-shot examples, KG priors, optional wiki memory, privacy state, and provenance.</small>
     </div>
     <div class="artifact">
       <strong>When policy</strong>
@@ -602,8 +602,8 @@
       </tr>
       <tr>
         <td>screen</td>
-        <td>Frontmost app, bundle id, window title, redacted OCR snippet, capture timestamp, capture gap, frame age, and sensitive-scene flag.</td>
-        <td>No screenshot bytes in the candidate row, no full OCR transcript, no long-term knowledge-base summary.</td>
+        <td>Raw Fisherman frontmost app, bundle id, window title, redacted OCR snippet, capture timestamp, capture gap, frame age, and sensitive-scene flag.</td>
+        <td>No screenshot bytes in the candidate row, no full OCR transcript, no long-term knowledge-base summary. Effective app identity is computed in packet/workflow code, not written over the raw candidate field.</td>
       </tr>
       <tr>
         <td>scene</td>
@@ -629,7 +629,7 @@
   </table>
 
   <div class="callout">
-    <p><strong>Current shape:</strong> the candidate object is intentionally thin, and that is now correct. The rich 5-minute model input is persisted separately as <code>EventContextPacket</code> rows in <code>~/.harness/context_packets.jsonl</code> and SQLite <code>context_packets</code>. The remaining memory gap is direct, audited retrieval from Hermes's durable <code>/home/ubuntu/mind</code> wiki into <code>retrieved_wiki_memory</code>.</p>
+    <p><strong>Current shape:</strong> the candidate object is intentionally thin, and that is now correct. The rich model input is persisted separately as <code>EventContextPacket</code> rows in <code>~/.harness/context_packets.jsonl</code> and SQLite <code>context_packets</code>. Packets preserve raw app metadata while adding <code>effective_app</code> and <code>app_metadata_mismatch</code> when OCR menu-bar evidence shows stale metadata. The Hermes/mind bridge exists behind <code>policy_retrieval_enabled</code>, but serious long-term memory still needs a dedicated audited retrieval API and frozen ablations.</p>
   </div>
 
   <h2>Actual Local Samples</h2>
@@ -688,7 +688,14 @@
   "workflow_event_id": "wev_a449b0aad3af5482",
   "policy_name": "llm_icl_v0",
   "current_observation": {
-    "frontmost_app": "Google Chrome",
+    "frontmost_app": "Civilization V",
+    "effective_app": "Chrome",
+    "app_identity": {
+      "raw_frontmost_app": "Civilization V",
+      "inferred_visible_app": "Chrome",
+      "source": "ocr_menu_bar",
+      "flags": ["app_metadata_mismatch"]
+    },
     "window_title": "[redacted]",
     "ocr_snippet": "[redacted]",
     "capture_gap_sec": 5.0,
@@ -703,6 +710,7 @@
   },
   "recent_5m_events": ["... compact workflow rows ..."],
   "few_shot_examples": ["... explicit/implicit examples ..."],
+  "retrieved_wiki_memory": [],
   "kg_priors": {"version": "kg_priors_v1", "n_examples": 111},
   "rule_baseline": {"action": "no_ping", "reason_codes": ["no_clear_help"]},
   "privacy_state": {
@@ -858,8 +866,8 @@ p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
       </tr>
       <tr>
         <td>Realizer trust</td>
-        <td>Hermes can do server-side tool use, but tool calls and reasoning are mostly opaque to the harness.</td>
-        <td>Observable tool traces, explicit capability budget, prompt/version diffing, and replayable realization tests.</td>
+        <td>Hermes can do server-side tool use. The harness now has a disabled-by-default, text-only, allowlist-checked long-term memory bridge that can write provider-returned snippets into <code>retrieved_wiki_memory</code>, but Hermes tool calls/reasoning are still mostly opaque.</td>
+        <td>Dedicated non-generative Hermes/mind retrieval API, observable tool traces, explicit capability budget, prompt/version diffing, and replayable realization tests.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>

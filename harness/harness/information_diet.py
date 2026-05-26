@@ -7,12 +7,13 @@ from collections import Counter
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+from . import app_identity
 from . import metrics as metrics_mod
 from .store import iter_jsonl
 
 
 REPORT_VERSION = "information_diet_v1"
-RESEARCH_APPS = {"Google Chrome", "Safari", "Arc", "Firefox", "Brave Browser", "Chromium"}
+RESEARCH_APPS = {"Chrome", "Google Chrome", "Safari", "Arc", "Firefox", "Brave Browser", "Chromium"}
 RESEARCH_SCENES = {"reading_browser", "reading", "browsing", "other"}
 MAX_EVENT_DELTA_SEC = 30
 EPISODE_GAP_SEC = 180
@@ -77,7 +78,7 @@ def build_report(*, window: str = "7d", max_episodes: int = 20) -> dict[str, Any
 def _research_event(row: dict[str, Any]) -> dict[str, Any] | None:
     screen = row.get("screen") or {}
     scene = row.get("scene") or {}
-    app = screen.get("frontmost_app")
+    app = app_identity.effective_app_from_candidate_dict(row)
     label = scene.get("label") or "unknown"
     if app not in RESEARCH_APPS and label not in RESEARCH_SCENES:
         return None

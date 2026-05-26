@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import app_identity
 from . import implicit as implicit_mod
 from . import metrics as metrics_mod
 from . import privacy
@@ -630,7 +631,7 @@ def _example_row(
         "label": label.get("label"),
         "policy_action": decision.get("action"),
         "context": {
-            "app": screen.get("frontmost_app"),
+            "app": app_identity.effective_app_from_candidate_dict(candidate),
             "scene": scene.get("label"),
             "window_title": privacy.redact_text(str(screen.get("window_title") or ""))[:160],
             "ocr_snippet": privacy.redact_text(str(screen.get("ocr_snippet") or ""))[:240],
@@ -675,7 +676,7 @@ def _signature(candidate: dict) -> tuple[str, str]:
     screen = candidate.get("screen") or {}
     scene = candidate.get("scene") or {}
     return (
-        str(screen.get("frontmost_app") or "").strip().lower(),
+        app_identity.effective_app_from_candidate_dict(candidate).strip().lower(),
         str(scene.get("label") or "").strip().lower(),
     )
 
@@ -695,7 +696,7 @@ def _near_positive_keywords(candidate: dict, rows: list[dict[str, Any]]) -> bool
 
 def _looks_like_help_seek(candidate: dict) -> bool:
     text = _context_text(candidate)
-    app = ((candidate.get("screen") or {}).get("frontmost_app") or "")
+    app = app_identity.effective_app_from_candidate_dict(candidate)
     return bool(AI_HELP_RE.search(" ".join([app, text])))
 
 
@@ -703,7 +704,7 @@ def _context_text(candidate: dict) -> str:
     screen = candidate.get("screen") or {}
     scene = candidate.get("scene") or {}
     return " ".join([
-        str(screen.get("frontmost_app") or ""),
+        app_identity.effective_app_from_candidate_dict(candidate),
         str(screen.get("window_title") or ""),
         str(scene.get("specificity") or ""),
         str(screen.get("ocr_snippet") or "")[:500],

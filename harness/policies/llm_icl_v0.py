@@ -19,9 +19,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from harness import app_identity
 from harness import context_packets as context_packets_mod
 from harness import implicit as implicit_mod
 from harness import kg_priors as kg_priors_mod
+from harness import long_term_memory as long_term_memory_mod
 from harness import metrics as metrics_mod
 from harness import model_audit
 from harness import privacy
@@ -399,7 +401,7 @@ def _example(
         "actual_policy_action": decision.get("action"),
         "reason_codes": decision.get("reason_codes") or [],
         "context": {
-            "app": screen.get("frontmost_app"),
+            "app": app_identity.effective_app_from_candidate_dict(candidate),
             "scene": scene.get("label"),
             "ocr_snippet": privacy.redact_text(screen.get("ocr_snippet") or "")[:240],
         },
@@ -433,6 +435,13 @@ def _persist_context_packet(
     *,
     status: str,
 ) -> EventContextPacket:
+    wiki_memory = long_term_memory_mod.retrieve_policy_memory(
+        event=event,
+        memory=memory,
+        daily_goal=(config.get("daily_goal") or ""),
+        config=config,
+        status=status,
+    )
     packet = context_packets_mod.build_packet(
         event=event,
         memory=memory,
@@ -442,7 +451,7 @@ def _persist_context_packet(
         rule_baseline=baseline,
         few_shot_examples=examples,
         kg_priors=kg_priors,
-        retrieved_wiki_memory=_configured_wiki_memory(config),
+        retrieved_wiki_memory=wiki_memory,
         retrieved_similar_events=[],
         provenance_extra={"status": status},
     )
@@ -453,27 +462,6 @@ def _persist_context_packet(
     if packet_cfg.get("enabled", True) is False:
         return packet
     return context_packets_mod.persist_packet(packet)
-
-
-def _configured_wiki_memory(config: dict) -> list[dict[str, Any]]:
-    """Return explicit policy memory blocks, if the caller supplied them.
-
-    Hermes can use its own long-term mind during realization. The policy keeps
-    that separate until the harness has a direct, audited memory retrieval API;
-    tests/frozen evals may inject blocks here through config.
-    """
-    memory_cfg = config.get("long_term_memory") or config.get("memory_wiki") or {}
-    blocks = memory_cfg.get("policy_blocks") if isinstance(memory_cfg, dict) else None
-    if isinstance(blocks, list):
-        return [row for row in blocks if isinstance(row, dict)]
-    provider = memory_cfg.get("provider") if isinstance(memory_cfg, dict) else None
-    if provider:
-        return [{
-            "source": str(provider),
-            "title": "provider-side long-term memory",
-            "summary": "Available to the provider/realizer, not directly retrieved by the harness policy yet.",
-        }]
-    return []
 
 
 def _build_prompt(packet: EventContextPacket) -> list[dict[str, str]]:
@@ -517,7 +505,7 @@ def _kg_priors_for_event(event: CandidateEvent, cfg: dict[str, Any], config: dic
 def _match_frozen_priors(event: CandidateEvent, frozen_priors: Any) -> dict[str, Any]:
     if not isinstance(frozen_priors, dict):
         return {}
-    app = str(event.screen.frontmost_app or "unknown").lower()
+    app = app_identity.effective_app(event).lower()
     scene = str(event.scene.label or "unknown").lower()
 
     def pick(bucket: str, key: str) -> dict[str, Any]:
@@ -552,7 +540,7 @@ def _offline_eval_decision(
         base_score = 0.6
     else:
         base_score = 0.4
-    app = str(event.screen.frontmost_app or "").lower()
+    app = app_identity.effective_app(event).lower()
     scene = str(event.scene.label or "").lower()
     matched = [
         row for row in examples

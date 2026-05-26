@@ -6,7 +6,7 @@ import re
 import time
 from typing import Optional
 
-from . import privacy
+from . import app_identity, privacy
 from .schemas import CandidateEvent, WorkflowEvent
 
 
@@ -143,7 +143,7 @@ def _new_workflow_event(
     max_ocr_preview_chars: int,
 ) -> WorkflowEvent:
     app_key, title_key = key
-    app = (event.screen.frontmost_app or app_key or "unknown").strip() or "unknown"
+    app = (app_identity.effective_app(event) or app_key or "unknown").strip() or "unknown"
     title = (event.screen.window_title or "").strip()
     workflow_event = WorkflowEvent(
         workflow_event_id=_event_id(event.ts, app_key, title_key),
@@ -215,7 +215,7 @@ def _compact(event: WorkflowEvent) -> dict:
 
 def _event_key(event: CandidateEvent) -> tuple[str, str]:
     return (
-        _norm(event.screen.frontmost_app or event.screen.bundle_id or "unknown"),
+        _norm(app_identity.effective_app(event) or event.screen.bundle_id or "unknown"),
         _norm(event.screen.window_title or ""),
     )
 
@@ -233,6 +233,8 @@ def _invalid_reason(event: CandidateEvent, active_frame_max_age_sec: float) -> s
 
 def _quality_flags(event: CandidateEvent) -> list[str]:
     flags: list[str] = []
+    identity = app_identity.analyze_event(event)
+    flags.extend(str(flag) for flag in identity.get("flags", []) if flag)
     if not (event.screen.frontmost_app or event.screen.bundle_id):
         flags.append("app_unknown")
     if not (event.screen.window_title or "").strip():

@@ -489,13 +489,14 @@ Acceptance criteria:
 5. Add KG priors as the first serious memory mechanism.
 6. Add time-based frozen eval splits and precision/recall/F1.
 
-## Implementation Status: 2026-05-25
+## Implementation Status: 2026-05-26
 
 The first paper-style rigor pass is now implemented in code:
 
 - The daemon appends a trace immediately after each decision and patches it through lifecycle stages: `decision_recorded`, `realizer_started`, `realizer_done`/`realizer_failed`, `critic_started`, `critic_done`, `dispatch_started`, `dispatch_done`, `claimed`, `outcome`, and terminal skipped/blocked/no-ping states.
 - Candidates, decisions, and traces now carry `workflow_event_id`, and workflow events include basic quality flags plus periodic open snapshots.
 - `EventContextPacket` is now a first-class stored object. The live `llm_icl_v0` policy persists the frozen model-facing packet to `context_packets.jsonl`/SQLite before calling the model, and decisions include `evidence.context_packet_id` for audit/replay.
+- The policy-facing path now preserves raw Fisherman `frontmost_app` metadata but also computes `effective_app` from conservative OCR menu-bar evidence. Workflow grouping, short memory, KG priors, datasets, and shadow eval use `effective_app` when raw app metadata looks stale, and packets mark `app_metadata_mismatch`.
 - `metrics` and `eval-report` now expose ping trace-completeness plus explicit-label precision, recall, and F1.
 - SQLite sidecar schema now includes typed `deliveries` and `curation` tables in addition to candidates/decisions/traces/outcomes/model calls/labels/workflow events.
 - `curation.jsonl` exists and is respected by KG-prior and dataset builders.
@@ -512,13 +513,14 @@ The first paper-style rigor pass is now implemented in code:
 - The per-candidate VLM scene tagger now has explicit error/rate-limit backoff, so a failing VLM endpoint cannot repeatedly spend calls on every eligible tick.
 - Smoke coverage is 72 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, workflow-event review mining, frozen manifest replay, split assignment validation, live-model attestation, source weighting, delivery ack/expiry handling, VLM backoff, and precision/recall metrics.
 - `harness context-packets` and `/context-packets` expose recent frozen policy inputs for inspection; the dashboard Activity tab also surfaces recent packets.
+- `long_term_memory.py` adds a disabled-by-default text-only policy retrieval bridge. Static `policy_blocks` support tests/manual ablations; provider-chat retrieval is allowlist-checked and writes exact returned snippets into `EventContextPacket.retrieved_wiki_memory`.
 
 Still not done:
 
 - The event-level labeling UI is browser-backed, not yet surfaced inside the native capsule.
-- The frozen eval protocol now has a manifest replay command with leakage checks. Policy-specific RAG retrievers still need explicit tests before they are allowed into offline comparison.
+- The frozen eval protocol now has a manifest replay command with leakage checks. The provider-chat memory bridge has smoke coverage, but policy-specific RAG retrievers still need ablation fixtures before they are allowed into offline comparison.
 - KG priors are simple count priors; RAG similar-event retrieval and ablation reports are still future work.
-- Hermes/mind long-term memory already exists through `skills/mind-rolling-summary`, but the harness does not directly query `/home/ubuntu/mind` yet. Direct policy memory retrieval still needs an audited API and frozen ablations.
+- Hermes/mind long-term memory already exists through `skills/mind-rolling-summary`. The harness has a disabled provider-chat bridge, but a dedicated non-generative `/home/ubuntu/mind` retrieval API with source paths, timestamps, privacy state, retrieval scores, and frozen ablations is still the serious target.
 - The curation ledger is CLI-backed and event-review-backed for workflow events; there is still no full capsule review panel for arbitrary candidate/trace deletion.
 - Harness storage is append-mostly. There is SQLite backfill, but no automatic retention/compaction policy for long-running dogfood state yet.
 

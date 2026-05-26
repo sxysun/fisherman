@@ -225,13 +225,20 @@ def context_packets(limit: int, json_out: bool) -> None:
         return
     for row in reversed(rows):
         obs = row.get("current_observation") or {}
+        identity = obs.get("app_identity") or {}
+        app = obs.get("effective_app") or obs.get("frontmost_app") or "?"
+        raw_app = identity.get("raw_frontmost_app") or obs.get("frontmost_app")
+        app_note = f" raw={raw_app}" if raw_app and raw_app != app else ""
         workflow = row.get("current_workflow_event") or {}
         baseline = row.get("rule_baseline") or {}
         click.echo(
             f"{row.get('packet_id')} ts={row.get('ts')} "
-            f"policy={row.get('policy_name')} app={obs.get('frontmost_app') or '?'} "
+            f"policy={row.get('policy_name')} app={app}{app_note} "
             f"workflow={row.get('workflow_event_id') or '?'} baseline={baseline.get('action') or '?'}"
         )
+        flags = identity.get("flags") or []
+        if flags:
+            click.echo(f"  app_identity: {identity.get('source') or '?'} flags={','.join(flags)}")
         if workflow:
             title = workflow.get("window_title") or ""
             click.echo(f"  workflow: {workflow.get('app') or '?'} / {title[:100]}")

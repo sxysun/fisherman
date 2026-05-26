@@ -583,16 +583,21 @@ function renderActivity(d) {
     </div>`).join('') || '<div style="color:#7c7c86">no closed workflow events yet</div>';
   document.getElementById('context-packets').innerHTML = (d.recent_context_packets || []).map(row => {
     const obs = row.current_observation || {};
+    const identity = obs.app_identity || {};
+    const appName = obs.effective_app || obs.frontmost_app || '?';
+    const rawApp = identity.raw_frontmost_app || obs.frontmost_app || '';
+    const appMeta = rawApp && rawApp !== appName ? ` raw=${escapeHTML(rawApp)}` : '';
+    const appFlags = (identity.flags || []).length ? ` flags=${escapeHTML((identity.flags || []).join(','))}` : '';
     const wf = row.current_workflow_event || {};
     const base = row.rule_baseline || {};
     const priors = row.kg_priors || {};
     return `<div class="example-row">
       <div class="topline">
-        <span><span class="pill info">${escapeHTML(row.policy_name || 'policy')}</span> ${escapeHTML(obs.frontmost_app || '?')} · ${escapeHTML((obs.scene || {}).label || '?')}</span>
+        <span><span class="pill info">${escapeHTML(row.policy_name || 'policy')}</span> ${escapeHTML(appName)} · ${escapeHTML((obs.scene || {}).label || '?')}</span>
         <span>${escapeHTML((row.ts || '').slice(0,19))}</span>
       </div>
       <div class="msg">${escapeHTML(wf.window_title || obs.window_title || '(untitled window)')}</div>
-      <div class="meta">packet=${escapeHTML(row.packet_id || '?')} workflow=${escapeHTML(row.workflow_event_id || '?')} baseline=${escapeHTML(base.action || '?')} examples=${escapeHTML((row.few_shot_examples || []).length)} priors=${escapeHTML(priors.n_examples ?? 0)}</div>
+      <div class="meta">packet=${escapeHTML(row.packet_id || '?')} workflow=${escapeHTML(row.workflow_event_id || '?')} baseline=${escapeHTML(base.action || '?')} examples=${escapeHTML((row.few_shot_examples || []).length)} priors=${escapeHTML(priors.n_examples ?? 0)}${appMeta}${appFlags}</div>
       ${obs.ocr_snippet ? `<div class="meta">screen=${escapeHTML(obs.ocr_snippet)}</div>` : ''}
     </div>`;
   }).join('') || '<div style="color:#7c7c86">no context packets yet</div>';

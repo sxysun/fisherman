@@ -1,6 +1,6 @@
 # Event Context Packet Architecture
 
-Date: 2026-05-25
+Date: 2026-05-26
 
 ## Executive Summary
 
@@ -37,6 +37,9 @@ Fisherman frame / OCR / app metadata
 - Atomic tick synthesized from Fisherman.
 - Contains current app, bundle id, window title, redacted OCR snippet, capture
   gap, frame age, scene tag, and `workflow_event_id`.
+- Preserves Fisherman's raw `frontmost_app`; downstream packet/workflow code
+  also computes `effective_app` from conservative OCR menu-bar evidence and
+  marks `app_metadata_mismatch` when the raw app looks stale.
 - Does not contain the full 5-minute context or long-term memory.
 
 `WorkflowEvent`
@@ -59,6 +62,7 @@ Fisherman frame / OCR / app metadata
   `context_packets`.
 - Contains:
   - current observation
+  - raw/effective app identity and metadata quality flags
   - current workflow event
   - recent 5-minute workflow events
   - short memory
@@ -108,11 +112,17 @@ Those skills maintain `/home/ubuntu/mind` as a compiled Obsidian-native wiki
 from Fisherman captures: rolling summary, digests, context-hours, entity pages,
 distillation pages, and index pages.
 
-The harness does not yet query that wiki directly. That is intentional. The
-realizer endpoint points at Hermes, and Hermes can use its provider-side
-long-term memory. The policy packet records `retrieved_wiki_memory`, but direct
-policy retrieval should wait for an audited API with provenance and privacy
-rules.
+The harness now has a conservative bridge point for this, but it is disabled by
+default. Static `policy_blocks` can be injected for tests/manual experiments.
+If `[long_term_memory].policy_retrieval_enabled = true`, the harness can make a
+text-only, allowlist-checked provider-chat retrieval call and write the returned
+blocks into `EventContextPacket.retrieved_wiki_memory`. This is useful for
+dogfood experiments because Hermes may already use its server-side memory, but
+the packet still records what the policy was shown.
+
+The bridge is not yet the final audited mind API. A serious version should query
+a dedicated Hermes/mind retrieval endpoint that returns source paths, timestamps,
+privacy state, and retrieval scores without relying on a generative chat answer.
 
 ## Inspection
 
@@ -134,16 +144,16 @@ Dashboard:
 - `http://127.0.0.1:7893/dashboard`
 - Activity tab shows recent policy context packets.
 
-## Remaining Memory-Only Gap
+## Remaining Memory Gap
 
 The next step is not another local packet refactor. It is direct long-term
-memory retrieval:
+memory retrieval and ablation:
 
-1. Expose an audited Hermes/mind query API.
+1. Expose a dedicated audited Hermes/mind query API.
 2. Return compact blocks with `source`, `title`, `summary`, `uri`, timestamp,
-   and privacy state.
-3. Inject those blocks into `EventContextPacket.retrieved_wiki_memory`.
-4. Add frozen eval ablations:
+   privacy state, retrieval score, and reason for inclusion.
+3. Keep injecting those blocks into `EventContextPacket.retrieved_wiki_memory`.
+4. Run frozen eval ablations:
    - no long-term memory
    - KG priors only
    - wiki memory only

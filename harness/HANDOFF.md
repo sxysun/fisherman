@@ -73,7 +73,9 @@ harness/
 │   ├── scene_vlm.py              per-candidate VLM scene tagger (smart-triggered)
 │   ├── memory.py                 rolling 2h session + content-addressed snapshots
 │   ├── workflow_events.py        local app/window run eventizer for policy trajectory
+│   ├── app_identity.py           raw vs OCR-inferred effective app identity
 │   ├── context_packets.py        frozen policy-input packet builder
+│   ├── long_term_memory.py       optional text-only Hermes/mind policy bridge
 │   ├── gate.py                   loads policy module by name
 │   ├── realizer.py               openai-compatible agent loop, sends vision JPEG
 │   │                              unless privacy preflight suppresses it
@@ -195,6 +197,10 @@ User flow once it's running:
      decisions include `evidence.context_packet_id` so audits can recover the
      exact current observation, 5-minute workflow context, examples, KG priors,
      and privacy/provenance state used by the binary policy.
+   - Fisherman's raw `frontmost_app` is preserved, but policy-facing packets
+     also include `effective_app` and `app_identity`. Workflow/memory/prior
+     paths use that effective app when OCR menu-bar evidence shows stale app
+     metadata; such cases get `app_metadata_mismatch` quality flags.
 
 ✅ Vision (VLM) in two places
    - Per-candidate scene tagger (google/gemma-3-4b-it on OpenRouter when
@@ -381,14 +387,18 @@ User flow once it's running:
    Earlier local work explored using the CG window owner stack before
    NSWorkspace fallback, but the pushed harness commits intentionally avoid
    Fisherman runtime paths. If frontmost_app is still stale in dogfood, make
-   and ship that Fisherman change as a separate app/runtime commit.
+   and ship that Fisherman change as a separate app/runtime commit. The harness
+   now mitigates this locally for policy/eval by computing `effective_app` from
+   conservative OCR menu-bar evidence, while still storing raw metadata.
 
 ⚠ Hermes does its tool-using server-side
    We send the brief plus screenshot when privacy preflight allows it, then
    get a message back. Hermes may search its own memory (the user saw
-   "rolling summary" in a curl response earlier) but doesn't expose tool_calls
-   in the response. We have nothing to surface beyond the final message.
-   Tracking field `provider_reasoning` if hermes ever adds it (none right now).
+   "rolling summary" in a curl response earlier). Direct policy retrieval is
+   feature-flagged in `[long_term_memory]`: disabled by default, text-only when
+   enabled, allowlist-checked, and persisted into `retrieved_wiki_memory`.
+   A dedicated non-generative Hermes/mind retrieval API would still be cleaner
+   than provider-chat retrieval.
 
 ⚠ Settings reload is partial
    Goal, sensitivity, policy state, and several capsule-facing controls update
@@ -456,10 +466,11 @@ User flow once it's running:
    labeled candidates, featurize them and fit a calibrated classifier.
    Replace rule_v0's intent map with the classifier's expected_utility.
 
-8. **Long-term memory integration.** When Fisherman exposes `/mind/*`
-   routes (or the user maintains rolling summary somewhere accessible),
-   add a tool to the realizer for "search past days." This unlocks the
-   "you researched X 4d ago, conclusion was Y" intent.
+8. **Long-term memory ablations.** `long_term_memory.py` provides the disabled
+   bridge. Next, expose a dedicated Hermes/mind query API, fill
+   `retrieved_wiki_memory` with source/provenance/scored snippets, and compare
+   frozen eval variants: no memory, short context only, KG priors, wiki memory,
+   and KG + wiki memory.
 
 ### Tier 4 — polish / nice-to-haves
 

@@ -4,7 +4,7 @@ import hashlib
 import json
 from typing import Any
 
-from . import privacy
+from . import app_identity, privacy
 from .schemas import CandidateEvent, EventContextPacket, MemorySnapshot, ProactiveDecision
 from .store import append_jsonl
 
@@ -94,14 +94,17 @@ def prompt_context(packet: EventContextPacket | dict[str, Any]) -> dict[str, Any
 
 def _current_observation(event: CandidateEvent) -> dict[str, Any]:
     screen = event.screen
+    identity = app_identity.analyze_event(event)
     return {
         "frontmost_app": screen.frontmost_app,
+        "effective_app": identity.get("effective_app"),
         "bundle_id": screen.bundle_id,
         "window_title": privacy.redact_text(screen.window_title or "")[:180],
         "ocr_snippet": privacy.redact_text(screen.ocr_snippet or "")[:500],
         "capture_ts_unix": screen.capture_ts_unix,
         "capture_gap_sec": screen.capture_gap_sec,
         "frame_age_sec": screen.frame_age_sec,
+        "app_identity": identity,
         "scene": _scene_dict(event),
     }
 
@@ -192,6 +195,8 @@ def _memory_blocks(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "title": privacy.redact_text(str(row.get("title") or ""))[:160],
             "summary": privacy.redact_text(str(row.get("summary") or row.get("content") or ""))[:500],
             "uri": str(row.get("uri") or "")[:240],
+            "relevance": privacy.redact_text(str(row.get("relevance") or ""))[:240],
+            "confidence": row.get("confidence"),
         })
     return out
 
@@ -212,6 +217,8 @@ def _privacy_state(
 
 def _quality_flags(event: CandidateEvent, workflow_event: dict[str, Any] | None) -> list[str]:
     flags: list[str] = []
+    identity = app_identity.analyze_event(event)
+    flags.extend(str(flag) for flag in identity.get("flags", []) if flag)
     if not (event.screen.frontmost_app or event.screen.bundle_id):
         flags.append("app_unknown")
     if not (event.screen.window_title or "").strip():

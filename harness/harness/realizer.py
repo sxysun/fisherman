@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 
 import aiohttp
 
+from . import app_identity
 from . import image_redaction
 from . import model_audit
 from . import privacy
@@ -150,7 +151,12 @@ def _serialize_state(
         lines.append("daily_goal: (not set)")
     if why_now.strip():
         lines.append(f"why_now: {why_now.strip()}")
-    lines.append(f"frontmost_app: {event.screen.frontmost_app or 'unknown'}")
+    identity = app_identity.analyze_event(event)
+    effective_app = str(identity.get("effective_app") or event.screen.frontmost_app or "unknown")
+    raw_app = str(identity.get("raw_frontmost_app") or event.screen.frontmost_app or "unknown")
+    lines.append(f"effective_app: {effective_app}")
+    if raw_app != effective_app:
+        lines.append(f"raw_frontmost_app: {raw_app}")
     lines.append(f"scene: {event.scene.label} (strength={event.scene.strength})")
     if event.scene.specificity:
         lines.append(f"scene_detail: {event.scene.specificity}")

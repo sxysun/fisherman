@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from eval import replay as replay_mod
+from . import app_identity
 from . import store as store_mod
 from . import sql_store
 
@@ -292,7 +293,7 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
     switches = 0
     prev = None
     for event in valid_15m:
-        app = event.screen.frontmost_app
+        app = app_identity.effective_app(event)
         if prev is not None and app != prev:
             switches += 1
         prev = app
@@ -300,7 +301,7 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
     latest_capture_gap = float(getattr(recent_2h[-1].screen, "capture_gap_sec", 0.0) or 0.0)
     if not valid_2h or not _is_valid_work_event(recent_2h[-1]) or latest_capture_gap > 90:
         return memory_cls.build(
-            recent_apps=[event.screen.frontmost_app or "" for event in valid_2h[-30:]],
+            recent_apps=[app_identity.effective_app(event) for event in valid_2h[-30:]],
             recent_scenes=[event.scene.label for event in valid_2h[-30:]],
             recent_outcomes=[],
             app_switches_last_15m=switches,
@@ -310,7 +311,7 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
             recent_workflow_events=_workflow_context_for_recent(recent_2h, now_ts),
         )
 
-    current_app = recent_2h[-1].screen.frontmost_app
+    current_app = app_identity.effective_app(recent_2h[-1])
     start_ts = now_ts or replay_mod._iso_to_unix(recent_2h[-1].ts) or 0.0
     last_ts = start_ts
     for event in reversed(recent_2h[:-1]):
@@ -319,7 +320,7 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
             break
         if not _is_valid_work_event(event):
             break
-        if event.screen.frontmost_app != current_app:
+        if app_identity.effective_app(event) != current_app:
             break
         if float(getattr(event.screen, "capture_gap_sec", 0.0) or 0.0) > 90:
             break
@@ -328,7 +329,7 @@ def _memory_for_windows(memory_cls, recent_2h: list[Any], recent_15m: list[Any],
 
     now_ts = now_ts or start_ts
     return memory_cls.build(
-        recent_apps=[event.screen.frontmost_app or "" for event in valid_2h[-30:]],
+        recent_apps=[app_identity.effective_app(event) for event in valid_2h[-30:]],
         recent_scenes=[event.scene.label for event in valid_2h[-30:]],
         recent_outcomes=[],
         app_switches_last_15m=switches,
@@ -364,7 +365,7 @@ def _workflow_context_for_recent(
             continue
         key = (
             getattr(event, "workflow_event_id", None)
-            or f"{event.screen.frontmost_app or 'unknown'}|{event.screen.window_title or ''}|{int(event_ts // 90)}"
+            or f"{app_identity.effective_app(event)}|{event.screen.window_title or ''}|{int(event_ts // 90)}"
         )
         if key not in groups:
             order.append(key)
@@ -374,7 +375,7 @@ def _workflow_context_for_recent(
                 "start_ts": event.ts,
                 "last_ts": event.ts,
                 "duration_sec": 0.0,
-                "app": event.screen.frontmost_app or "unknown",
+                "app": app_identity.effective_app(event),
                 "window_title": _redact(privacy, event.screen.window_title or "")[:180],
                 "scene_label": event.scene.label,
                 "n_candidates": 0,
