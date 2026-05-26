@@ -19,7 +19,8 @@ struct ActivityEntry: Identifiable {
 
 enum ActivityCategory: String {
     case coding, debugging, codeReview = "code review", readingDocs = "reading docs"
-    case design, writing, chat, email, meeting
+    case design, writing, chat, email, meeting, planning, settings
+    case form = "filling out form"
     case browsing, news, reading, gaming, terminal, idle, waiting
 
     /// Distinct hue per category, hand-tuned for dark-mode legibility.
@@ -42,6 +43,9 @@ enum ActivityCategory: String {
         case .news:        return Self.hex(0xFF, 0xB8, 0x5B) // amber
         case .design:      return Self.hex(0xFF, 0xD2, 0x3F) // yellow
         case .meeting:     return Self.hex(0xFF, 0x5B, 0x6B) // red
+        case .planning:    return Self.hex(0xD8, 0xB4, 0x5B) // ochre
+        case .settings:    return Self.hex(0xB9, 0xC2, 0xD4) // cool gray
+        case .form:        return Self.hex(0xC8, 0x9C, 0xFF) // lavender
         case .gaming:      return Self.hex(0xFF, 0x6F, 0xB5) // pink
         case .idle:        return Self.hex(0x6B, 0x72, 0x80) // gray
         case .waiting:     return Self.hex(0x4A, 0x52, 0x60) // dark gray

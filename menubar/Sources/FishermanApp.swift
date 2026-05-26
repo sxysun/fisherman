@@ -26,6 +26,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     private var settingsWindow: NSWindow?
     private var welcomeWindow: NSWindow?
     private var dailyCardWindow: NSWindow?
+    private var friendCardWindow: NSWindow?
+    private var friendCardWindowUserId: String?
     private var rewindWindow: NSWindow?
     /// Shared "I want Rewind to show date X" channel. The Rewind window
     /// reads requestedDate on appear and on every requestId bump, so
@@ -88,6 +90,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
                 onOpenCard: { [weak self] in
                     Task { @MainActor in
                         self?.openDailyCard()
+                    }
+                },
+                onOpenFriendCard: { [weak self] user in
+                    Task { @MainActor in
+                        self?.openFriendCard(user)
                     }
                 },
                 onQuit: {
@@ -360,6 +367,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         window.orderFrontRegardless()
     }
 
+    // MARK: - Friend Card window
+
+    @MainActor private func openFriendCard(_ friend: UserActivity) {
+        if let existing = friendCardWindow, friendCardWindowUserId == friend.id {
+            presentDailyCardWindow(existing)
+            return
+        }
+
+        friendCardWindow?.close()
+        friendCardWindow = nil
+        friendCardWindowUserId = nil
+
+        let view = FriendCardWindowView(friend: friend)
+            .padding(EdgeInsets(top: 28, leading: 20, bottom: 20, trailing: 20))
+            .frame(minWidth: 460, idealWidth: 520, minHeight: 480, idealHeight: 620)
+            .background(Color.black)
+            .preferredColorScheme(.dark)
+
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 520, height: 620)
+
+        let window = DailyCardPanel(
+            contentRect: hostingView.frame,
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "\(friend.name) Card"
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.backgroundColor = .black
+        window.isOpaque = true
+        window.isMovableByWindowBackground = true
+        window.contentView = hostingView
+        window.delegate = self
+        window.isFloatingPanel = false
+        window.hidesOnDeactivate = false
+        window.level = .floating
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.center()
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 460, height: 420)
+
+        friendCardWindow = window
+        friendCardWindowUserId = friend.id
+        presentDailyCardWindow(window)
+    }
+
     // MARK: - Rewind window
 
     @MainActor func openRewind(at date: Date? = nil) {
@@ -426,6 +481,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         if window === settingsWindow { settingsWindow = nil }
         if window === welcomeWindow { welcomeWindow = nil }
         if window === dailyCardWindow { dailyCardWindow = nil }
+        if window === friendCardWindow {
+            friendCardWindow = nil
+            friendCardWindowUserId = nil
+        }
         if window === rewindWindow { rewindWindow = nil }
     }
 }

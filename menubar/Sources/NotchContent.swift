@@ -84,10 +84,12 @@ struct ExpandedContent: View {
     let onRepairCapture: () -> Void
     let onSettings: () -> Void
     let onOpenCard: () -> Void
+    let onOpenFriendCard: (UserActivity) -> Void
     let onQuit: () -> Void
 
     @State private var hoveredUserId: String?
     @State private var repairingCapture = false
+    @State private var friendPreviewExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -205,6 +207,18 @@ struct ExpandedContent: View {
                             }
 
                             Spacer()
+
+                            if user.id != "me" {
+                                Button {
+                                    onOpenFriendCard(user)
+                                } label: {
+                                    Image(systemName: "calendar.day.timeline.left")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .frame(width: 12, height: 12)
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Open \(user.name)'s activity card")
+                            }
 
                             // Timeline bar in expanded view
                             if !user.history.isEmpty {
@@ -371,17 +385,34 @@ struct ExpandedContent: View {
     private var sharedStatusPreview: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 5) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        friendPreviewExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: friendPreviewExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .frame(width: 10, height: 10)
+                }
+                .buttonStyle(.plain)
+                .help(friendPreviewExpanded ? "Hide friend previews" : "Show friend previews")
+
                 Image(systemName: "lock.fill")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                 Text("Friend preview")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary)
+                Text("\(state.publishedFriendPreviews.count)")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
                 Spacer()
             }
 
-            ForEach(state.publishedFriendPreviews.prefix(3)) { preview in
-                publishedPreviewRow(preview)
+            if friendPreviewExpanded {
+                ForEach(state.publishedFriendPreviews.prefix(3)) { preview in
+                    publishedPreviewRow(preview)
+                }
             }
         }
         .padding(7)
