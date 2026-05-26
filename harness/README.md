@@ -2,7 +2,7 @@
 
 Proactive presence harness for macOS. Decides *when* to ping the user and uses an LLM (hermes-agent or any OpenAI-compatible endpoint) to compose the message. Reads screen context from [Fisherman](../) over HTTP. Pings the user via a separate floating Harness capsule that can join all macOS Spaces while Fisherman keeps its own notch surface.
 
-For a complete picture, read [HANDOFF.md](HANDOFF.md) — it's the canonical doc for the system's current state. For a frontier-lab-style architecture audit and gap analysis, open [AUDIT.html](AUDIT.html). For the ProAgentBench paper synthesis and rigor roadmap, read [PROAGENTBENCH_RIGOR_PLAN.md](PROAGENTBENCH_RIGOR_PLAN.md).
+For a complete picture, read [HANDOFF.md](HANDOFF.md) — it's the canonical doc for the system's current state. For a frontier-lab-style architecture audit and gap analysis, open [AUDIT.html](AUDIT.html). For the ProAgentBench paper synthesis and rigor roadmap, read [PROAGENTBENCH_RIGOR_PLAN.md](PROAGENTBENCH_RIGOR_PLAN.md). For the new frozen policy-input object, read [EVENT_CONTEXT_PACKET_ARCHITECTURE.md](EVENT_CONTEXT_PACKET_ARCHITECTURE.md).
 
 ## Quick start
 
@@ -37,7 +37,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter when enabled), and groups adjacent candidates into local workflow runs keyed by active app/window plus sleep/capture-gap boundaries. It then runs a binary gate that returns `{action, reason_codes, why_now}` and applies deterministic experiment assignment. The default live policy is `llm_icl_v0`: it runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from the current context, recent workflow trajectory, local KG-style priors, and recent explicit/implicit examples. Low-rate holdouts are logged for counterfactual measurement; exploration pings default to 3% on eligible ambiguous moments so the harness can learn when it is too timid without becoming noisy. Every decision immediately gets a trace row with a lifecycle stage before realization starts, then that trace is patched through realizer, critic, dispatch, claim, and outcome stages. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift floating capsule claims the pending payload via HTTP polling and renders it; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, dataset mining, and the eval report prefer indexed read paths where available.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter when enabled), and groups adjacent candidates into local workflow runs keyed by active app/window plus sleep/capture-gap boundaries. Before the live LLM policy runs, the harness persists an `EventContextPacket`: a frozen policy-input row containing the current observation, current workflow run, recent 5-minute trajectory, short memory, local KG-style priors, few-shot explicit/implicit examples, privacy state, and provenance. The default live policy is `llm_icl_v0`: it runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from that packet. Low-rate holdouts are logged for counterfactual measurement; exploration pings default to 3% on eligible ambiguous moments so the harness can learn when it is too timid without becoming noisy. Every decision immediately gets a trace row with a lifecycle stage before realization starts, then that trace is patched through realizer, critic, dispatch, claim, and outcome stages. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. Hermes may use its own long-term memory server-side; the harness does not directly query that durable mind yet. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift floating capsule claims the pending payload via HTTP polling and renders it; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, dataset mining, and the eval report prefer indexed read paths where available.
 
 ## Configuration
 
@@ -93,9 +93,23 @@ max_gap_sec = 90                           # closes runs across sleep/capture ga
 recent_context_sec = 300                   # policy sees the last 5 minutes of runs
 max_recent_context = 6
 max_ocr_preview_chars = 500
+
+[long_term_memory]
+provider = "hermes_mind"                   # Hermes/mind wiki exists externally
+policy_retrieval_enabled = false           # direct harness retrieval is future work
+
+[context_packets]
+enabled = true                              # persist exact model-facing policy inputs
 ```
 
 The Settings tab also exposes learner controls. `Examples` is `[policy_learner].max_examples`: the maximum number of explicit/implicit few-shot examples sent to the LLM ping/not-ping learner. It is a cap, not the current label count. `Label coverage` in Pipeline/Eval is explicit retro labels divided by decisions in the selected window, so `0.0%` means no human labels in that window even if implicit hover/dismiss/timeout signal exists.
+
+Inspect frozen policy inputs with:
+
+```bash
+.venv/bin/harness context-packets --limit 5
+curl 'http://127.0.0.1:7893/context-packets?window=24h&limit=10'
+```
 
 ## File layout
 

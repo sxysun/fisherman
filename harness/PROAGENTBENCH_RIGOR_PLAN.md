@@ -489,12 +489,13 @@ Acceptance criteria:
 5. Add KG priors as the first serious memory mechanism.
 6. Add time-based frozen eval splits and precision/recall/F1.
 
-## Implementation Status: 2026-05-22
+## Implementation Status: 2026-05-25
 
 The first paper-style rigor pass is now implemented in code:
 
 - The daemon appends a trace immediately after each decision and patches it through lifecycle stages: `decision_recorded`, `realizer_started`, `realizer_done`/`realizer_failed`, `critic_started`, `critic_done`, `dispatch_started`, `dispatch_done`, `claimed`, `outcome`, and terminal skipped/blocked/no-ping states.
 - Candidates, decisions, and traces now carry `workflow_event_id`, and workflow events include basic quality flags plus periodic open snapshots.
+- `EventContextPacket` is now a first-class stored object. The live `llm_icl_v0` policy persists the frozen model-facing packet to `context_packets.jsonl`/SQLite before calling the model, and decisions include `evidence.context_packet_id` for audit/replay.
 - `metrics` and `eval-report` now expose ping trace-completeness plus explicit-label precision, recall, and F1.
 - SQLite sidecar schema now includes typed `deliveries` and `curation` tables in addition to candidates/decisions/traces/outcomes/model calls/labels/workflow events.
 - `curation.jsonl` exists and is respected by KG-prior and dataset builders.
@@ -510,12 +511,14 @@ The first paper-style rigor pass is now implemented in code:
 - Workflow events now carry first/last OCR previews, window-title samples, and event-level quality flags such as `too_short`, `too_long`, and `no_valid_frame`.
 - The per-candidate VLM scene tagger now has explicit error/rate-limit backoff, so a failing VLM endpoint cannot repeatedly spend calls on every eligible tick.
 - Smoke coverage is 72 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, workflow-event review mining, frozen manifest replay, split assignment validation, live-model attestation, source weighting, delivery ack/expiry handling, VLM backoff, and precision/recall metrics.
+- `harness context-packets` and `/context-packets` expose recent frozen policy inputs for inspection; the dashboard Activity tab also surfaces recent packets.
 
 Still not done:
 
 - The event-level labeling UI is browser-backed, not yet surfaced inside the native capsule.
 - The frozen eval protocol now has a manifest replay command with leakage checks. Policy-specific RAG retrievers still need explicit tests before they are allowed into offline comparison.
 - KG priors are simple count priors; RAG similar-event retrieval and ablation reports are still future work.
+- Hermes/mind long-term memory already exists through `skills/mind-rolling-summary`, but the harness does not directly query `/home/ubuntu/mind` yet. Direct policy memory retrieval still needs an audited API and frozen ablations.
 - The curation ledger is CLI-backed and event-review-backed for workflow events; there is still no full capsule review panel for arbitrary candidate/trace deletion.
 - Harness storage is append-mostly. There is SQLite backfill, but no automatic retention/compaction policy for long-running dogfood state yet.
 

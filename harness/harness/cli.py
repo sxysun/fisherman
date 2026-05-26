@@ -14,22 +14,6 @@ import click
 import structlog
 
 from . import config as config_mod
-from . import critic as critic_mod
-from . import daemon as daemon_mod
-from . import service as service_mod
-from . import push as push_mod
-from . import realizer as realizer_mod
-from .candidate import synthesize
-from .fisherman_client import FishermanClient
-from .schemas import (
-    CandidateEvent,
-    ContextSignals,
-    MemorySnapshot,
-    ProactiveDecision,
-    ScreenContext,
-    SceneTag,
-    UserPref,
-)
 from .store import (
     HARNESS_DIR,
     ensure_dirs,
@@ -113,6 +97,8 @@ def _build_notch() -> None:
 @click.option("--foreground/--no-foreground", default=True, help="Run in current shell (default).")
 def start(foreground: bool) -> None:
     """Start the harness daemon."""
+    from . import daemon as daemon_mod
+
     try:
         cfg = config_mod.load()
     except FileNotFoundError as e:
@@ -139,6 +125,8 @@ def start(foreground: bool) -> None:
 @click.option("--load/--no-load", "load_service", default=True, help="Load/restart the launchd job after writing the plist.")
 def install_launchd(load_service: bool) -> None:
     """Install a launchd job so the harness daemon survives restarts."""
+    from . import service as service_mod
+
     path = service_mod.write_plist(repo_dir=HARNESS_REPO)
     click.echo(f"plist: {path}")
     if load_service:
@@ -152,6 +140,8 @@ def install_launchd(load_service: bool) -> None:
 @main.command("uninstall-launchd")
 def uninstall_launchd() -> None:
     """Unload and remove the harness launchd job."""
+    from . import service as service_mod
+
     result = service_mod.unload(remove=True)
     if result.returncode == 0:
         click.echo(f"unloaded: {service_mod.LABEL}")
@@ -164,6 +154,8 @@ def uninstall_launchd() -> None:
 @main.command("launchd-status")
 def launchd_status() -> None:
     """Print launchd status for the harness daemon job."""
+    from . import service as service_mod
+
     result = service_mod.status()
     if result.stdout:
         click.echo(result.stdout.rstrip())
@@ -208,6 +200,7 @@ def storage_backfill(reset: bool) -> None:
         "model_calls.jsonl",
         "retro_labels.jsonl",
         "workflow_events.jsonl",
+        "context_packets.jsonl",
         "curation.jsonl",
         "memory/session.jsonl",
     ]
@@ -216,6 +209,35 @@ def storage_backfill(reset: bool) -> None:
     for filename, n_rows in counts.items():
         click.echo(f"{filename:20s} {n_rows:6d}")
     click.echo(f"{'event_log':20s} {sql_store.count_rows('event_log'):6d}")
+
+
+@main.command("context-packets")
+@click.option("--limit", default=5, show_default=True, help="Number of recent packets to show.")
+@click.option("--json-out", is_flag=True, default=False, help="Print full packet JSON.")
+def context_packets(limit: int, json_out: bool) -> None:
+    """Inspect recent frozen policy input packets."""
+    rows = tail_jsonl("context_packets.jsonl", n=max(1, min(limit, 50)))
+    if json_out:
+        click.echo(json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        click.echo("no context packets yet")
+        return
+    for row in reversed(rows):
+        obs = row.get("current_observation") or {}
+        workflow = row.get("current_workflow_event") or {}
+        baseline = row.get("rule_baseline") or {}
+        click.echo(
+            f"{row.get('packet_id')} ts={row.get('ts')} "
+            f"policy={row.get('policy_name')} app={obs.get('frontmost_app') or '?'} "
+            f"workflow={row.get('workflow_event_id') or '?'} baseline={baseline.get('action') or '?'}"
+        )
+        if workflow:
+            title = workflow.get("window_title") or ""
+            click.echo(f"  workflow: {workflow.get('app') or '?'} / {title[:100]}")
+        goal = row.get("daily_goal") or ""
+        if goal:
+            click.echo(f"  goal: {goal[:140]}")
 
 
 @main.command()
@@ -238,6 +260,21 @@ def test(intent: str, push: bool, message: Optional[str], app: Optional[str]) ->
 
     if intent not in cfg["intents"]["enabled"]:
         click.echo(f"warning: intent {intent!r} not in enabled intents {cfg['intents']['enabled']}", err=True)
+
+    from . import critic as critic_mod
+    from . import push as push_mod
+    from . import realizer as realizer_mod
+    from .candidate import synthesize
+    from .fisherman_client import FishermanClient
+    from .schemas import (
+        CandidateEvent,
+        ContextSignals,
+        MemorySnapshot,
+        ProactiveDecision,
+        ScreenContext,
+        SceneTag,
+        UserPref,
+    )
 
     async def _run() -> None:
         fc = FishermanClient(cfg["daemon"]["fisherman_url"])

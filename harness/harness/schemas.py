@@ -238,6 +238,42 @@ class MemorySnapshot:
 
 
 @dataclass
+class EventContextPacket:
+    """Frozen policy-facing context for one ping/not-ping decision.
+
+    CandidateEvent remains the atomic screen tick. This packet is the
+    analysis-ready object: the exact short-horizon context, examples, priors,
+    and provenance the policy saw when it made a binary decision.
+    """
+
+    packet_id: str
+    candidate_id: str
+    ts: str
+    schema_version: str = "event_context_packet_v1"
+    policy_name: str = ""
+    workflow_event_id: Optional[str] = None
+    memory_snapshot_id: Optional[str] = None
+    current_observation: dict[str, Any] = field(default_factory=dict)
+    current_workflow_event: Optional[dict[str, Any]] = None
+    recent_5m_events: list[dict[str, Any]] = field(default_factory=list)
+    short_memory: dict[str, Any] = field(default_factory=dict)
+    daily_goal: str = ""
+    task_hypothesis: Optional[str] = None
+    recent_attention_outcomes: list[dict[str, Any]] = field(default_factory=list)
+    retrieved_wiki_memory: list[dict[str, Any]] = field(default_factory=list)
+    retrieved_similar_events: list[dict[str, Any]] = field(default_factory=list)
+    kg_priors: dict[str, Any] = field(default_factory=dict)
+    few_shot_examples: list[dict[str, Any]] = field(default_factory=list)
+    rule_baseline: dict[str, Any] = field(default_factory=dict)
+    privacy_state: dict[str, Any] = field(default_factory=dict)
+    quality_flags: list[str] = field(default_factory=list)
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class Trace:
     trace_id: str
     ts: str

@@ -98,6 +98,20 @@ session_window_min = 120
 idle_boundary_sec = 90
 active_frame_max_age_sec = 60
 
+[long_term_memory]
+# The durable memory wiki already lives with Hermes/mind-rolling-summary
+# (`/home/ubuntu/mind` on the Hermes host). The live harness records whether
+# such memory was present in the policy packet, but does not query it directly
+# until a dedicated audited retrieval API exists.
+provider = "hermes_mind"
+policy_retrieval_enabled = false
+policy_blocks = []
+
+[context_packets]
+# Persist exact model-facing policy inputs for audit/replay. Frozen eval builds
+# packets in memory but does not append them to live dogfood storage.
+enabled = true
+
 [workflow_events]
 # Deterministic local eventization inspired by LifeTrace-style data collection:
 # group adjacent candidates into app/window workflow runs so policy sees the

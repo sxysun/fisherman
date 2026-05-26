@@ -11,6 +11,7 @@ from pathlib import Path
 
 from harness import candidate as candidate_mod
 from harness import config as config_mod
+from harness import context_packets as context_packets_mod
 from harness import critic as critic_mod
 from harness import curation as curation_mod
 from harness import dataset as dataset_mod
@@ -48,6 +49,7 @@ def test_imports():
     # all top-level modules import cleanly
     assert schemas
     assert config_mod
+    assert context_packets_mod
     assert eval_report_mod
     assert store_mod
     assert fc_mod
@@ -1126,6 +1128,7 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
             app_switches_last_15m=0,
             minutes_on_current_app=12.0,
             recent_workflow_events=[{
+                "workflow_event_id": "wev_llm",
                 "status": "open",
                 "app": "Chrome",
                 "window_title": "Harness policy notes",
@@ -1135,6 +1138,7 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
                 "ocr_preview": "drafting harness policy learner",
             }],
         )
+        event.workflow_event_id = "wev_llm"
         cfg = {
             "cooldown_min": 5,
             "negative_feedback_backoff_min": 15,
@@ -1154,10 +1158,12 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
         }
 
         def fake_call(cfg, base_url, model, messages):
-            assert "drafting harness policy learner" in messages[1]["content"]
-            assert "recent_workflow_events" in messages[1]["content"]
-            assert "Harness policy notes" in messages[1]["content"]
-            assert "kg_priors" in messages[1]["content"]
+            body = json.loads(messages[1]["content"])
+            packet = body["policy_context_packet"]
+            assert packet["packet_id"].startswith("pkt_")
+            assert packet["current_observation"]["ocr_snippet"] == "drafting harness policy learner"
+            assert packet["current_workflow_event"]["window_title"] == "Harness policy notes"
+            assert packet["kg_priors"]
             return {
                 "action": "notch_ping",
                 "confidence": 0.82,
@@ -1171,35 +1177,46 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
         assert decision.action == "notch_ping"
         assert decision.policy_version == "llm_icl_v0"
         assert "llm_icl_policy" in decision.reason_codes
+        assert decision.evidence["context_packet_id"].startswith("pkt_")
+        packets = store_mod.tail_jsonl("context_packets.jsonl", n=1)
+        assert packets[0]["packet_id"] == decision.evidence["context_packet_id"]
+        assert packets[0]["workflow_event_id"] == "wev_llm"
+        assert sql_store_mod.count_rows("context_packets", base_dir=tmp_path) == 1
         assert store_mod.tail_jsonl("model_calls.jsonl", n=1)[0]["purpose"] == "policy_learner"
     finally:
         store_mod.HARNESS_DIR = old_dir
 
 
-def test_llm_icl_policy_respects_rule_hard_gates(monkeypatch):
+def test_llm_icl_policy_respects_rule_hard_gates(monkeypatch, tmp_path):
     from policies import llm_icl_v0
 
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
     def fail_call(*args, **kwargs):
         raise AssertionError("LLM should not be called for hard gates")
 
-    monkeypatch.setattr(llm_icl_v0, "_call_model", fail_call)
-    event = schemas.CandidateEvent()
-    event.context.in_call = True
-    event.screen.frame_age_sec = 5.0
-    event.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
-    mem = schemas.MemorySnapshot.build([], [], [], 0, 0.0)
-    cfg = {
-        "cooldown_min": 5,
-        "negative_feedback_backoff_min": 15,
-        "quiet_hours_start": 3,
-        "quiet_hours_end": 4,
-        "policy_learner": {"enabled": True},
-    }
+    try:
+        monkeypatch.setattr(llm_icl_v0, "_call_model", fail_call)
+        event = schemas.CandidateEvent()
+        event.context.in_call = True
+        event.screen.frame_age_sec = 5.0
+        event.scene = schemas.SceneTag(label="reading_browser", strength="strong", source="rule")
+        mem = schemas.MemorySnapshot.build([], [], [], 0, 0.0)
+        cfg = {
+            "cooldown_min": 5,
+            "negative_feedback_backoff_min": 15,
+            "quiet_hours_start": 3,
+            "quiet_hours_end": 4,
+            "policy_learner": {"enabled": True},
+        }
 
-    decision = llm_icl_v0.decide(event, mem, [], cfg)
-    assert decision.action == "no_ping"
-    assert "in_call" in decision.reason_codes
-    assert "rule_hard_gate" in decision.reason_codes
+        decision = llm_icl_v0.decide(event, mem, [], cfg)
+        assert decision.action == "no_ping"
+        assert "in_call" in decision.reason_codes
+        assert "rule_hard_gate" in decision.reason_codes
+        assert decision.evidence["context_packet_id"].startswith("pkt_")
+    finally:
+        store_mod.HARNESS_DIR = old_dir
 
 
 def test_session_memory_breaks_continuity_across_sleep_gap(tmp_path):

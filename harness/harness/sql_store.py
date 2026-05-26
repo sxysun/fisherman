@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 
 DB_FILENAME = "harness.db"
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 KNOWN_TABLES = {
     "event_log",
@@ -21,6 +21,7 @@ KNOWN_TABLES = {
     "model_calls",
     "retro_labels",
     "workflow_events",
+    "context_packets",
     "curation",
 }
 
@@ -218,6 +219,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ON workflow_events(ts);
         CREATE INDEX IF NOT EXISTS idx_workflow_events_app
             ON workflow_events(app, ts);
+
+        CREATE TABLE IF NOT EXISTS context_packets (
+            packet_id TEXT PRIMARY KEY,
+            ts TEXT,
+            candidate_id TEXT,
+            workflow_event_id TEXT,
+            policy_name TEXT,
+            schema_version TEXT,
+            payload_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_context_packets_ts
+            ON context_packets(ts);
+        CREATE INDEX IF NOT EXISTS idx_context_packets_candidate
+            ON context_packets(candidate_id);
+        CREATE INDEX IF NOT EXISTS idx_context_packets_workflow
+            ON context_packets(workflow_event_id);
 
         CREATE TABLE IF NOT EXISTS curation (
             curation_id TEXT PRIMARY KEY,
@@ -509,6 +527,7 @@ def backfill_jsonl_files(
                 "model_calls",
                 "retro_labels",
                 "workflow_events",
+                "context_packets",
                 "curation",
             ):
                 conn.execute(f"DELETE FROM {table}")
@@ -558,6 +577,8 @@ def _mirror_typed(
         _upsert_retro_label(conn, row, payload_json, payload_hash)
     elif filename == "workflow_events.jsonl":
         _upsert_workflow_event(conn, row, payload_json, payload_hash)
+    elif filename == "context_packets.jsonl":
+        _upsert_context_packet(conn, row, payload_json, payload_hash)
     elif filename == "curation.jsonl":
         _upsert_curation(conn, row, payload_json, payload_hash)
 
@@ -919,6 +940,44 @@ def _upsert_workflow_event(
     )
 
 
+def _upsert_context_packet(
+    conn: sqlite3.Connection,
+    row: dict,
+    payload_json: str,
+    payload_hash: str,
+) -> None:
+    packet_id = row.get("packet_id")
+    if not packet_id:
+        return
+    conn.execute(
+        """
+        INSERT INTO context_packets(
+            packet_id, ts, candidate_id, workflow_event_id, policy_name,
+            schema_version, payload_hash, payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(packet_id) DO UPDATE SET
+            ts = excluded.ts,
+            candidate_id = excluded.candidate_id,
+            workflow_event_id = excluded.workflow_event_id,
+            policy_name = excluded.policy_name,
+            schema_version = excluded.schema_version,
+            payload_hash = excluded.payload_hash,
+            payload_json = excluded.payload_json
+        """,
+        (
+            packet_id,
+            row.get("ts"),
+            row.get("candidate_id"),
+            row.get("workflow_event_id"),
+            row.get("policy_name"),
+            row.get("schema_version"),
+            payload_hash,
+            payload_json,
+        ),
+    )
+
+
 def _upsert_curation(
     conn: sqlite3.Connection,
     row: dict,
@@ -982,6 +1041,8 @@ def _object_id(filename: str, row: dict) -> str | None:
         return row.get("label_id") or row.get("decision_id") or row.get("candidate_id")
     if filename == "workflow_events.jsonl":
         return row.get("workflow_event_id")
+    if filename == "context_packets.jsonl":
+        return row.get("packet_id")
     if filename == "curation.jsonl":
         return row.get("curation_id") or row.get("target_id")
     return row.get("id")

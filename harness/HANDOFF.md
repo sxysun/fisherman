@@ -73,6 +73,7 @@ harness/
 │   ├── scene_vlm.py              per-candidate VLM scene tagger (smart-triggered)
 │   ├── memory.py                 rolling 2h session + content-addressed snapshots
 │   ├── workflow_events.py        local app/window run eventizer for policy trajectory
+│   ├── context_packets.py        frozen policy-input packet builder
 │   ├── gate.py                   loads policy module by name
 │   ├── realizer.py               openai-compatible agent loop, sends vision JPEG
 │   │                              unless privacy preflight suppresses it
@@ -140,6 +141,7 @@ State on disk (outside the repo):
 ├── deliveries.jsonl              notch claim/display ledger
 ├── outcomes.jsonl                user reactions + interaction_summary
 ├── traces.jsonl                  joined view per tick
+├── context_packets.jsonl         exact model-facing packet per llm_icl_v0 decision
 ├── retro_labels.jsonl            from the labeling UI
 ├── curation.jsonl                local retain/exclude/delete/blur decisions
 ├── model_calls.jsonl             privacy-safe model-call audit rows
@@ -185,10 +187,14 @@ User flow once it's running:
 
 ```
 ✅ End-to-end pipeline live
-   poll → scene → memory → gate → trace → realizer → critic → push → claim → outcome
+   poll → scene → memory/workflow → context packet → gate → trace → realizer → critic → push → claim → outcome
    - A trace is appended immediately after each decision and patched through
      lifecycle stages, so ping decisions are no longer allowed to disappear
      before realization or delivery.
+   - `llm_icl_v0` now persists an `EventContextPacket` before the model call;
+     decisions include `evidence.context_packet_id` so audits can recover the
+     exact current observation, 5-minute workflow context, examples, KG priors,
+     and privacy/provenance state used by the binary policy.
 
 ✅ Vision (VLM) in two places
    - Per-candidate scene tagger (google/gemma-3-4b-it on OpenRouter when

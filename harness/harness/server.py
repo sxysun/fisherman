@@ -475,6 +475,31 @@ async def get_information_diet(request: web.Request) -> web.Response:
     ))
 
 
+async def get_context_packets(request: web.Request) -> web.Response:
+    from . import metrics as metrics_mod
+
+    window = request.query.get("window", "24h")
+    try:
+        limit = int(request.query.get("limit", "20"))
+    except ValueError:
+        limit = 20
+    limit = max(1, min(limit, 200))
+    since = metrics_mod.since_iso(window)
+    rows = metrics_mod._read_payloads(
+        "context_packets",
+        "context_packets.jsonl",
+        since_iso=since,
+        limit=limit,
+        newest_first=True,
+    )
+    return web.json_response({
+        "window": window,
+        "since": since,
+        "limit": limit,
+        "packets": rows,
+    })
+
+
 async def post_trainer_run(request: web.Request) -> web.Response:
     from . import trainer as trainer_mod
 
@@ -629,6 +654,7 @@ def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app.router.add_get("/lab", get_lab)
     app.router.add_get("/eval/report", get_eval_report)
     app.router.add_get("/information-diet/report", get_information_diet)
+    app.router.add_get("/context-packets", get_context_packets)
     app.router.add_post("/trainer/run", post_trainer_run)
     app.router.add_post("/trainer/activate", post_trainer_activate)
     app.router.add_post("/trainer/rollback", post_trainer_rollback)

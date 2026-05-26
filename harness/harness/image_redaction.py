@@ -13,19 +13,9 @@ except ImportError:  # pragma: no cover - dependency/runtime guard
     Image = None
     ImageDraw = None
 
-if sys.platform == "darwin":
-    try:
-        import objc
-        import Quartz
-        import Vision
-    except ImportError:  # pragma: no cover - runtime guard
-        objc = None
-        Quartz = None
-        Vision = None
-else:  # pragma: no cover - exercised by Linux CI imports
-    objc = None
-    Quartz = None
-    Vision = None
+objc = None
+Quartz = None
+Vision = None
 
 
 Box = tuple[int, int, int, int]
@@ -72,25 +62,26 @@ def _vision_box_to_pixels(box, width: int, height: int) -> Box:
 
 
 def ocr_boxes_from_vision(jpeg_data: bytes) -> list[OcrBox]:
-    if sys.platform != "darwin" or objc is None or Quartz is None or Vision is None:
+    objc_mod, quartz_mod, vision_mod = _load_vision_frameworks()
+    if sys.platform != "darwin" or objc_mod is None or quartz_mod is None or vision_mod is None:
         raise RuntimeError("Apple Vision OCR is unavailable")
 
-    with objc.autorelease_pool():
-        provider = Quartz.CGDataProviderCreateWithCFData(jpeg_data)
-        cg_image = Quartz.CGImageCreateWithJPEGDataProvider(
-            provider, None, True, Quartz.kCGRenderingIntentDefault
+    with objc_mod.autorelease_pool():
+        provider = quartz_mod.CGDataProviderCreateWithCFData(jpeg_data)
+        cg_image = quartz_mod.CGImageCreateWithJPEGDataProvider(
+            provider, None, True, quartz_mod.kCGRenderingIntentDefault
         )
         if cg_image is None:
             return []
-        width = int(Quartz.CGImageGetWidth(cg_image))
-        height = int(Quartz.CGImageGetHeight(cg_image))
+        width = int(quartz_mod.CGImageGetWidth(cg_image))
+        height = int(quartz_mod.CGImageGetHeight(cg_image))
 
-        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, None)
-        request = Vision.VNRecognizeTextRequest.alloc().init()
-        request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        handler = vision_mod.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, None)
+        request = vision_mod.VNRecognizeTextRequest.alloc().init()
+        request.setRecognitionLevel_(vision_mod.VNRequestTextRecognitionLevelAccurate)
         request.setUsesLanguageCorrection_(False)
         try:
-            request.setRevision_(Vision.VNRecognizeTextRequestRevision3)
+            request.setRevision_(vision_mod.VNRecognizeTextRequestRevision3)
         except AttributeError:
             pass
         request.setMinimumTextHeight_(0.01)
@@ -117,6 +108,24 @@ def ocr_boxes_from_vision(jpeg_data: bytes) -> list[OcrBox]:
                 )
             )
         return boxes
+
+
+def _load_vision_frameworks():
+    global objc, Quartz, Vision
+    if sys.platform != "darwin":
+        return None, None, None
+    if objc is not None and Quartz is not None and Vision is not None:
+        return objc, Quartz, Vision
+    try:
+        import objc as objc_mod
+        import Quartz as quartz_mod
+        import Vision as vision_mod
+    except ImportError:  # pragma: no cover - runtime guard
+        return None, None, None
+    objc = objc_mod
+    Quartz = quartz_mod
+    Vision = vision_mod
+    return objc, Quartz, Vision
 
 
 def sensitive_ocr_boxes(ocr_boxes: list[OcrBox]) -> tuple[list[Box], list[str]]:

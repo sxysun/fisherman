@@ -270,6 +270,94 @@
       font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
       margin: -4px 0 8px;
     }
+    .artifact-flow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px;
+      margin: 16px 0 8px;
+      align-items: stretch;
+    }
+    .artifact {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 11px;
+      background: #fbfcfd;
+      min-height: 118px;
+    }
+    .artifact strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+    .artifact code {
+      display: inline-block;
+      margin-bottom: 5px;
+    }
+    .artifact small {
+      display: block;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .join-note {
+      margin: 8px 0 18px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel2);
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .schema-table td:first-child {
+      width: 180px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+    .sample-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 14px 0 20px;
+    }
+    .sample {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfd;
+      overflow: hidden;
+    }
+    .sample header {
+      margin: 0;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel2);
+    }
+    .sample header strong { display: block; }
+    .sample header span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    pre.sample-json {
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      white-space: pre-wrap;
+      color: #172033;
+      font: 12px/1.42 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .math-panel {
+      border: 1px solid var(--ink);
+      border-radius: 8px;
+      padding: 16px;
+      background: #fbfcfd;
+    }
+    .math-panel .formula {
+      display: block;
+      margin: 8px 0 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: #101418;
+      color: #f1f5f9;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
     .callout {
       border-left: 4px solid var(--blue);
       background: #eff6ff;
@@ -283,7 +371,7 @@
     .print-note { color: var(--muted); font-size: 13px; }
     @media (max-width: 860px) {
       main { padding: 32px 18px 64px; }
-      .grid.two, .grid.three, .verdict, .flow, .reading-path, .phase-map, .cheatsheet { grid-template-columns: 1fr; }
+      .grid.two, .grid.three, .verdict, .flow, .artifact-flow, .sample-grid, .reading-path, .phase-map, .cheatsheet { grid-template-columns: 1fr; }
       h1 { font-size: 36px; }
     }
     @media print {
@@ -297,12 +385,12 @@
 <main>
   <header>
     <h1>Fisherman Harness Architecture and Gap Audit</h1>
-    <p class="dek">A practical map of the proactive-presence harness as of May 23, 2026: what runs, how a screen moment becomes a ping, how feedback becomes training data, and what still separates the dogfood harness from a fully validated policy system.</p>
+    <p class="dek">A practical map of the proactive-presence harness as of May 25, 2026: what runs, how a screen moment becomes a ping, how feedback becomes training data, and what still separates the dogfood harness from a fully validated policy system.</p>
     <div class="meta">
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
       <span class="pill">Smoke tests: 72 passing in CI</span>
       <span class="pill">Approx. source/docs: 55 files, 10k lines</span>
-      <span class="pill">Updated: 2026-05-23</span>
+      <span class="pill">Updated: 2026-05-25</span>
     </div>
   </header>
 
@@ -441,12 +529,257 @@
     <div class="node"><strong>2. Candidate synthesis</strong><small><code>candidate.py</code> snapshots screen context and current user prefs into a typed <code>CandidateEvent</code>.</small></div>
     <div class="node"><strong>3. Scene reading</strong><small>Rules tag coarse scenes. Optional VLM overlay adds specificity, sensitivity, and intent signals.</small></div>
     <div class="node"><strong>4. Short memory</strong><small><code>SessionMemory</code> tracks recent apps/scenes, switches, time on current app, and recent outcomes.</small></div>
-    <div class="node"><strong>5. Policy</strong><small><code>rule_v0</code> applies hard gates and fallback behavior; the default <code>llm_icl_v0</code> learner chooses ping/not-ping from context plus labeled examples.</small></div>
-    <div class="node"><strong>6. Realizer</strong><small>OpenAI-compatible chat endpoint receives daily goal, why-now, compact state, and optionally the current JPEG.</small></div>
-    <div class="node"><strong>7. Critic</strong><small>Regex critic blocks obvious secrets, long quotes, verbose output, or empty/multi-paragraph messages. LLM critic is optional.</small></div>
-    <div class="node"><strong>8. Capsule + reward</strong><small>Swift capsule displays the ping, captures hover/approach/click/dismiss/timeout, and writes signal-derived reward.</small></div>
+    <div class="node"><strong>5. Context packet</strong><small><code>EventContextPacket</code> freezes the exact short-horizon policy input: current screen, workflow run, 5-minute trajectory, examples, KG priors, and provenance.</small></div>
+    <div class="node"><strong>6. Policy</strong><small><code>rule_v0</code> applies hard gates and fallback behavior; the default <code>llm_icl_v0</code> learner chooses ping/not-ping from the frozen packet.</small></div>
+    <div class="node"><strong>7. Realizer</strong><small>OpenAI-compatible chat endpoint receives daily goal, why-now, compact state, and optionally the current JPEG. Hermes may use its own long-term mind server-side.</small></div>
+    <div class="node"><strong>8. Critic</strong><small>Regex critic blocks obvious secrets, long quotes, verbose output, or empty/multi-paragraph messages. LLM critic is optional.</small></div>
+    <div class="node"><strong>9. Capsule + reward</strong><small>Swift capsule displays the ping, captures hover/approach/click/dismiss/timeout, and writes signal-derived reward.</small></div>
   </div>
-  <p class="arrow">Fisherman -> CandidateEvent -> Scene/VLM -> Memory -> Policy -> Realizer -> Critic -> Pending ping -> Outcome -> Reward -> Trace -> Labels/eval</p>
+  <p class="arrow">Fisherman -> CandidateEvent -> WorkflowEvent/Memory -> EventContextPacket -> Policy -> Realizer -> Critic -> Pending ping -> Outcome -> Reward -> Trace -> Labels/eval</p>
+
+  <h2>Dataflow With Stored Objects</h2>
+  <p>The paper's framing is event-first: recent temporal context plus user memory feeds a binary <em>when to assist</em> decision, and only positive decisions move to <em>how to assist</em>. The harness now has the same shape, but the object boundaries matter.</p>
+  <div class="artifact-flow">
+    <div class="artifact">
+      <strong>Screen tick</strong>
+      <code>CandidateEvent</code>
+      <small>Atomic observation row. It carries the current screen slice, scene tag, lightweight context signals, prefs, and a workflow join id.</small>
+    </div>
+    <div class="artifact">
+      <strong>Workflow run</strong>
+      <code>WorkflowEvent</code>
+      <small>App/window continuity object. This is closer to the paper's event unit than a single 5-second candidate tick.</small>
+    </div>
+    <div class="artifact">
+      <strong>Short memory</strong>
+      <code>MemorySnapshot</code>
+      <small>Recent apps, scenes, outcomes, workflow runs, switch count, time-on-app, and idle-gap state. Passed to policy, not copied into the candidate row.</small>
+    </div>
+    <div class="artifact">
+      <strong>Policy input</strong>
+      <code>EventContextPacket</code>
+      <small>Frozen decision example. It materializes exactly what the policy saw: current observation, workflow context, recent outcomes, few-shot examples, KG priors, privacy state, and provenance.</small>
+    </div>
+    <div class="artifact">
+      <strong>When policy</strong>
+      <code>Decision</code>
+      <small>Binary action: <code>notch_ping</code> or <code>no_ping</code>. Stores confidence, reason codes, why-now, evidence, and policy version.</small>
+    </div>
+    <div class="artifact">
+      <strong>Execution trace</strong>
+      <code>Trace</code>
+      <small>Joinable lifecycle record: candidate, memory snapshot id, decision, realizer, critic, delivery, outcome, reward, and labels.</small>
+    </div>
+    <div class="artifact">
+      <strong>Learning rows</strong>
+      <code>Labels + outcomes</code>
+      <small>Explicit labels and usable implicit outcomes become weak training/eval examples, hard negatives, and KG-style priors.</small>
+    </div>
+  </div>
+  <div class="join-note">
+    Join spine: <code>candidate_id</code> links candidates, context packets, decisions, traces, deliveries, outcomes, and labels. <code>workflow_event_id</code> groups many candidate ticks into one app/window episode so eval does not pretend that 30 near-identical ticks are 30 independent examples. <code>packet_id</code> lets audits recover the exact model-facing context for a policy decision.
+  </div>
+
+  <h2>Candidate Schema, In Plain English</h2>
+  <table class="schema-table">
+    <thead>
+      <tr>
+        <th>Field</th>
+        <th>What it contains now</th>
+        <th>What it does not contain yet</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>candidate_id</td>
+        <td>Stable id for this atomic observation tick.</td>
+        <td>No event summary or label by itself.</td>
+      </tr>
+      <tr>
+        <td>ts</td>
+        <td>UTC timestamp when the harness synthesized the candidate.</td>
+        <td>No full preceding timeline. That lives in memory/workflow rows.</td>
+      </tr>
+      <tr>
+        <td>screen</td>
+        <td>Frontmost app, bundle id, window title, redacted OCR snippet, capture timestamp, capture gap, frame age, and sensitive-scene flag.</td>
+        <td>No screenshot bytes in the candidate row, no full OCR transcript, no long-term knowledge-base summary.</td>
+      </tr>
+      <tr>
+        <td>scene</td>
+        <td>Rule or VLM tag: label, confidence, specificity, intent-signal booleans, and load-bearing visible text.</td>
+        <td>Not a full semantic understanding of your current task. VLM output can be wrong or internally inconsistent.</td>
+      </tr>
+      <tr>
+        <td>context</td>
+        <td>Call/battery state, minutes since last push, and placeholder user-action timing.</td>
+        <td>Does not yet include mouse/keyboard activity history, browser tab stack, or semantic work objective.</td>
+      </tr>
+      <tr>
+        <td>user_pref</td>
+        <td>Frequency, enabled intents, quiet hours, snooze, and muted intents from harness config/state.</td>
+        <td>Not learned preferences except where policy state or labels indirectly influence later prompts.</td>
+      </tr>
+      <tr>
+        <td>workflow_event_id</td>
+        <td>Pointer to the current app/window workflow event.</td>
+        <td>The actual workflow event details are separate rows.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <p><strong>Current shape:</strong> the candidate object is intentionally thin, and that is now correct. The rich 5-minute model input is persisted separately as <code>EventContextPacket</code> rows in <code>~/.harness/context_packets.jsonl</code> and SQLite <code>context_packets</code>. The remaining memory gap is direct, audited retrieval from Hermes's durable <code>/home/ubuntu/mind</code> wiki into <code>retrieved_wiki_memory</code>.</p>
+  </div>
+
+  <h2>Actual Local Samples</h2>
+  <p>These samples are sanitized snapshots from <code>~/.harness</code>. Window titles and OCR snippets are redacted here, but the row shape is real.</p>
+  <div class="sample-grid">
+    <div class="sample">
+      <header>
+        <strong>Recent ping candidate and decision</strong>
+        <span>Shows the atomic candidate plus the binary policy decision.</span>
+      </header>
+      <pre class="sample-json">{
+  "candidate": {
+    "candidate_id": "cand_1082a30469",
+    "ts": "2026-05-24T21:28:28Z",
+    "workflow_event_id": "wev_a449b0aad3af5482",
+    "screen": {
+      "frontmost_app": "Civilization V",
+      "bundle_id": "com.aspyr.civ5xp.steam",
+      "window_title": "[redacted]",
+      "ocr_snippet": "[redacted]",
+      "capture_gap_sec": 15.0,
+      "frame_age_sec": 21.7,
+      "sensitive_scene": false
+    },
+    "scene": {
+      "label": "coding",
+      "source": "llm",
+      "specificity": "Playing Civilization V game screen",
+      "intent_signals": {
+        "could_help_focus": true,
+        "long_session_check": true
+      }
+    }
+  },
+  "decision": {
+    "policy_version": "llm_icl_v0+fallback",
+    "action": "notch_ping",
+    "confidence": 0.75,
+    "reason_codes": [
+      "focus_opportunity",
+      "long_session_on_one_app",
+      "llm_error"
+    ],
+    "why_now": "focus_opportunity, long_session_on_one_app; scene detail: Playing Civilization V game screen"
+  }
+}</pre>
+    </div>
+    <div class="sample">
+      <header>
+        <strong>Recent context packet</strong>
+        <span>The frozen policy input that <code>llm_icl_v0</code> sends to the model.</span>
+      </header>
+      <pre class="sample-json">{
+  "packet_id": "pkt_6a3b9d5c4e2f1a0b",
+  "candidate_id": "cand_1082a30469",
+  "workflow_event_id": "wev_a449b0aad3af5482",
+  "policy_name": "llm_icl_v0",
+  "current_observation": {
+    "frontmost_app": "Google Chrome",
+    "window_title": "[redacted]",
+    "ocr_snippet": "[redacted]",
+    "capture_gap_sec": 5.0,
+    "frame_age_sec": 1.4,
+    "scene": {"label": "reading_browser", "source": "rule"}
+  },
+  "current_workflow_event": {
+    "app": "Google Chrome",
+    "duration_sec": 185.0,
+    "n_candidates": 37,
+    "ocr_preview": "[redacted]"
+  },
+  "recent_5m_events": ["... compact workflow rows ..."],
+  "few_shot_examples": ["... explicit/implicit examples ..."],
+  "kg_priors": {"version": "kg_priors_v1", "n_examples": 111},
+  "rule_baseline": {"action": "no_ping", "reason_codes": ["no_clear_help"]},
+  "privacy_state": {
+    "screenshot_bytes_in_packet": false,
+    "ocr_redacted_before_packet": true
+  }
+}</pre>
+    </div>
+    <div class="sample">
+      <header>
+        <strong>Recent memory snapshot</strong>
+        <span>Passed to policy separately from the candidate row.</span>
+      </header>
+      <pre class="sample-json">{
+  "snapshot_id": "mem_c3f3c076f4664b64",
+  "ts": "2026-05-26T02:51:50Z",
+  "recent_apps_tail": [
+    "Civilization V",
+    "Civilization V",
+    "Civilization V"
+  ],
+  "recent_scenes_tail": [
+    "unknown",
+    "unknown",
+    "coding"
+  ],
+  "app_switches_last_15m": 0,
+  "minutes_on_current_app": 0.0,
+  "last_event_gap_sec": 5.0,
+  "session_boundary": null,
+  "recent_workflow_events_tail": [
+    {
+      "workflow_event_id": "wev_839fca4fd6890fc0",
+      "app": "Civilization V",
+      "scene_label": "unknown",
+      "duration_sec": 62.0,
+      "n_candidates": 12,
+      "quality_flags": ["window_unknown"]
+    },
+    {
+      "workflow_event_id": "wev_2856f2edf3b135f5",
+      "app": "Civilization V",
+      "scene_label": "coding",
+      "duration_sec": 0.0,
+      "n_candidates": 1,
+      "quality_flags": ["window_unknown"]
+    }
+  ]
+}</pre>
+    </div>
+  </div>
+
+  <h2>KG-Style Priors Are Counts, Not Training</h2>
+  <div class="grid two">
+    <div class="math-panel">
+      <p>The current KG prior builder is not fitting a model, not doing gradient descent, and not learning embeddings. It builds a local table of interpretable feature counts from explicit labels plus usable implicit outcomes.</p>
+      <span class="formula">feature = app | scene | app_scene | keyword | app_keyword
+target = notch_ping if label == would_help
+target = no_ping if label in {would_annoy, good_no_ping}
+p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
+      <p>The <code>+0.5</code> and <code>+1.0</code> are Jeffreys-style smoothing. They stop tiny samples from becoming falsely certain.</p>
+    </div>
+    <div class="card">
+      <h3>Recent prior table sample</h3>
+      <p>Current local build: <code>111</code> usable examples. Top features include:</p>
+      <ul>
+        <li><code>kw:edit</code>: <code>p_should_ping=0.237</code>, <code>n=57.0</code></li>
+        <li><code>app:google chrome</code>: <code>p_should_ping=0.257</code>, <code>n=52.8</code></li>
+        <li><code>scene:coding</code>: <code>p_should_ping=0.303</code>, <code>n=30.4</code></li>
+        <li><code>app_kw:google chrome|view</code>: <code>p_should_ping=0.184</code>, <code>n=27.6</code></li>
+      </ul>
+      <p>This becomes soft context in the live LLM policy prompt. It should influence the policy, not override evidence from the current screen.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <p><strong>What this means:</strong> KG priors are a transparent memory hint. They answer, "In past local data, were moments like this usually helpful to ping on?" They are not a calibrated classifier yet. The next lab-grade step is comparing policy variants with and without these priors on frozen temporal splits.</p>
+  </div>
 
   <h2>What Is Strong</h2>
   <div class="grid three">

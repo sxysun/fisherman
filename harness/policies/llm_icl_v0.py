@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from harness import context_packets as context_packets_mod
 from harness import implicit as implicit_mod
 from harness import kg_priors as kg_priors_mod
 from harness import metrics as metrics_mod
@@ -28,7 +29,7 @@ from harness.policy_contract import HARD_NO_PING_REASONS
 from harness import sql_store
 from harness import trust
 from harness.realizer import chat_completions_url
-from harness.schemas import CandidateEvent, MemorySnapshot, ProactiveDecision
+from harness.schemas import CandidateEvent, EventContextPacket, MemorySnapshot, ProactiveDecision
 from harness.store import iter_jsonl
 from policies import rule_v0
 
@@ -46,20 +47,60 @@ def decide(
 ) -> ProactiveDecision:
     baseline = rule_v0.decide(event, memory, recent_outcomes, config)
     if baseline.action == "no_ping" and set(baseline.reason_codes or []) & HARD_NO_PING_REASONS:
-        return _fallback_decision(baseline, "rule_hard_gate")
+        packet = _persist_context_packet(
+            event,
+            memory,
+            recent_outcomes,
+            baseline,
+            [],
+            {},
+            config,
+            status="fallback_rule_hard_gate",
+        )
+        return _fallback_decision(baseline, "rule_hard_gate", packet_id=packet.packet_id)
 
     cfg = dict(config.get("policy_learner") or {})
     if not bool(cfg.get("enabled", False)):
-        return _fallback_decision(baseline, "llm_disabled")
+        packet = _persist_context_packet(
+            event,
+            memory,
+            recent_outcomes,
+            baseline,
+            [],
+            {},
+            config,
+            status="fallback_llm_disabled",
+        )
+        return _fallback_decision(baseline, "llm_disabled", packet_id=packet.packet_id)
 
     if not _rate_limited_ok(float(cfg.get("min_interval_sec") or 0.0)):
-        return _fallback_decision(baseline, "llm_rate_limited")
+        packet = _persist_context_packet(
+            event,
+            memory,
+            recent_outcomes,
+            baseline,
+            [],
+            {},
+            config,
+            status="fallback_llm_rate_limited",
+        )
+        return _fallback_decision(baseline, "llm_rate_limited", packet_id=packet.packet_id)
 
     base_url = (cfg.get("base_url") or "").rstrip("/")
     model = cfg.get("model") or ""
     offline_eval = bool(cfg.get("offline_eval"))
     if not offline_eval and (not base_url or not model):
-        return _fallback_decision(baseline, "llm_unconfigured")
+        packet = _persist_context_packet(
+            event,
+            memory,
+            recent_outcomes,
+            baseline,
+            [],
+            {},
+            config,
+            status="fallback_llm_unconfigured",
+        )
+        return _fallback_decision(baseline, "llm_unconfigured", packet_id=packet.packet_id)
 
     trust_check = trust.check_model_endpoint(base_url, config.get("privacy") or {}) if not offline_eval else None
     if trust_check is not None and not trust_check.allowed:
@@ -71,12 +112,32 @@ def decide(
             status="blocked",
             error=trust_check.reason,
         )
-        return _fallback_decision(baseline, "llm_untrusted_endpoint")
+        packet = _persist_context_packet(
+            event,
+            memory,
+            recent_outcomes,
+            baseline,
+            [],
+            {},
+            config,
+            status="fallback_llm_untrusted_endpoint",
+        )
+        return _fallback_decision(baseline, "llm_untrusted_endpoint", packet_id=packet.packet_id)
 
     max_examples = int(cfg.get("max_examples") or 16)
     examples = _examples_for_policy(cfg, event=event, limit=max_examples, cutoff_ts=event.ts)
     kg_priors = _kg_priors_for_event(event, cfg, config)
-    prompt = _build_prompt(event, memory, recent_outcomes, baseline, examples, kg_priors, config)
+    packet = _persist_context_packet(
+        event,
+        memory,
+        recent_outcomes,
+        baseline,
+        examples,
+        kg_priors,
+        config,
+        status="model_prompt",
+    )
+    prompt = _build_prompt(packet)
     started = time.time()
     try:
         if offline_eval:
@@ -94,7 +155,7 @@ def decide(
             error=str(e),
             examples=len(examples),
         )
-        return _fallback_decision(baseline, "llm_error")
+        return _fallback_decision(baseline, "llm_error", packet_id=packet.packet_id)
 
     latency_ms = int((time.time() - started) * 1000)
     _audit(
@@ -106,12 +167,20 @@ def decide(
         latency_ms=latency_ms,
         examples=len(examples),
     )
-    return _decision_from_result(event, baseline, result, cfg)
+    return _decision_from_result(event, baseline, result, cfg, packet_id=packet.packet_id)
 
 
-def _fallback_decision(baseline: ProactiveDecision, reason: str) -> ProactiveDecision:
+def _fallback_decision(
+    baseline: ProactiveDecision,
+    reason: str,
+    *,
+    packet_id: str | None = None,
+) -> ProactiveDecision:
     reasons = list(baseline.reason_codes or [])
     reasons.append(reason)
+    evidence = dict(baseline.evidence or {})
+    if packet_id:
+        evidence["context_packet_id"] = packet_id
     return ProactiveDecision(
         decision_id=baseline.decision_id,
         candidate_id=baseline.candidate_id,
@@ -124,7 +193,7 @@ def _fallback_decision(baseline: ProactiveDecision, reason: str) -> ProactiveDec
         why_now=baseline.why_now,
         workflow_event_id=baseline.workflow_event_id,
         intent_category=baseline.intent_category,
-        evidence=dict(baseline.evidence or {}),
+        evidence=evidence,
     )
 
 
@@ -353,7 +422,7 @@ def _balanced(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     return out
 
 
-def _build_prompt(
+def _persist_context_packet(
     event: CandidateEvent,
     memory: MemorySnapshot,
     recent_outcomes: list[dict],
@@ -361,41 +430,54 @@ def _build_prompt(
     examples: list[dict[str, Any]],
     kg_priors: dict[str, Any],
     config: dict,
-) -> list[dict[str, str]]:
-    daily_goal = (config.get("daily_goal") or "").strip()
-    context = {
-        "daily_goal": privacy.redact_text(daily_goal),
-        "screen": {
-            "frontmost_app": event.screen.frontmost_app,
-            "window_title": privacy.redact_text(event.screen.window_title or "")[:160],
-            "ocr_snippet": privacy.redact_text(event.screen.ocr_snippet or "")[:500],
-            "frame_age_sec": event.screen.frame_age_sec,
-            "capture_gap_sec": event.screen.capture_gap_sec,
-        },
-        "scene": _scene_dict(event),
-        "memory": {
-            "recent_apps": memory.recent_apps[-8:],
-            "recent_scenes": memory.recent_scenes[-8:],
-            "recent_workflow_events": _workflow_context(memory),
-            "app_switches_last_15m": memory.app_switches_last_15m,
-            "minutes_on_current_app": memory.minutes_on_current_app,
-            "last_event_gap_sec": getattr(memory, "last_event_gap_sec", 0.0),
-            "session_boundary": getattr(memory, "session_boundary", None),
-        },
-        "recent_outcomes": [
-            {
-                "user_action": row.get("user_action"),
-                "intent_signal": (row.get("interaction_summary") or {}).get("intent_signal"),
-            }
-            for row in recent_outcomes[-5:]
-        ],
-        "rule_baseline": {
-            "action": baseline.action,
-            "reason_codes": baseline.reason_codes,
-            "why_now": baseline.why_now,
-        },
-        "kg_priors": kg_priors,
-    }
+    *,
+    status: str,
+) -> EventContextPacket:
+    packet = context_packets_mod.build_packet(
+        event=event,
+        memory=memory,
+        recent_outcomes=recent_outcomes,
+        daily_goal=(config.get("daily_goal") or ""),
+        policy_name=POLICY_VERSION,
+        rule_baseline=baseline,
+        few_shot_examples=examples,
+        kg_priors=kg_priors,
+        retrieved_wiki_memory=_configured_wiki_memory(config),
+        retrieved_similar_events=[],
+        provenance_extra={"status": status},
+    )
+    learner_cfg = config.get("policy_learner") or {}
+    packet_cfg = config.get("context_packets") or {}
+    if bool(learner_cfg.get("frozen_eval")):
+        return packet
+    if packet_cfg.get("enabled", True) is False:
+        return packet
+    return context_packets_mod.persist_packet(packet)
+
+
+def _configured_wiki_memory(config: dict) -> list[dict[str, Any]]:
+    """Return explicit policy memory blocks, if the caller supplied them.
+
+    Hermes can use its own long-term mind during realization. The policy keeps
+    that separate until the harness has a direct, audited memory retrieval API;
+    tests/frozen evals may inject blocks here through config.
+    """
+    memory_cfg = config.get("long_term_memory") or config.get("memory_wiki") or {}
+    blocks = memory_cfg.get("policy_blocks") if isinstance(memory_cfg, dict) else None
+    if isinstance(blocks, list):
+        return [row for row in blocks if isinstance(row, dict)]
+    provider = memory_cfg.get("provider") if isinstance(memory_cfg, dict) else None
+    if provider:
+        return [{
+            "source": str(provider),
+            "title": "provider-side long-term memory",
+            "summary": "Available to the provider/realizer, not directly retrieved by the harness policy yet.",
+        }]
+    return []
+
+
+def _build_prompt(packet: EventContextPacket) -> list[dict[str, str]]:
+    context = context_packets_mod.prompt_context(packet)
     system = (
         "You are the ping/not-ping policy learner for a proactive macOS harness. "
         "The action space is binary: notch_ping or no_ping. User attention is scarce. "
@@ -406,8 +488,8 @@ def _build_prompt(
     user = {
         "task": "Choose the policy action for the current context.",
         "allowed_actions": ["notch_ping", "no_ping"],
-        "few_shot_examples": examples,
-        "current_context": context,
+        "policy_context_packet": context,
+        "few_shot_examples": packet.few_shot_examples,
         "output_schema": {
             "action": "notch_ping|no_ping",
             "confidence": "0.0-1.0",
@@ -574,10 +656,12 @@ def _decision_from_result(
     baseline: ProactiveDecision,
     result: dict[str, Any],
     cfg: dict,
+    *,
+    packet_id: str | None = None,
 ) -> ProactiveDecision:
     action = result.get("action")
     if action not in {"notch_ping", "no_ping"}:
-        return _fallback_decision(baseline, "llm_invalid_action")
+        return _fallback_decision(baseline, "llm_invalid_action", packet_id=packet_id)
     try:
         confidence = float(result.get("confidence") or 0.0)
     except (TypeError, ValueError):
@@ -596,6 +680,8 @@ def _decision_from_result(
         reasons.append(f"rule_baseline_{baseline.action}")
     evidence = _evidence(result.get("evidence"))
     evidence["policy_learner_source"] = "offline_surrogate" if bool(cfg.get("offline_eval")) else "live_model"
+    if packet_id:
+        evidence["context_packet_id"] = packet_id
     return ProactiveDecision(
         decision_id=f"pd_{event.candidate_id.split('_', 1)[-1]}",
         candidate_id=event.candidate_id,

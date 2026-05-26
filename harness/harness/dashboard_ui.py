@@ -279,6 +279,10 @@ DASHBOARD_HTML = """<!doctype html>
       <div class="example-list" id="workflow-events"></div>
     </div>
     <div class="panel">
+      <h2>Recent policy context packets</h2>
+      <div class="example-list" id="context-packets"></div>
+    </div>
+    <div class="panel">
       <h2>Reason codes (why decisions went the way they did)</h2>
       <div class="bars" id="reason-bars"></div>
     </div>
@@ -555,6 +559,7 @@ function renderActivity(d) {
     {label: 'Outcomes captured',     val: d.n_outcomes, sub: `${d.n_clicked} clicked · ${d.n_dismissed} dismissed`},
     {label: 'Considered + timed_out',val: d.n_considered_no_click, sub: 'intent signal but no commit'},
     {label: 'Workflow runs',         val: d.n_workflow_events || 0, sub: `avg ${numMaybe(d.workflow_avg_duration_sec)}s closed`},
+    {label: 'Context packets',       val: d.n_context_packets || 0, sub: 'frozen policy inputs'},
   ];
   document.getElementById('stats').innerHTML = stats.map(s => `
     <div class="stat">
@@ -576,6 +581,21 @@ function renderActivity(d) {
       <div class="meta">duration=${escapeHTML(numMaybe(row.duration_sec))}s candidates=${escapeHTML(row.n_candidates ?? 0)} close=${escapeHTML(row.close_reason || 'open')}</div>
       ${row.ocr_preview ? `<div class="meta">preview=${escapeHTML(row.ocr_preview)}</div>` : ''}
     </div>`).join('') || '<div style="color:#7c7c86">no closed workflow events yet</div>';
+  document.getElementById('context-packets').innerHTML = (d.recent_context_packets || []).map(row => {
+    const obs = row.current_observation || {};
+    const wf = row.current_workflow_event || {};
+    const base = row.rule_baseline || {};
+    const priors = row.kg_priors || {};
+    return `<div class="example-row">
+      <div class="topline">
+        <span><span class="pill info">${escapeHTML(row.policy_name || 'policy')}</span> ${escapeHTML(obs.frontmost_app || '?')} · ${escapeHTML((obs.scene || {}).label || '?')}</span>
+        <span>${escapeHTML((row.ts || '').slice(0,19))}</span>
+      </div>
+      <div class="msg">${escapeHTML(wf.window_title || obs.window_title || '(untitled window)')}</div>
+      <div class="meta">packet=${escapeHTML(row.packet_id || '?')} workflow=${escapeHTML(row.workflow_event_id || '?')} baseline=${escapeHTML(base.action || '?')} examples=${escapeHTML((row.few_shot_examples || []).length)} priors=${escapeHTML(priors.n_examples ?? 0)}</div>
+      ${obs.ocr_snippet ? `<div class="meta">screen=${escapeHTML(obs.ocr_snippet)}</div>` : ''}
+    </div>`;
+  }).join('') || '<div style="color:#7c7c86">no context packets yet</div>';
   document.getElementById('reason-bars').innerHTML = barsHTML(d.dist_reasons);
   document.getElementById('intent-bars').innerHTML = barsHTML(d.dist_intent_signals);
 }
@@ -861,6 +881,7 @@ def _aggregate(window_sec: int = 86400) -> dict:
     outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since_iso)
     traces = list(reversed(_read_payloads("traces", "traces.jsonl", limit=50, newest_first=True)))
     workflow_events = _read_payloads("workflow_events", "workflow_events.jsonl", since_iso=since_iso)
+    context_packets = _read_payloads("context_packets", "context_packets.jsonl", since_iso=since_iso)
 
     dist_actions: Counter = Counter()
     dist_intents: Counter = Counter()
@@ -940,6 +961,7 @@ def _aggregate(window_sec: int = 86400) -> dict:
         "n_dismissed": n_dismissed,
         "n_considered_no_click": n_considered_no_click,
         "n_workflow_events": len(workflow_events),
+        "n_context_packets": len(context_packets),
         "workflow_avg_duration_sec": (
             round(sum(workflow_durations) / len(workflow_durations), 2)
             if workflow_durations else None
@@ -952,6 +974,7 @@ def _aggregate(window_sec: int = 86400) -> dict:
         "recent_decisions": decisions[-30:][::-1],
         "recent_outcomes": outcomes[-15:][::-1],
         "recent_workflow_events": workflow_events[-12:][::-1],
+        "recent_context_packets": context_packets[-12:][::-1],
         "recent_realizations": recent_realizations,
         "recent_model_calls": model_calls,
     }
@@ -1006,6 +1029,7 @@ def _dump_toml(cfg: dict) -> str:
     lines: list[str] = []
     # Top-level tables in a stable order
     section_order = ["daemon", "gate", "experiment", "trainer", "policy_learner", "scene", "scene_tagger", "memory",
+                     "long_term_memory", "context_packets",
                      "workflow_events", "realizer", "critic", "privacy", "push", "reward", "intents", "debug"]
     written: set[str] = set()
 
