@@ -3032,7 +3032,7 @@ def friend_preview(limit: int, as_json: bool):
 
     This is the sender-side preview: it reads ~/.fisherman/status-log.jsonl,
     maps recipients back to friends, and shows the encrypted activity digest
-    friends see. Close friends may receive sanitized activity history, but
+    friends see. The status-loop may include sanitized activity history, but
     never screenshots, OCR, queue stats, or raw local capture.
     """
     rows = _friend_preview_rows(limit=limit)
@@ -3317,16 +3317,16 @@ def _echo_publish_result(result: dict) -> None:
 
 @main.group(name="agent")
 def agent_group():
-    """Optional companion: status-publishing loop using OpenRouter/OpenAI."""
+    """Optional companion: publish backend activity status to friends."""
 
 
 @agent_group.command(name="run")
 @click.option("--interval", default=300, show_default=True, help="Seconds between cycles")
 @click.option("--since", default="5m", show_default=True, help="Context window")
-@click.option("--model", default=None, help="LLM model id (default: $AGENT_MODEL or mistralai/mistral-nemo)")
+@click.option("--model", default=None, help="Deprecated; status comes from the active backend")
 @click.option("--once", is_flag=True, help="One iteration and exit")
 def agent_run(interval, since, model, once):
-    """Run the status loop (reads context, calls LLM, publishes)."""
+    """Run the status loop (reads backend activity, publishes)."""
     from fisherman.agent_loop import main as _agent_main
     # Re-exec via click's main with the same args so option parsing matches
     args = ["--interval", str(interval), "--since", since]

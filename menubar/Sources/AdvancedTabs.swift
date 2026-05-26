@@ -267,7 +267,7 @@ struct ActivityStatusTab: View {
             Text("Activity Status")
                 .font(.system(size: 14, weight: .semibold))
 
-            Text("Controls how Fisherman turns private screen context into the short status shown to you. Friend-specific publishing uses the status-loop processor and each friend's policy.")
+            Text("Controls how Fisherman turns private screen context into the short activity status shown to you and published to friends. The status-loop sends the same derived activity row and recent activity timeline to each friend; it does not send screenshots or OCR.")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -468,7 +468,7 @@ struct ActivityStatusTab: View {
         default:
             return apiKeyConfigured
                 ? "A provider key is configured, but the source was not reported by the backend."
-                : "No provider key is configured; status-loop will use the heuristic fallback."
+                : "No provider key is configured; the backend may use its no-LLM activity fallback before status-loop publishes."
         }
     }
 

@@ -764,11 +764,10 @@ struct SettingsView: View {
         prompt: String,
         encryptionPubkey: String
     ) -> String {
-        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let promptPart = trimmedPrompt.isEmpty
-            ? "the \(audienceLabel(audience)) preset"
-            : "the \(audienceLabel(audience)) preset plus your custom instruction"
-        return "Preview: when status-loop runs, \(name) uses \(promptPart). Close friends receive your sanitized activity row and recent activity timeline; other audiences receive a compact encrypted digest. Seeing \(name)'s status requires them to add you and publish back."
+        let customNote = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? ""
+            : " The custom instruction is saved here, but the current timeline publisher does not rewrite activity with it."
+        return "Preview: when status-loop runs, \(name) (\(audienceLabel(audience))) receives your derived activity row and recent activity timeline, encrypted to \(encryptionPubkey.prefix(12)).... Fisherman sends only emoji, category, short status, flow, and timestamps; it does not send screenshots, OCR, queue stats, or raw local capture.\(customNote)"
     }
 
     private func audienceLabel(_ audience: String) -> String {
@@ -783,13 +782,13 @@ struct SettingsView: View {
     private func audienceDescription(_ audience: String) -> String {
         switch audience {
         case "work":
-            return "Work shares only work-relevant activity, project area, tools, docs, and broad availability. It should hide personal apps, private messages, entertainment, health, finance, legal, and relationship context."
+            return "Work receives the same derived activity row and recent activity timeline as other friends. It does not receive screenshots, OCR, queue stats, secrets, message content, or raw local capture."
         case "close":
-            return "Close shares the same sanitized current activity and recent activity timeline shown in your local activity row. It still does not share screenshots, OCR, queue stats, secrets, message content, health, finance, legal, NSFW, or sensitive document details."
+            return "Close receives the same derived activity row and recent activity timeline shown in your local activity row. It does not receive screenshots, OCR, queue stats, secrets, message content, or raw local capture."
         case "custom":
-            return "Custom follows the instruction below after the baseline privacy rules. Use it for per-person conditions like \"only share work context\" or \"hide client names.\""
+            return "Custom is a label for this friend. The current status-loop still publishes the same derived activity row and recent activity timeline."
         default:
-            return "Friends shares lightweight activity and availability. It prefers broad topic and vibe over detailed work or private context."
+            return "Friends receive the same derived activity row and recent activity timeline as other friends. They do not receive screenshots, OCR, queue stats, secrets, message content, or raw local capture."
         }
     }
 

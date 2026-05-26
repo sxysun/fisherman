@@ -68,7 +68,7 @@ def list_processors() -> list[dict[str, Any]]:
         {
             "name": "status-loop",
             "built_in": True,
-            "inputs": ["recent_context"],
+            "inputs": ["current_activity", "activity_history"],
             "outputs": ["friend_status"],
             "permissions": ["read:captures", "publish:status"],
         }
@@ -88,7 +88,7 @@ def load_processor(name: str) -> dict[str, Any]:
             "name": "status-loop",
             "built_in": True,
             "command": [sys.executable, "-m", "fisherman.agent_loop", "--once"],
-            "inputs": ["recent_context"],
+            "inputs": ["current_activity", "activity_history"],
             "outputs": ["friend_status"],
             "permissions": ["read:captures", "publish:status"],
         }

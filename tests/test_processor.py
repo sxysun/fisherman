@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest import mock
 
 from fisherman import agent_loop
-from fisherman import config as config_mod
 from fisherman import processor
 
 
@@ -87,7 +86,7 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(rows[0]["last_run_at"], 1234)
         self.assertEqual(rows[0]["last_ok"], True)
 
-    def test_status_loop_uses_safe_fallback_without_llm_key(self) -> None:
+    def test_status_loop_publishes_backend_activity_without_llm_key(self) -> None:
         published: list[tuple[dict, list[str]]] = []
 
         def fake_publish(digest: dict, recipients: list[str]) -> bool:
@@ -96,8 +95,24 @@ class ProcessorTests(unittest.TestCase):
 
         with mock.patch.object(
             agent_loop,
-            "_run_query",
-            return_value=[{"app": "Terminal", "window": "zsh", "ocr_text": "secret text"}],
+            "_current_activity",
+            return_value={
+                "emoji": "⌨️",
+                "category": "terminal",
+                "status": "using terminal",
+                "flow": False,
+            },
+        ), mock.patch.object(
+            agent_loop,
+            "_activity_history_entries",
+            return_value=[
+                {
+                    "emoji": "⌨️",
+                    "category": "terminal",
+                    "status": "using terminal",
+                    "timestamp": "2026-05-25T23:00:00+00:00",
+                }
+            ],
         ), mock.patch.object(
             agent_loop,
             "list_friends",
@@ -114,37 +129,16 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(recipients, ["aa" * 32])
         self.assertEqual(digest["category"], "terminal")
         self.assertEqual(digest["status"], "using terminal")
+        self.assertIn("history", digest)
         self.assertNotIn("secret", json.dumps(digest))
 
-    def test_status_loop_reads_fish_status_llm_settings_file(self) -> None:
-        with tempfile.TemporaryDirectory() as home_dir:
-            home = Path(home_dir)
-            env_path = home / ".fisherman" / ".env"
-            env_path.parent.mkdir(parents=True, exist_ok=True)
-            env_path.write_text(
-                "FISH_STATUS_LLM_API_KEY=sk-status\n"
-                "FISH_STATUS_LLM_BASE_URL=https://llm.example/v1\n"
-                "FISH_STATUS_LLM_MODEL=test-model\n",
-                encoding="utf-8",
-            )
-            missing_project = home / "missing" / ".env"
-            with mock.patch.dict(
-                "os.environ",
-                {
-                    "HOME": str(home),
-                    "OPENAI_API_KEY": "sk-wrong-global",
-                    "OPENROUTER_API_KEY": "",
-                    "OPENAI_BASE_URL": "",
-                    "OPENAI_MODEL": "",
-                    "AGENT_MODEL": "",
-                },
-            ), mock.patch.object(config_mod, "project_env_path", return_value=missing_project):
-                api_key, base_url, model, mode = agent_loop._llm_settings()
+    def test_status_loop_skips_when_backend_activity_unavailable(self) -> None:
+        with mock.patch.object(agent_loop, "_current_activity", return_value=None), \
+             mock.patch.object(agent_loop, "list_friends") as list_friends:
+            ok = agent_loop.run_once(None, "https://example.invalid", "model", since="5m")
 
-        self.assertEqual(api_key, "sk-status")
-        self.assertEqual(base_url, "https://llm.example/v1")
-        self.assertEqual(model, "test-model")
-        self.assertEqual(mode, "managed")
+        self.assertFalse(ok)
+        list_friends.assert_not_called()
 
 
 if __name__ == "__main__":

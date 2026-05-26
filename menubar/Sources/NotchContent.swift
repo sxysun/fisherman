@@ -391,7 +391,7 @@ struct ExpandedContent: View {
                 .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: 7))
-        .help("This is the encrypted activity status friends see. Close friends receive the same sanitized activity history as your local activity row, not screenshots or OCR.")
+        .help("This is the encrypted activity status friends see. Friends receive the derived activity row and recent activity timeline, not screenshots or OCR.")
     }
 
     private func publishedPreviewRow(_ preview: PublishedFriendStatus) -> some View {
