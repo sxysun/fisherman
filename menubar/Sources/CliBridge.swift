@@ -56,18 +56,35 @@ enum CliBridge {
             return Result(exitCode: -1, stdout: "", stderr: "spawn failed: \(error)")
         }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while proc.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
+        // Drain pipes in background threads while the process runs.
+        // Without concurrent draining, large outputs (> pipe buffer ~64KB) cause the
+        // subprocess to block on write(), making proc.isRunning stay true until timeout.
+        final class DataBox: @unchecked Sendable { var data = Data() }
+        let outBox = DataBox()
+        let errBox = DataBox()
+        let readGroup = DispatchGroup()
+        readGroup.enter()
+        DispatchQueue.global(qos: .background).async {
+            outBox.data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
         }
-        if proc.isRunning {
-            proc.terminate()
-            return Result(exitCode: -2, stdout: "", stderr: "timeout")
+        readGroup.enter()
+        DispatchQueue.global(qos: .background).async {
+            errBox.data = errPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
         }
 
-        let stdout = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return Result(exitCode: proc.terminationStatus, stdout: stdout, stderr: stderr)
+        if readGroup.wait(timeout: .now() + timeout) == .timedOut {
+            proc.terminate()
+            _ = readGroup.wait(timeout: .now() + 2.0)
+            return Result(exitCode: -2,
+                          stdout: String(data: outBox.data, encoding: .utf8) ?? "",
+                          stderr: "timeout")
+        }
+        proc.waitUntilExit()
+        return Result(exitCode: proc.terminationStatus,
+                      stdout: String(data: outBox.data, encoding: .utf8) ?? "",
+                      stderr: String(data: errBox.data, encoding: .utf8) ?? "")
     }
 
     /// Decode `--json` output as `[[String: Any]]`. Returns nil on failure.

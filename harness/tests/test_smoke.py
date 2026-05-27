@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import concurrent.futures
 import io
 import json
 import time
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from harness import candidate as candidate_mod
 from harness import app_identity as app_identity_mod
+from harness import api_server as api_server_mod
 from harness import config as config_mod
 from harness import context_packets as context_packets_mod
 from harness import critic as critic_mod
@@ -51,6 +53,7 @@ def test_imports():
     # all top-level modules import cleanly
     assert schemas
     assert config_mod
+    assert api_server_mod
     assert context_packets_mod
     assert app_identity_mod
     assert eval_report_mod
@@ -1284,6 +1287,7 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
                 "model": "test-policy",
                 "min_interval_sec": 0,
                 "min_confidence_to_ping": 0.55,
+                "use_kg_priors": True,
             },
             "long_term_memory": {
                 "policy_retrieval_enabled": False,
@@ -1327,6 +1331,17 @@ def test_llm_icl_policy_uses_model_for_binary_decision(monkeypatch, tmp_path):
         assert store_mod.tail_jsonl("model_calls.jsonl", n=1)[0]["purpose"] == "policy_learner"
     finally:
         store_mod.HARNESS_DIR = old_dir
+
+
+def test_llm_icl_policy_omits_kg_priors_by_default(monkeypatch):
+    from policies import llm_icl_v0
+
+    def fail_priors(*args, **kwargs):
+        raise AssertionError("live policy should not build KG priors unless explicitly enabled")
+
+    monkeypatch.setattr(llm_icl_v0.kg_priors_mod, "priors_for_event", fail_priors)
+    event = schemas.CandidateEvent()
+    assert llm_icl_v0._kg_priors_for_event(event, {}, {"policy_learner": {}}) == {}
 
 
 def test_llm_icl_policy_respects_rule_hard_gates(monkeypatch, tmp_path):
@@ -1499,6 +1514,37 @@ def test_store_attaches_outcome_to_trace(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
+def test_store_large_trace_fast_patch_uses_sql_and_patch_ledger(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    old_limit = store_mod.PATCH_TRACE_REWRITE_MAX_BYTES
+    store_mod.HARNESS_DIR = tmp_path
+    store_mod.PATCH_TRACE_REWRITE_MAX_BYTES = 1
+    try:
+        trace = {
+            "trace_id": "tr_fast_patch",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": {"decision_id": "pd_fast_patch", "action": "notch_ping"},
+        }
+        store_mod.append_jsonl("traces.jsonl", trace)
+        assert store_mod.patch_trace(
+            "pd_fast_patch",
+            {"delivery": {"pushed": True, "channel": "notch_pill"}},
+            lifecycle_stage="dispatch_done",
+        )
+
+        jsonl_rows = store_mod.tail_jsonl("traces.jsonl")
+        assert "delivery" not in jsonl_rows[0]
+        patch_rows = store_mod.tail_jsonl("trace_patches.jsonl")
+        assert patch_rows[-1]["decision_id"] == "pd_fast_patch"
+        assert patch_rows[-1]["lifecycle_stage"] == "dispatch_done"
+        payloads = sql_store_mod.payload_rows("traces")
+        assert payloads[0]["delivery"]["pushed"] is True
+        assert payloads[0]["lifecycle"][-1]["stage"] == "dispatch_done"
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+        store_mod.PATCH_TRACE_REWRITE_MAX_BYTES = old_limit
+
+
 def test_pending_claim_lease_and_completion(tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path
@@ -1529,6 +1575,28 @@ def test_pending_claim_lease_and_completion(tmp_path):
         assert second["pending_attempts"] == 2
         assert store_mod.complete_pending("pd_pending")
         assert store_mod.claim_pending(lease_sec=60) is None
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_pending_claim_is_serialized_under_concurrent_poll(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        store_mod.write_pending(
+            "pd_race",
+            {
+                "decision_id": "pd_race",
+                "candidate_id": "cand_race",
+                "message": "hello",
+            },
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: store_mod.claim_pending(lease_sec=60), range(16)))
+        claimed = [row for row in results if row is not None]
+        assert len(claimed) == 1
+        assert claimed[0]["decision_id"] == "pd_race"
+        assert claimed[0]["pending_attempts"] == 1
     finally:
         store_mod.HARNESS_DIR = old_dir
 
@@ -1640,23 +1708,48 @@ def test_outcome_validation_is_idempotent_and_rejects_stale(tmp_path):
         assert json.loads(resp.text)["error"] == "not_dequeued"
 
         asyncio.run(server_mod.get_pending(make_mocked_request("GET", "/pending")))
-        needs_ack = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
-        resp = asyncio.run(server_mod.post_outcome(needs_ack))
-        assert resp.status == 409
-        assert json.loads(resp.text)["error"] == "display_ack_required"
-        asyncio.run(server_mod.post_delivery_ack(make_mocked_request("POST", "/delivery-ack?id=pd_ok")))
+        inferred_ack = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(inferred_ack))
+        assert json.loads(resp.text)["ok"] is True
+        deliveries = store_mod.tail_jsonl("deliveries.jsonl")
+        assert deliveries[-2]["delivery_action"] == "dequeued"
+        assert deliveries[-1]["delivery_action"] == "displayed_inferred"
+        assert deliveries[-1]["ack_source"] == "outcome_inferred"
+        assert len(store_mod.tail_jsonl("outcomes.jsonl")) == 1
+
+        store_mod.append_jsonl("decisions.jsonl", {
+            "decision_id": "pd_ack",
+            "candidate_id": "cand_ack",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": "notch_ping",
+        })
+        store_mod.write_pending("pd_ack", {
+            "decision_id": "pd_ack",
+            "candidate_id": "cand_ack",
+            "message": "hello",
+        })
+        asyncio.run(server_mod.get_pending(make_mocked_request("GET", "/pending")))
+        asyncio.run(server_mod.post_delivery_ack(make_mocked_request("POST", "/delivery-ack?id=pd_ack")))
         first = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
         resp = asyncio.run(server_mod.post_outcome(first))
         assert json.loads(resp.text)["ok"] is True
-        assert len(store_mod.tail_jsonl("outcomes.jsonl")) == 1
-        assert store_mod.tail_jsonl("deliveries.jsonl")[-1]["delivery_action"] == "displayed_ack"
-        assert store_mod.tail_jsonl("deliveries.jsonl")[-1]["ack_source"] == "client_ack"
+        assert json.loads(resp.text)["duplicate"] is True
+        ack_first = make_mocked_request("POST", "/outcome?id=pd_ack&user_action=clicked")
+        resp = asyncio.run(server_mod.post_outcome(ack_first))
+        assert json.loads(resp.text)["ok"] is True
+        assert len(store_mod.tail_jsonl("outcomes.jsonl")) == 2
+        assert any(
+            row.get("decision_id") == "pd_ack"
+            and row.get("delivery_action") == "displayed_ack"
+            and row.get("ack_source") == "client_ack"
+            for row in store_mod.tail_jsonl("deliveries.jsonl", n=10)
+        )
         duplicate = make_mocked_request("POST", "/outcome?id=pd_ok&user_action=clicked")
         resp = asyncio.run(server_mod.post_outcome(duplicate))
         body = json.loads(resp.text)
         assert body["ok"] is True
         assert body["duplicate"] is True
-        assert len(store_mod.tail_jsonl("outcomes.jsonl")) == 1
+        assert len(store_mod.tail_jsonl("outcomes.jsonl")) == 2
 
         store_mod.append_jsonl("decisions.jsonl", {
             "decision_id": "pd_expired_outcome",
@@ -1679,7 +1772,7 @@ def test_outcome_validation_is_idempotent_and_rejects_stale(tmp_path):
         store_mod.HARNESS_DIR = old_dir
 
 
-def test_displayed_ping_late_outcome_rejected_after_timeout(tmp_path):
+def test_displayed_ping_late_outcome_accepted_after_server_timeout(tmp_path):
     from aiohttp.test_utils import make_mocked_request
 
     old_dir = store_mod.HARNESS_DIR
@@ -1707,10 +1800,12 @@ def test_displayed_ping_late_outcome_rejected_after_timeout(tmp_path):
         assert store_mod.sweep_expired_pending() == 1
         assert store_mod.tail_jsonl("deliveries.jsonl")[-1]["delivery_action"] == "displayed_timeout_no_outcome"
 
-        resp = asyncio.run(server_mod.post_outcome(make_mocked_request("POST", "/outcome?id=pd_late&user_action=clicked")))
-        assert resp.status == 409
-        assert json.loads(resp.text)["error"] == "terminal_delivery_expired"
-        assert store_mod.tail_jsonl("outcomes.jsonl") == []
+        resp = asyncio.run(server_mod.post_outcome(make_mocked_request("POST", "/outcome?id=pd_late&user_action=timed_out")))
+        assert json.loads(resp.text)["ok"] is True
+        outcomes = store_mod.tail_jsonl("outcomes.jsonl")
+        assert len(outcomes) == 1
+        assert outcomes[0]["decision_id"] == "pd_late"
+        assert outcomes[0]["user_action"] == "timed_out"
     finally:
         store_mod.HARNESS_DIR = old_dir
 
@@ -1771,6 +1866,13 @@ def test_terminal_notifier_display_allows_callback_outcome(monkeypatch, tmp_path
         assert not (tmp_path / "pending" / "pd_terminal.json").exists()
     finally:
         store_mod.HARNESS_DIR = old_dir
+
+
+def test_pending_ttl_outlives_native_display_timeout():
+    assert push_mod._pending_ttl_sec({"auto_dismiss_sec": 8}) >= 120
+    assert push_mod._pending_ttl_sec({"auto_dismiss_sec": 30}) >= 120
+    assert push_mod._pending_ttl_sec({"pending_ttl_sec": 12}) == 30.0
+    assert push_mod._pending_ttl_sec({"pending_ttl_sec": 180}) == 180.0
 
 
 def test_terminal_notifier_ignored_ping_expires_to_terminal_delivery(monkeypatch, tmp_path):
@@ -1877,13 +1979,13 @@ def test_launchd_plist_points_at_harness_module(tmp_path):
     assert plist["KeepAlive"] is True
     assert plist["RunAtLoad"] is True
     assert plist["ProgramArguments"] == [
-        "/tmp/venv/bin/python",
-        "-m",
-        "harness.cli",
-        "start",
-        "--foreground",
+        "/bin/zsh",
+        "-lc",
+        "cd " + str(tmp_path / "harness") + " && exec /tmp/venv/bin/python -u -m harness.cli start --foreground",
     ]
     assert plist["WorkingDirectory"].endswith("harness")
+    assert plist["EnvironmentVariables"]["PYTHONPATH"].endswith("harness")
+    assert plist["EnvironmentVariables"]["VIRTUAL_ENV"].endswith("/tmp/venv")
 
 
 def test_sql_store_mirrors_jsonl_rows_and_trace_updates(tmp_path):

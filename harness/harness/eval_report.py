@@ -32,11 +32,10 @@ def build_report(
     safe to surface in the dashboard.
     """
     since = metrics_mod.since_iso(window)
-    candidates = metrics_mod._read_payloads("candidates", "candidates.jsonl", since_iso=since)
     workflow_events = _workflow_event_payloads_in_window(since)
-    n_candidates = len(candidates)
+    n_candidates = metrics_mod._count_payloads("candidates", "candidates.jsonl", since_iso=since)
     decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl", since_iso=since)
-    all_decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl")
+    all_decisions = decisions
     outcomes = metrics_mod._read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
     pings = [row for row in decisions if row.get("action") == "notch_ping"]
     n_traces, traced_decision_ids = metrics_mod._trace_summary(
@@ -69,7 +68,7 @@ def build_report(
     ]
     window_event_ids = {
         str(row.get("workflow_event_id"))
-        for row in [*decisions, *candidates, *workflow_events]
+        for row in [*decisions, *workflow_events]
         if row.get("workflow_event_id")
     }
     joined_event_labels = [
@@ -143,7 +142,7 @@ def build_report(
     claimed_ping_ids = {
         str(row.get("decision_id"))
         for row in deliveries
-        if row.get("delivery_action") in {"claimed", "displayed_ack"} and row.get("decision_id")
+        if row.get("delivery_action") in {"claimed", "displayed_ack", "displayed_inferred"} and row.get("decision_id")
     }
     decision_ids = {str(row.get("decision_id")) for row in decisions if row.get("decision_id")}
     claimed_ping_ids &= decision_ids
@@ -354,7 +353,7 @@ def classify_decision(
             return _cls("expired_before_display", "The pending ping expired before a confirmed display/outcome.", "medium")
         if delivery and delivery.get("delivery_action") == "displayed_inferred":
             return _cls("inferred_display_missing_outcome", "Outcome/display evidence was inferred rather than confirmed by client ack.", "low")
-        if delivery and delivery.get("delivery_action") in {"claimed", "displayed_ack"}:
+        if delivery and delivery.get("delivery_action") in {"claimed", "displayed_ack", "displayed_inferred"}:
             return _cls("missing_outcome_signal", "Notch claimed this ping but no outcome was recorded.", "medium")
         if trace_delivery.get("pushed") is False or trace_delivery.get("channel") in {"skipped", "blocked_by_critic"}:
             return _cls("undelivered_ping", "Policy chose ping, but delivery was skipped or blocked before display.", "low")

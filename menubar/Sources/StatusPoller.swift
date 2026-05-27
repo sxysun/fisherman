@@ -278,14 +278,16 @@ final class StatusPoller: @unchecked Sendable {
     }
 
     private func updateHangoutSuggestion() {
-        let lowKeyCategories: Set<String> = ["browsing", "news", "reading", "idle"]
-        let lowKeyFriends = state.allActivity.filter {
-            $0.id != "me" && lowKeyCategories.contains($0.category) && !$0.stale
+        // "idle" counts as low-key for me (I'm free), but idle friends are AFK — not free.
+        let myFreeCategories: Set<String> = ["browsing", "news", "reading", "idle"]
+        let friendFreeCategories: Set<String> = ["browsing", "news", "reading"]
+        let freeFriends = state.allActivity.filter {
+            $0.id != "me" && friendFreeCategories.contains($0.category) && !$0.stale
         }
         let meIsLowKey = state.allActivity.first(where: { $0.id == "me" })
-            .map { lowKeyCategories.contains($0.category) } ?? false
-        if meIsLowKey && lowKeyFriends.count >= 1 {
-            let names = lowKeyFriends.map { $0.name }.joined(separator: " & ")
+            .map { myFreeCategories.contains($0.category) } ?? false
+        if meIsLowKey && freeFriends.count >= 1 {
+            let names = freeFriends.map { $0.name }.joined(separator: " & ")
             state.hangoutSuggestion = "\(names) also free"
         } else {
             state.hangoutSuggestion = nil

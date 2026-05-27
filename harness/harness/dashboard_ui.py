@@ -12,6 +12,7 @@ Visual aesthetic matches the labeling UI (dark, monospace meta, amber accent).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections import Counter
@@ -877,6 +878,113 @@ setInterval(refresh, 5000);
 
 
 def _aggregate(window_sec: int = 86400) -> dict:
+    try:
+        if sql_store.db_path().exists() and sql_store.count_rows("decisions") > 0:
+            return _aggregate_sql(window_sec)
+    except Exception:
+        pass
+    return _aggregate_jsonl(window_sec)
+
+
+def _aggregate_sql(window_sec: int = 86400) -> dict:
+    """Compute the live dashboard from typed SQLite columns.
+
+    The floating notch refreshes this path while the notification client is
+    polling. Keep it bounded: aggregate from typed columns and only decode small
+    recent samples.
+    """
+    now = time.time()
+    since_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - window_sec))
+
+    dist_actions = Counter(sql_store.value_counts("decisions", "action", since_iso=since_iso, limit=20))
+    dist_scenes = Counter(sql_store.value_counts("candidates", "scene_label", since_iso=since_iso, limit=20))
+    dist_apps = Counter(sql_store.value_counts("candidates", "frontmost_app", since_iso=since_iso, limit=20))
+    dist_reasons = Counter(sql_store.decision_reason_counts(since_iso=since_iso, limit=20))
+    dist_intent_signals = Counter(sql_store.value_counts("outcomes", "intent_signal", since_iso=since_iso, limit=20))
+    outcome_actions = Counter(sql_store.value_counts("outcomes", "user_action", since_iso=since_iso, limit=20))
+
+    n_candidates = sql_store.count_payload_rows("candidates", since_iso=since_iso)
+    n_decisions = sql_store.count_payload_rows("decisions", since_iso=since_iso)
+    n_outcomes = sql_store.count_payload_rows("outcomes", since_iso=since_iso)
+    n_workflow_events = sql_store.count_payload_rows("workflow_events", since_iso=since_iso)
+    n_context_packets = sql_store.count_payload_rows("context_packets", since_iso=since_iso)
+
+    recent_decisions = sql_store.payload_rows("decisions", since_iso=since_iso, limit=30, newest_first=True)
+    recent_outcomes = sql_store.payload_rows("outcomes", since_iso=since_iso, limit=15, newest_first=True)
+    recent_workflow_events = sql_store.payload_rows("workflow_events", since_iso=since_iso, limit=12, newest_first=True)
+    recent_context_packets = sql_store.payload_rows("context_packets", since_iso=since_iso, limit=12, newest_first=True)
+    traces = sql_store.payload_rows("traces", limit=80, newest_first=True)
+    model_calls = sql_store.payload_rows("model_calls", limit=30, newest_first=True)
+
+    n_considered_no_click = 0
+    for outcome in recent_outcomes:
+        ua = outcome.get("user_action")
+        sig = (outcome.get("interaction_summary") or {}).get("intent_signal")
+        if sig == "considered" and ua == "timed_out":
+            n_considered_no_click += 1
+
+    recent_realizations = []
+    for trace in traces:
+        r = trace.get("realization") or {}
+        if not r.get("message"):
+            continue
+        tool_calls = r.get("tool_calls") or []
+        provider_reasoning = next(
+            (tc.get("result_summary") for tc in tool_calls
+             if tc.get("name", "").startswith("_provider_")),
+            None,
+        )
+        recent_realizations.append({
+            "ts": trace.get("ts"),
+            "intent": (trace.get("action") or {}).get("intent"),
+            "why_now": (trace.get("action") or {}).get("why_now"),
+            "message": r.get("message"),
+            "latency_ms": r.get("latency_ms"),
+            "vision_used": r.get("vision_used"),
+            "privacy_flags": r.get("privacy_flags") or [],
+            "privacy_provenance": r.get("privacy_provenance") or {},
+            "provider_reasoning": provider_reasoning,
+        })
+        if len(recent_realizations) >= 10:
+            break
+
+    ping_ids = sql_store.decision_ids_by_action("notch_ping", since_iso=since_iso)
+    displayed_ids = sql_store.displayed_ping_decision_ids(since_iso=since_iso) & ping_ids
+    outcome_ids = {
+        str(row.get("decision_id"))
+        for row in sql_store.payload_rows("outcomes", since_iso=since_iso, limit=5000, newest_first=False)
+        if row.get("decision_id")
+    }
+
+    return {
+        "n_candidates": n_candidates,
+        "n_decisions": n_decisions,
+        "n_outcomes": n_outcomes,
+        "n_pings": dist_actions.get("notch_ping", 0),
+        "n_claimed_pings": len(displayed_ids),
+        "outcome_capture_rate_for_pings": _ratio(len(ping_ids & outcome_ids), len(ping_ids)),
+        "outcome_capture_rate_for_claimed_pings": _ratio(len(displayed_ids & outcome_ids), len(displayed_ids)),
+        "n_clicked": outcome_actions.get("clicked", 0),
+        "n_dismissed": outcome_actions.get("dismissed", 0),
+        "n_considered_no_click": n_considered_no_click,
+        "n_workflow_events": n_workflow_events,
+        "n_context_packets": n_context_packets,
+        "workflow_avg_duration_sec": sql_store.workflow_avg_duration(since_iso=since_iso),
+        "dist_actions": dict(dist_actions),
+        "dist_scenes": dict(dist_scenes),
+        "dist_apps": dict(dist_apps),
+        "dist_reasons": dict(dist_reasons),
+        "dist_intent_signals": dict(dist_intent_signals),
+        "recent_decisions": recent_decisions,
+        "recent_outcomes": recent_outcomes,
+        "recent_workflow_events": recent_workflow_events,
+        "recent_context_packets": recent_context_packets,
+        "recent_realizations": recent_realizations,
+        "recent_model_calls": model_calls,
+    }
+
+
+def _aggregate_jsonl(window_sec: int = 86400) -> dict:
     """Read typed event payloads and compute distributions over the last window."""
     now = time.time()
     since_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - window_sec))
@@ -985,6 +1093,12 @@ def _aggregate(window_sec: int = 86400) -> dict:
     }
 
 
+def _ratio(num: float, den: float) -> float | None:
+    if not den:
+        return None
+    return num / den
+
+
 def _read_payloads(
     table: str,
     filename: str,
@@ -1090,7 +1204,7 @@ async def get_dashboard_page(_: web.Request) -> web.Response:
 async def get_dashboard_data(request: web.Request) -> web.Response:
     window = request.query.get("window", "24h")
     secs = {"1h": 3600, "24h": 86400, "7d": 604800}.get(window, 86400)
-    return web.json_response(_aggregate(secs))
+    return web.json_response(await asyncio.to_thread(_aggregate, secs))
 
 
 async def get_dashboard_config(_: web.Request) -> web.Response:

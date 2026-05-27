@@ -496,6 +496,8 @@ def _build_prompt(packet: EventContextPacket) -> list[dict[str, str]]:
 def _kg_priors_for_event(event: CandidateEvent, cfg: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     if bool(cfg.get("frozen_eval")):
         return _match_frozen_priors(event, cfg.get("frozen_kg_priors") or {})
+    if not bool(cfg.get("use_kg_priors", False)):
+        return {}
     return kg_priors_mod.priors_for_event(
         event,
         window=str(config.get("policy_learner", {}).get("kg_window", "30d")),

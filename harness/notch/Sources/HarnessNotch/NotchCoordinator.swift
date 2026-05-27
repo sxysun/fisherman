@@ -76,6 +76,7 @@ final class NotchCoordinator {
     }
 
     func start() {
+        client.logEvent("notch coordinator started")
         showPanel()
         startSurfaceVisibilityWatchdog()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -339,6 +340,7 @@ final class NotchCoordinator {
     // MARK: - Show / dismiss
 
     private func show(pending: PendingPayload) {
+        client.logEvent("show ping decision=\(pending.decisionID)")
         currentDecisionID = pending.decisionID
         displayedAt = Date()
         events.removeAll(keepingCapacity: true)
@@ -354,7 +356,8 @@ final class NotchCoordinator {
         autoDismissTask = Task { [weak self, decisionID = pending.decisionID] in
             let minimumDisplayDelay = 30.0
             let remaining = pending.expiresAtUnix.map { $0 - Date().timeIntervalSince1970 }
-            let initialDelay = max(minimumDisplayDelay, min(90.0, remaining ?? minimumDisplayDelay))
+            let ttlBoundedDelay = max(5.0, (remaining ?? minimumDisplayDelay) - 10.0)
+            let initialDelay = min(minimumDisplayDelay, ttlBoundedDelay)
             try? await Task.sleep(nanoseconds: UInt64(initialDelay * 1_000_000_000))
             if Task.isCancelled { return }
             var extraWait = 0.0
@@ -372,6 +375,7 @@ final class NotchCoordinator {
 
     private func onAction(action: String) {
         guard let did = currentDecisionID else { return }
+        client.logEvent("action decision=\(did) action=\(action)")
         currentDecisionID = nil
         autoDismissTask?.cancel()
         autoDismissTask = nil
@@ -405,22 +409,23 @@ final class NotchCoordinator {
     private func retryOutcome(decisionID did: String) {
         guard let payload = pendingOutcomeRetries[did] else { return }
         submittingOutcomeID = did
-        client.postDeliveryAck(decisionID: did)
-        client.postOutcome(
-            decisionID: did,
-            action: payload.action,
-            latencyMs: payload.latencyMs,
-            interactions: payload.interactions
-        ) { [weak self] ok in
-            Task { @MainActor in
-                guard let self = self, self.submittingOutcomeID == did else { return }
-                if ok {
-                    self.pendingOutcomeRetries.removeValue(forKey: did)
-                    self.submittingOutcomeID = nil
-                    return
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    Task { @MainActor in self?.retryOutcome(decisionID: did) }
+        client.postDeliveryAck(decisionID: did) { [weak self] _ in
+            self?.client.postOutcome(
+                decisionID: did,
+                action: payload.action,
+                latencyMs: payload.latencyMs,
+                interactions: payload.interactions
+            ) { [weak self] ok in
+                Task { @MainActor in
+                    guard let self = self, self.submittingOutcomeID == did else { return }
+                    if ok {
+                        self.pendingOutcomeRetries.removeValue(forKey: did)
+                        self.submittingOutcomeID = nil
+                        return
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                        Task { @MainActor in self?.retryOutcome(decisionID: did) }
+                    }
                 }
             }
         }
@@ -473,7 +478,7 @@ final class NotchCoordinator {
     }
 
     private func isInspectingPill() -> Bool {
-        state.surfaceExpanded || lastWasNearPill || !activeHoverTargets.isEmpty
+        lastWasNearPill || !activeHoverTargets.isEmpty
     }
 
     private func computeApproachRect() -> NSRect {

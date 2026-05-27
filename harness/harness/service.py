@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -30,14 +31,19 @@ def build_plist(
     harness_dir: Path = HARNESS_DIR,
 ) -> dict[str, Any]:
     harness_dir = harness_dir.expanduser()
+    repo_dir = repo_dir.expanduser()
+    python_executable = str(Path(python_executable).expanduser())
+    venv_dir = str(Path(python_executable).expanduser().parent.parent)
+    command = (
+        f"cd {shlex.quote(str(repo_dir))} && "
+        f"exec {shlex.quote(python_executable)} -u -m harness.cli start --foreground"
+    )
     return {
         "Label": LABEL,
         "ProgramArguments": [
-            python_executable,
-            "-m",
-            "harness.cli",
-            "start",
-            "--foreground",
+            "/bin/zsh",
+            "-lc",
+            command,
         ],
         "WorkingDirectory": str(repo_dir),
         "RunAtLoad": True,
@@ -45,7 +51,10 @@ def build_plist(
         "StandardOutPath": str(harness_dir / "launchd.out.log"),
         "StandardErrorPath": str(harness_dir / "launchd.err.log"),
         "EnvironmentVariables": {
+            "HOME": str(Path.home()),
             "PYTHONUNBUFFERED": "1",
+            "PYTHONPATH": str(repo_dir),
+            "VIRTUAL_ENV": venv_dir,
             "PATH": SERVICE_PATH,
         },
     }

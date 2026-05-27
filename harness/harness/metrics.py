@@ -32,8 +32,11 @@ def compute(window: str = "24h") -> dict[str, Any]:
     since = since_iso(window)
 
     n_candidates = _count_payloads("candidates", "candidates.jsonl", since_iso=since)
-    all_decisions = _read_payloads("decisions", "decisions.jsonl")
-    decisions = [r for r in all_decisions if r.get("ts", "") >= since]
+    decisions = _read_payloads("decisions", "decisions.jsonl", since_iso=since)
+    # Metrics are a live window, not a whole-store audit. Keeping joins scoped
+    # to the current window prevents the floating notch from parsing years of
+    # local decision payloads every time it expands.
+    all_decisions = decisions
     outcomes = _read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
     deliveries = _read_payloads("deliveries", "deliveries.jsonl", since_iso=since)
     n_traces, traced_decision_ids = _trace_summary("traces", "traces.jsonl", since_iso=since)
@@ -64,7 +67,7 @@ def compute(window: str = "24h") -> dict[str, Any]:
     displayed_ping_ids = {
         row.get("decision_id")
         for row in deliveries
-        if row.get("delivery_action") in {"claimed", "displayed_ack"} and row.get("decision_id")
+        if row.get("delivery_action") in {"claimed", "displayed_ack", "displayed_inferred"} and row.get("decision_id")
     }
     displayed_ping_ids &= ping_decision_ids
     claimed_with_outcome = sum(1 for did in displayed_ping_ids if did in outcomes_by_decision)

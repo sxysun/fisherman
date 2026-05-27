@@ -138,33 +138,61 @@ def _capture_screencapture() -> tuple:
     return cg_image, w, h
 
 
-def _get_frontmost_info(skip_window_title: bool = False) -> tuple[str | None, str | None, str | None]:
-    """Return (app_name, bundle_id, window_title) for the frontmost app.
+_SYSTEM_WINDOW_OWNERS = frozenset({
+    "Window Server", "Dock", "SystemUIServer", "NotificationCenter",
+    "Spotlight", "Control Center", "loginwindow", "universalaccessd",
+})
 
-    When skip_window_title=True, only uses NSWorkspace (no TCC-gated CG calls).
+
+def _get_frontmost_info(skip_window_title: bool = False) -> tuple[str | None, str | None, str | None]:
+    """Return (app_name, bundle_id, window_title) for the app owning the topmost on-screen window.
+
+    CGWindowListCopyWindowInfo returns windows front-to-back; the first non-system
+    window is what the user is actually looking at. This is more reliable than
+    NSWorkspace.frontmostApplication() when the workspace "frontmost" app lives in a
+    different Space (e.g. a fullscreen game in Space 2 keeps NSWorkspace reporting it
+    as frontmost while the user works in Space 1).
     """
     _require_macos()
     ws = NSWorkspace.sharedWorkspace()
-    app = ws.frontmostApplication()
-    app_name = app.localizedName() if app else None
-    bundle_id = app.bundleIdentifier() if app else None
 
-    window_title = None
-    if app and not skip_window_title:
-        pid = app.processIdentifier()
-        window_list = Quartz.CGWindowListCopyWindowInfo(
-            Quartz.kCGWindowListOptionOnScreenOnly
-            | Quartz.kCGWindowListExcludeDesktopElements,
-            Quartz.kCGNullWindowID,
-        )
-        if window_list:
-            for w in window_list:
-                if w.get(Quartz.kCGWindowOwnerPID) == pid:
-                    title = w.get(Quartz.kCGWindowName, "")
-                    if title:
-                        window_title = title
-                        break
-    return app_name, bundle_id, window_title
+    # CGWindowListCopyWindowInfo doesn't require Screen Recording permission itself —
+    # it just hides kCGWindowName without it. We use it here only for PID + owner name,
+    # so it's safe to call regardless of skip_window_title.
+    window_list = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly
+        | Quartz.kCGWindowListExcludeDesktopElements,
+        Quartz.kCGNullWindowID,
+    )
+
+    if window_list:
+        pid_to_app: dict = {}
+        for running_app in ws.runningApplications():
+            pid_to_app[running_app.processIdentifier()] = running_app
+
+        for w in window_list:
+            owner_name = w.get(Quartz.kCGWindowOwnerName, "") or ""
+            if owner_name in _SYSTEM_WINDOW_OWNERS:
+                continue
+            owner_pid = w.get(Quartz.kCGWindowOwnerPID)
+            if not owner_pid:
+                continue
+            running_app = pid_to_app.get(owner_pid)
+            app_name = (running_app.localizedName() if running_app else None) or owner_name or None
+            bundle_id = running_app.bundleIdentifier() if running_app else None
+            window_title = (
+                w.get(Quartz.kCGWindowName) or None
+                if not skip_window_title else None
+            )
+            return app_name, bundle_id, window_title
+
+    # Fallback: CG list unavailable (no Screen Recording permission at all)
+    app = ws.frontmostApplication()
+    return (
+        app.localizedName() if app else None,
+        app.bundleIdentifier() if app else None,
+        None,
+    )
 
 
 def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
@@ -210,6 +238,12 @@ def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
         else:
             cg_image, w, h = _capture_cg()
 
+        # Query app metadata immediately after capture, before encoding,
+        # so the app name matches the frame and not some later moment.
+        app_name, bundle_id, window_title = _get_frontmost_info(
+            skip_window_title=_FORCE_SCREENCAPTURE
+        )
+
         # Resize using NSImage (avoids PIL's heavy TIFF intermediate)
         scale = min(max_dim / max(w, h), 1.0)
         if scale < 1.0:
@@ -239,12 +273,6 @@ def capture_screen(max_dim: int, jpeg_quality: int) -> ScreenFrame:
         # Encode as JPEG
         props = {NSImageCompressionFactor: jpeg_quality / 100.0}
         jpeg_data = bytes(bitmap.representationUsingType_properties_(NSJPEGFileType, props))
-
-        # Metadata — skip window title when using screencapture fallback
-        # to avoid CGWindowListCopyWindowInfo triggering TCC prompt
-        app_name, bundle_id, window_title = _get_frontmost_info(
-            skip_window_title=_FORCE_SCREENCAPTURE
-        )
 
     return ScreenFrame(
         jpeg_data=jpeg_data,

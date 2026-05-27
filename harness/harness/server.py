@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Optional
 
@@ -27,6 +28,14 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+@web.middleware
+async def _force_close_middleware(request: web.Request, handler) -> web.StreamResponse:
+    response = await handler(request)
+    response.force_close()
+    response.headers["Connection"] = "close"
+    return response
+
+
 def _apply_snooze_from_outcome(row: dict, duration: str = "30m") -> None:
     """A pill "Later" click is both feedback and an actual snooze."""
     if row.get("user_action") != "snoozed":
@@ -37,13 +46,29 @@ def _apply_snooze_from_outcome(row: dict, duration: str = "30m") -> None:
     row["snoozed_until"] = state["snoozed_until"]
 
 
+def _persist_outcome(decision_id: str, row: dict, reward: dict) -> None:
+    append_jsonl("outcomes.jsonl", row)
+    complete_pending(decision_id)
+
+
+async def _patch_pending_dequeue_trace(payload: dict) -> None:
+    if payload.get("decision_id"):
+        await asyncio.to_thread(
+            patch_trace,
+            str(payload.get("decision_id")),
+            {},
+            lifecycle_stage="dequeued",
+            lifecycle_extra={"pending_attempts": payload.get("pending_attempts", 0)},
+        )
+
+
 async def get_pending(request: web.Request) -> web.Response:
     """Return the oldest unleased pending push. Outcome completion removes it.
 
     Polling is a dequeue/lease, not proof that the native UI rendered the ping.
     The capsule sends /delivery-ack after it has actually presented the surface.
     """
-    payload = claim_pending()
+    payload = await asyncio.to_thread(claim_pending)
     if payload is None:
         return web.json_response(None)
     delivery_row = {
@@ -57,14 +82,8 @@ async def get_pending(request: web.Request) -> web.Response:
         "pending_claimed_at": payload.get("pending_claimed_at"),
         "ts": _now_iso(),
     }
-    append_jsonl("deliveries.jsonl", delivery_row)
-    if payload.get("decision_id"):
-        patch_trace(
-            str(payload.get("decision_id")),
-            {},
-            lifecycle_stage="dequeued",
-            lifecycle_extra={"pending_attempts": payload.get("pending_attempts", 0)},
-        )
+    await asyncio.to_thread(append_jsonl, "deliveries.jsonl", delivery_row)
+    asyncio.create_task(_patch_pending_dequeue_trace(payload))
     return web.json_response(payload)
 
 
@@ -81,19 +100,27 @@ async def post_delivery_ack(request: web.Request) -> web.Response:
     decision_id = params.get("id") or params.get("decision_id")
     if not decision_id:
         return web.json_response({"error": "missing decision_id"}, status=400)
-    existing = set(delivery_actions_for_decision(decision_id))
-    if "displayed_ack" in existing or "claimed" in existing:
+    existing = set(await asyncio.to_thread(delivery_actions_for_decision, decision_id))
+    if existing & {"displayed_ack", "displayed_inferred", "claimed"}:
         return web.json_response({"ok": True, "duplicate": True})
-    payload = pending_payload(decision_id)
+    payload = await asyncio.to_thread(pending_payload, decision_id)
     if payload is None:
         return web.json_response({"error": "not_pending", "decision_id": decision_id}, status=409)
-    _append_display_ack(
+    await asyncio.to_thread(
+        _append_display_ack,
         decision_id=decision_id,
         candidate_id=payload.get("candidate_id"),
         pending_attempts=payload.get("pending_attempts", 0),
         pending_created_at=payload.get("pending_created_at"),
         pending_claimed_at=payload.get("pending_claimed_at"),
+        patch_trace_row=False,
     )
+    asyncio.create_task(asyncio.to_thread(
+        _patch_display_ack_trace,
+        decision_id=decision_id,
+        pending_attempts=payload.get("pending_attempts", 0),
+        ack_source="client_ack",
+    ))
     return web.json_response({"ok": True})
 
 
@@ -122,10 +149,11 @@ async def post_outcome(request: web.Request) -> web.Response:
     decision_id = params.get("id") or params.get("decision_id")
     if not decision_id:
         return web.json_response({"error": "missing decision_id"}, status=400)
-    existing_outcome = outcome_for_decision(decision_id)
+    existing_outcome = await asyncio.to_thread(outcome_for_decision, decision_id)
     if existing_outcome is not None:
         return web.json_response({"ok": True, "duplicate": True, "outcome": existing_outcome})
-    validation = _validate_outcome_target(decision_id)
+    await asyncio.to_thread(_infer_display_ack_from_outcome, decision_id)
+    validation = await asyncio.to_thread(_validate_outcome_target, decision_id)
     if validation is not None:
         return validation
     row: dict = {
@@ -144,12 +172,11 @@ async def post_outcome(request: web.Request) -> web.Response:
         if row["user_action"] in ("clicked", "snoozed", "dismissed"):
             summary["intent_signal"] = "committed"
         row["interaction_summary"] = summary
-    _apply_snooze_from_outcome(row)
+    await asyncio.to_thread(_apply_snooze_from_outcome, row)
     reward = reward_mod.compute_reward(row)
     row["reward"] = reward
-    append_jsonl("outcomes.jsonl", row)
-    attach_outcome_to_trace(decision_id, row, reward)
-    complete_pending(decision_id)
+    await asyncio.to_thread(_persist_outcome, decision_id, row, reward)
+    asyncio.create_task(asyncio.to_thread(attach_outcome_to_trace, decision_id, row, reward))
     return web.json_response({"ok": True})
 
 
@@ -158,7 +185,6 @@ def _validate_outcome_target(decision_id: str) -> web.Response | None:
         return web.json_response({"error": "unknown_decision", "decision_id": decision_id}, status=404)
     actions = set(delivery_actions_for_decision(decision_id))
     terminal_expiry = {
-        "displayed_timeout_no_outcome",
         "never_displayed_expired",
         "dequeued_expired",
         "expired_unclaimed",
@@ -169,15 +195,42 @@ def _validate_outcome_target(decision_id: str) -> web.Response | None:
             "decision_id": decision_id,
             "terminal_actions": sorted(actions & terminal_expiry),
         }, status=409)
-    if actions & {"displayed_ack", "claimed"}:
+    if actions & {"displayed_ack", "displayed_inferred", "claimed"}:
         return None
     if pending_payload(decision_id) is not None and "dequeued" in actions:
         return web.json_response({"error": "display_ack_required", "decision_id": decision_id}, status=409)
     if pending_payload(decision_id) is not None:
         return web.json_response({"error": "not_dequeued", "decision_id": decision_id}, status=409)
-    if actions & {"displayed_ack", "claimed"}:
+    if actions & {"displayed_ack", "displayed_inferred", "claimed"}:
         return None
     return web.json_response({"error": "not_in_flight", "decision_id": decision_id}, status=409)
+
+
+def _infer_display_ack_from_outcome(decision_id: str) -> None:
+    """Treat a native outcome as proof the ping was displayed.
+
+    HarnessNotch posts `/delivery-ack` when it opens the ping, but ack and
+    outcome are separate HTTP calls. If the ack call is delayed/dropped while
+    the later outcome arrives, the outcome itself is sufficient evidence that
+    the native UI displayed the ping.
+    """
+    actions = set(delivery_actions_for_decision(decision_id))
+    if actions & {"displayed_ack", "displayed_inferred", "claimed"}:
+        return
+    if "dequeued" not in actions:
+        return
+    payload = pending_payload(decision_id)
+    if payload is None:
+        return
+    _append_display_ack(
+        decision_id=decision_id,
+        candidate_id=payload.get("candidate_id"),
+        pending_attempts=payload.get("pending_attempts", 0),
+        pending_created_at=payload.get("pending_created_at"),
+        pending_claimed_at=payload.get("pending_claimed_at"),
+        action="displayed_inferred",
+        ack_source="outcome_inferred",
+    )
 
 
 def _append_display_ack(
@@ -187,28 +240,47 @@ def _append_display_ack(
     pending_attempts: object = 0,
     pending_created_at: object = None,
     pending_claimed_at: object = None,
+    action: str = "displayed_ack",
+    ack_source: str = "client_ack",
+    patch_trace_row: bool = True,
 ) -> None:
-    action = "displayed_ack"
     delivery_row = {
         "delivery_id": f"del_{decision_id}_{action}_{pending_attempts or 0}",
         "decision_id": decision_id,
         "candidate_id": candidate_id,
         "channel": "notch_pill",
         "delivery_action": action,
-        "ack_source": "client_ack",
+        "ack_source": ack_source,
         "pending_attempts": pending_attempts or 0,
         "pending_created_at": pending_created_at,
         "pending_claimed_at": pending_claimed_at,
         "ts": _now_iso(),
     }
     append_jsonl("deliveries.jsonl", delivery_row)
+    if not patch_trace_row:
+        return
+    _patch_display_ack_trace(
+        decision_id=decision_id,
+        pending_attempts=pending_attempts,
+        ack_source=ack_source,
+        action=action,
+    )
+
+
+def _patch_display_ack_trace(
+    *,
+    decision_id: str,
+    pending_attempts: object = 0,
+    ack_source: str = "client_ack",
+    action: str = "displayed_ack",
+) -> None:
     patch_trace(
         decision_id,
         {},
         lifecycle_stage=action,
         lifecycle_extra={
             "pending_attempts": pending_attempts or 0,
-            "ack_source": "client_ack",
+            "ack_source": ack_source,
         },
     )
 
@@ -298,16 +370,18 @@ def _hover_priority(target: str) -> int:
 
 async def get_history(request: web.Request) -> web.Response:
     n = int(request.query.get("n", "10"))
-    traces = tail_jsonl("traces.jsonl", n=n)
-    decisions = tail_jsonl("decisions.jsonl", n=n)
-    outcomes = tail_jsonl("outcomes.jsonl", n=n)
+    traces, decisions, outcomes = await asyncio.gather(
+        asyncio.to_thread(tail_jsonl, "traces.jsonl", n=n),
+        asyncio.to_thread(tail_jsonl, "decisions.jsonl", n=n),
+        asyncio.to_thread(tail_jsonl, "outcomes.jsonl", n=n),
+    )
     return web.json_response(
         {"traces": traces, "decisions": decisions, "outcomes": outcomes}
     )
 
 
 async def get_status(request: web.Request) -> web.Response:
-    state = read_policy_state()
+    state = await asyncio.to_thread(read_policy_state)
     canary = state.get("canary_policy") or {}
     canary_compact = {
         key: canary.get(key)
@@ -325,7 +399,7 @@ async def get_status(request: web.Request) -> web.Response:
             "daily_goal": state.get("daily_goal", ""),
             "sensitivity": state.get("sensitivity", "balanced"),
             "goal_set_at": state.get("goal_set_at"),
-            "pending_count": len(list_pending()),
+            "pending_count": await asyncio.to_thread(lambda: len(list_pending())),
             "ts": _now_iso(),
         }
     )
@@ -335,7 +409,7 @@ async def get_metrics(request: web.Request) -> web.Response:
     from . import metrics as metrics_mod
 
     window = request.query.get("window", "24h")
-    return web.json_response(metrics_mod.compute(window=window))
+    return web.json_response(await asyncio.to_thread(metrics_mod.compute, window=window))
 
 
 async def get_implicit(request: web.Request) -> web.Response:
@@ -350,6 +424,17 @@ async def get_implicit(request: web.Request) -> web.Response:
         limit = 50
     limit = max(1, min(limit, 200))
 
+    return web.json_response(await asyncio.to_thread(
+        _implicit_payload,
+        metrics_mod,
+        implicit_mod,
+        window,
+        direction,
+        limit,
+    ))
+
+
+def _implicit_payload(metrics_mod, implicit_mod, window: str, direction: str, limit: int) -> dict:
     since = metrics_mod.since_iso(window)
     all_decisions = metrics_mod._read_payloads("decisions", "decisions.jsonl")
     outcomes = metrics_mod._read_payloads("outcomes", "outcomes.jsonl", since_iso=since)
@@ -380,14 +465,14 @@ async def get_implicit(request: web.Request) -> web.Response:
         direction=direction,
         limit=limit,
     )
-    return web.json_response({
+    return {
         "window": window,
         "since": since,
         "limit": limit,
         "direction": direction,
         "summary": implicit_mod.summarize(weak_labels),
         "examples": examples,
-    })
+    }
 
 
 async def post_implicit_promote(request: web.Request) -> web.Response:
@@ -438,7 +523,7 @@ async def get_lab(request: web.Request) -> web.Response:
     from . import trainer as trainer_mod
 
     window = request.query.get("window", "7d")
-    return web.json_response(trainer_mod.lab_report(window=window))
+    return web.json_response(await asyncio.to_thread(trainer_mod.lab_report, window=window))
 
 
 async def get_eval_report(request: web.Request) -> web.Response:
@@ -452,7 +537,8 @@ async def get_eval_report(request: web.Request) -> web.Response:
         max_examples = 40
     max_examples = max(1, min(max_examples, 200))
     return web.json_response(
-        eval_report_mod.build_report(
+        await asyncio.to_thread(
+            eval_report_mod.build_report,
             window=window,
             policy=policy,
             max_examples=max_examples,
@@ -469,7 +555,8 @@ async def get_information_diet(request: web.Request) -> web.Response:
     except ValueError:
         max_episodes = 20
     max_episodes = max(1, min(max_episodes, 100))
-    return web.json_response(information_diet_mod.build_report(
+    return web.json_response(await asyncio.to_thread(
+        information_diet_mod.build_report,
         window=window,
         max_episodes=max_episodes,
     ))
@@ -485,7 +572,8 @@ async def get_context_packets(request: web.Request) -> web.Response:
         limit = 20
     limit = max(1, min(limit, 200))
     since = metrics_mod.since_iso(window)
-    rows = metrics_mod._read_payloads(
+    rows = await asyncio.to_thread(
+        metrics_mod._read_payloads,
         "context_packets",
         "context_packets.jsonl",
         since_iso=since,
@@ -518,7 +606,8 @@ async def post_trainer_run(request: web.Request) -> web.Response:
         min_explicit = int(body.get("min_explicit_labels") or 0)
     except (TypeError, ValueError):
         min_explicit = 0
-    return web.json_response(trainer_mod.run_trainer(
+    return web.json_response(await asyncio.to_thread(
+        trainer_mod.run_trainer,
         window=window,
         min_implicit_usable=min_implicit,
         min_explicit_labels=min_explicit,
@@ -529,7 +618,7 @@ async def post_trainer_run(request: web.Request) -> web.Response:
 async def post_trainer_activate(request: web.Request) -> web.Response:
     from . import trainer as trainer_mod
 
-    result = trainer_mod.activate_canary()
+    result = await asyncio.to_thread(trainer_mod.activate_canary)
     status = 200 if result.get("ok") else 400
     return web.json_response(result, status=status)
 
@@ -542,7 +631,10 @@ async def post_trainer_rollback(request: web.Request) -> web.Response:
     except Exception:
         body = {}
     reason = body.get("reason") if isinstance(body, dict) else None
-    return web.json_response(trainer_mod.rollback_canary(reason=str(reason or "manual")))
+    return web.json_response(await asyncio.to_thread(
+        trainer_mod.rollback_canary,
+        reason=str(reason or "manual"),
+    ))
 
 
 async def post_goal(request: web.Request) -> web.Response:
@@ -641,7 +733,7 @@ def _compute_snooze_until(duration: str) -> str:
 
 
 def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[_force_close_middleware])
     app.router.add_get("/pending", get_pending)
     app.router.add_post("/delivery-ack", post_delivery_ack)
     app.router.add_get("/outcome", post_outcome)  # GET form for terminal-notifier

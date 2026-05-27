@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import os
 import signal
 import subprocess
+import sys
 import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import IO, Optional
 
 import structlog
-from aiohttp import web
 
 from . import critic as critic_mod
 from . import experiments as experiments_mod
@@ -29,7 +33,6 @@ from .schemas import (
     Trace,
     UserPref,
 )
-from .server import build_app
 from .store import (
     append_jsonl,
     ensure_dirs,
@@ -46,6 +49,57 @@ log = structlog.get_logger("harness.daemon")
 
 
 NOTCH_BINARY = Path(os.path.expanduser("~/.harness/HarnessNotch"))
+_STACK_DUMP_FILE = None
+API_LOG_PATH = Path(os.path.expanduser("~/.harness/api-server.log"))
+
+
+@dataclass
+class ApiServerProcess:
+    proc: subprocess.Popen
+    log_file: IO[str]
+
+
+def _install_stack_dumper() -> None:
+    """Allow `kill -USR1 <pid>` to dump all Python stacks for live stalls."""
+    global _STACK_DUMP_FILE
+    if _STACK_DUMP_FILE is not None:
+        return
+    try:
+        stack_path = Path(os.path.expanduser("~/.harness/daemon-stack.log"))
+        stack_path.parent.mkdir(parents=True, exist_ok=True)
+        _STACK_DUMP_FILE = open(stack_path, "a")
+        faulthandler.register(signal.SIGUSR1, file=_STACK_DUMP_FILE, all_threads=True, chain=False)
+        log.info("stack_dumper_installed", signal="SIGUSR1", path=str(stack_path))
+    except Exception as e:
+        log.warning("stack_dumper_install_failed", error=str(e))
+
+
+async def _append_jsonl_async(filename: str, row: dict) -> None:
+    await asyncio.to_thread(append_jsonl, filename, row)
+
+
+async def _patch_trace_async(
+    decision_id: str,
+    patch: dict,
+    *,
+    lifecycle_stage: str | None = None,
+    lifecycle_extra: dict | None = None,
+) -> bool:
+    return await asyncio.to_thread(
+        patch_trace,
+        decision_id,
+        patch,
+        lifecycle_stage=lifecycle_stage,
+        lifecycle_extra=lifecycle_extra,
+    )
+
+
+async def _read_policy_state_async() -> dict:
+    return await asyncio.to_thread(read_policy_state)
+
+
+async def _tail_jsonl_async(filename: str, n: int | None = None) -> list[dict]:
+    return await asyncio.to_thread(tail_jsonl, filename, n)
 
 
 def _launch_notch(harness_port: int) -> Optional[subprocess.Popen]:
@@ -76,6 +130,72 @@ def _stop_notch(proc: Optional[subprocess.Popen]) -> None:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
         proc.kill()
+    except Exception:
+        pass
+
+
+def _launch_api_server(fisherman_url: str, harness_port: int) -> ApiServerProcess:
+    API_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(API_LOG_PATH, "a")
+    env = os.environ.copy()
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "harness.api_server",
+            "--fisherman-url",
+            fisherman_url,
+            "--port",
+            str(harness_port),
+        ],
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        _wait_for_api_server(proc, harness_port)
+    except Exception:
+        _stop_api_server(ApiServerProcess(proc=proc, log_file=log_file))
+        raise
+    log.info("api_server_launched", pid=proc.pid, port=harness_port, log_path=str(API_LOG_PATH))
+    return ApiServerProcess(proc=proc, log_file=log_file)
+
+
+def _wait_for_api_server(proc: subprocess.Popen, harness_port: int, timeout_sec: float = 8.0) -> None:
+    deadline = time.time() + timeout_sec
+    url = f"http://127.0.0.1:{harness_port}/status"
+    last_error: str | None = None
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise RuntimeError(f"harness api server exited early with code {proc.returncode}")
+        try:
+            req = urllib.request.Request(url, headers={"Connection": "close"})
+            with urllib.request.urlopen(req, timeout=0.8) as response:
+                if 200 <= int(response.status) < 500:
+                    return
+        except (OSError, urllib.error.URLError, TimeoutError) as e:
+            last_error = str(e)
+        time.sleep(0.15)
+    raise TimeoutError(f"harness api server did not answer /status on :{harness_port}: {last_error}")
+
+
+def _stop_api_server(handle: Optional[ApiServerProcess]) -> None:
+    if handle is None:
+        return
+    proc = handle.proc
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+    except Exception:
+        pass
+    try:
+        handle.log_file.close()
     except Exception:
         pass
 
@@ -116,6 +236,7 @@ def _compute_reward(outcome_action: Optional[str], reward_cfg: dict) -> Reward:
 
 async def run_loop(config: dict) -> None:
     ensure_dirs()
+    _install_stack_dumper()
     fisherman_url = config["daemon"]["fisherman_url"]
     poll_sec = float(config["daemon"]["poll_interval_sec"])
     harness_port = int(config["daemon"]["http_port"])
@@ -141,16 +262,7 @@ async def run_loop(config: dict) -> None:
 
     last_push_at_ref: list[Optional[float]] = [None]
 
-    app = build_app(fisherman_url=fisherman_url)
-    # Python 3.14 on macOS can raise OSError(22) when aiohttp enables TCP
-    # keepalive on the transport wrapper. This server is localhost-only and
-    # polled frequently, so disabling socket keepalive avoids noisy callback
-    # errors without changing harness semantics.
-    runner = web.AppRunner(app, tcp_keepalive=False)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", harness_port)
-    await site.start()
-    log.info("server_started", port=harness_port)
+    api_server = _launch_api_server(fisherman_url, harness_port)
 
     notch_proc: Optional[subprocess.Popen] = None
     if push_channel == "notch_pill":
@@ -166,7 +278,7 @@ async def run_loop(config: dict) -> None:
                 if notch_proc is not None:
                     log.warning("notch_exited", returncode=notch_proc.returncode)
                 notch_proc = _launch_notch(harness_port)
-            expired = sweep_expired_pending()
+            expired = await asyncio.to_thread(sweep_expired_pending)
             if expired:
                 log.info("pending_expired_sweep", n=expired)
             try:
@@ -184,14 +296,14 @@ async def run_loop(config: dict) -> None:
         if workflow_events is not None:
             closed = workflow_events.close("daemon_shutdown")
             if closed is not None:
-                append_jsonl("workflow_events.jsonl", closed.to_dict())
+                await _append_jsonl_async("workflow_events.jsonl", closed.to_dict())
         trainer_task.cancel()
         try:
             await trainer_task
         except asyncio.CancelledError:
             pass
         _stop_notch(notch_proc)
-        await runner.cleanup()
+        _stop_api_server(api_server)
 
 
 async def _trainer_loop(config: dict) -> None:
@@ -231,7 +343,7 @@ async def _tick(
     workflow_events: Optional[WorkflowEventBuilder],
     last_push_at_ref: list[Optional[float]],
 ) -> None:
-    user_pref = _user_pref_from_config(config)
+    user_pref = await asyncio.to_thread(_user_pref_from_config, config)
 
     minutes_since_last_push = (
         9999.0
@@ -269,25 +381,26 @@ async def _tick(
     if workflow_events is not None:
         closed_workflow_event = workflow_events.observe(event)
         if closed_workflow_event is not None:
-            append_jsonl("workflow_events.jsonl", closed_workflow_event.to_dict())
+            await _append_jsonl_async("workflow_events.jsonl", closed_workflow_event.to_dict())
         active_snapshot = workflow_events.active_snapshot()
         if active_snapshot and _should_persist_workflow_snapshot(active_snapshot):
-            append_jsonl("workflow_events.jsonl", active_snapshot | {"snapshot_kind": "active"})
+            await _append_jsonl_async("workflow_events.jsonl", active_snapshot | {"snapshot_kind": "active"})
         workflow_cfg = config.get("workflow_events", {})
         recent_workflow_events = workflow_events.recent_context(
             window_sec=float(workflow_cfg.get("recent_context_sec", 300)),
             limit=int(workflow_cfg.get("max_recent_context", 6)),
         )
 
-    append_jsonl("candidates.jsonl", event.to_dict())
-    memory.record(event)
-    recent_outcomes = tail_jsonl("outcomes.jsonl", n=5)
-    mem_snap = memory.snapshot(
+    await _append_jsonl_async("candidates.jsonl", event.to_dict())
+    await asyncio.to_thread(memory.record, event)
+    recent_outcomes = await _tail_jsonl_async("outcomes.jsonl", n=5)
+    mem_snap = await asyncio.to_thread(
+        memory.snapshot,
         recent_outcomes,
         recent_workflow_events=recent_workflow_events,
     )
 
-    policy_state = read_policy_state()
+    policy_state = await _read_policy_state_async()
     daily_goal = (policy_state.get("daily_goal") or "").strip()
     sensitivity = policy_state.get("sensitivity") or "balanced"
     policy_name, policy_overrides, policy_metadata = trainer_mod.active_policy_config(config, policy_state)
@@ -332,15 +445,15 @@ async def _tick(
     if decision.action == "no_ping":
         log.info("decision", action="no_ping", reasons=decision.reason_codes)
         trace.mark("terminal_no_ping")
-        append_jsonl("traces.jsonl", trace.to_dict())
-        append_jsonl("decisions.jsonl", decision_row)
+        await _append_jsonl_async("traces.jsonl", trace.to_dict())
+        await _append_jsonl_async("decisions.jsonl", decision_row)
         return
 
     # ping path
     log.info("decision", action="notch_ping", intent=decision.intent, reasons=decision.reason_codes)
-    append_jsonl("traces.jsonl", trace.to_dict())
-    append_jsonl("decisions.jsonl", decision_row)
-    patch_trace(decision.decision_id, {}, lifecycle_stage="realizer_started")
+    await _append_jsonl_async("traces.jsonl", trace.to_dict())
+    await _append_jsonl_async("decisions.jsonl", decision_row)
+    await _patch_trace_async(decision.decision_id, {}, lifecycle_stage="realizer_started")
     try:
         realization = await realizer_mod.realize(
             intent=decision.intent or "goal_aware",
@@ -370,21 +483,21 @@ async def _tick(
             "privacy_provenance": {},
             "error": error,
         }
-        patch_trace(
+        await _patch_trace_async(
             decision.decision_id,
             {"realization": trace.realization},
             lifecycle_stage="realizer_failed",
             lifecycle_extra={"error": error},
         )
         trace.delivery = {"pushed": False, "channel": "skipped", "error": error}
-        patch_trace(
+        await _patch_trace_async(
             decision.decision_id,
             {"delivery": trace.delivery},
             lifecycle_stage="terminal_skipped",
             lifecycle_extra={"error": error},
         )
         return
-    patch_trace(
+    await _patch_trace_async(
         decision.decision_id,
         {"realization": trace.realization},
         lifecycle_stage="realizer_failed" if realization.error or not realization.message.strip() else "realizer_done",
@@ -394,7 +507,7 @@ async def _tick(
     if realization.error or not realization.message.strip():
         log.warning("realizer_failed", error=realization.error)
         trace.delivery = {"pushed": False, "channel": "skipped"}
-        patch_trace(
+        await _patch_trace_async(
             decision.decision_id,
             {"delivery": trace.delivery},
             lifecycle_stage="terminal_skipped",
@@ -404,14 +517,14 @@ async def _tick(
 
     critic_cfg = dict(config.get("critic", {}))
     critic_cfg["privacy"] = config.get("privacy", {})
-    patch_trace(decision.decision_id, {}, lifecycle_stage="critic_started")
+    await _patch_trace_async(decision.decision_id, {}, lifecycle_stage="critic_started")
     try:
         critic_result = await critic_mod.check(realization.message, event, critic_cfg)
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
         log.warning("critic_exception", error=error)
         trace.delivery = {"pushed": False, "channel": "skipped", "error": error}
-        patch_trace(
+        await _patch_trace_async(
             decision.decision_id,
             {"delivery": trace.delivery},
             lifecycle_stage="terminal_skipped",
@@ -419,7 +532,7 @@ async def _tick(
         )
         return
     trace.critic = critic_result.to_dict()
-    patch_trace(
+    await _patch_trace_async(
         decision.decision_id,
         {"critic": trace.critic},
         lifecycle_stage="critic_done",
@@ -441,8 +554,8 @@ async def _tick(
         trace.delivery = {"pushed": False, "channel": "blocked_by_critic"}
         trace.outcome = outcome
         trace.reward = reward
-        append_jsonl("outcomes.jsonl", outcome)
-        patch_trace(
+        await _append_jsonl_async("outcomes.jsonl", outcome)
+        await _patch_trace_async(
             decision.decision_id,
             {
                 "delivery": trace.delivery,
@@ -456,14 +569,14 @@ async def _tick(
 
     push_cfg = dict(config.get("push", {}))
     push_cfg["harness_port"] = config["daemon"]["http_port"]
-    patch_trace(decision.decision_id, {}, lifecycle_stage="dispatch_started")
+    await _patch_trace_async(decision.decision_id, {}, lifecycle_stage="dispatch_started")
     try:
         delivery = await push_mod.dispatch(decision, realization, push_cfg)
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
         log.warning("dispatch_exception", error=error)
         trace.delivery = {"pushed": False, "channel": push_cfg.get("channel", "unknown"), "error": error}
-        patch_trace(
+        await _patch_trace_async(
             decision.decision_id,
             {"delivery": trace.delivery},
             lifecycle_stage="dispatch_failed",
@@ -473,7 +586,7 @@ async def _tick(
     trace.delivery = delivery.__dict__
     if delivery.pushed:
         last_push_at_ref[0] = _now_unix()
-    patch_trace(
+    await _patch_trace_async(
         decision.decision_id,
         {"delivery": trace.delivery},
         lifecycle_stage="dispatch_done",

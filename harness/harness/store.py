@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -10,6 +11,8 @@ from typing import Any, Iterator, Optional
 
 HARNESS_DIR = Path(os.path.expanduser("~/.harness"))
 log = logging.getLogger(__name__)
+PATCH_TRACE_REWRITE_MAX_BYTES = int(os.environ.get("HARNESS_TRACE_REWRITE_MAX_BYTES", str(64 * 1024 * 1024)))
+_PENDING_LOCK = threading.RLock()
 
 
 def ensure_dirs() -> None:
@@ -54,6 +57,32 @@ def patch_trace(
     p = HARNESS_DIR / "traces.jsonl"
     if not p.exists():
         return False
+
+    try:
+        if p.stat().st_size > PATCH_TRACE_REWRITE_MAX_BYTES:
+            from . import sql_store
+
+            patched = sql_store.patch_trace_payload(
+                decision_id,
+                patch,
+                lifecycle_stage=lifecycle_stage,
+                lifecycle_extra=lifecycle_extra,
+            )
+            if patched:
+                append_jsonl(
+                    "trace_patches.jsonl",
+                    {
+                        "id": f"trace_patch_{decision_id}_{int(time.time() * 1000)}",
+                        "decision_id": decision_id,
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "lifecycle_stage": lifecycle_stage,
+                        "lifecycle_extra": lifecycle_extra or {},
+                        "patch_keys": sorted(patch.keys()),
+                    },
+                )
+                return True
+    except Exception as e:
+        log.warning("sql_trace_fast_patch_failed decision_id=%s error=%s", decision_id, e)
 
     rows: list[dict] = []
     found_row: dict | None = None
@@ -165,13 +194,16 @@ def iter_jsonl(filename: str) -> Iterator[dict]:
 
 def write_pending(decision_id: str, payload: dict) -> None:
     ensure_dirs()
-    p = HARNESS_DIR / "pending" / f"{decision_id}.json"
-    payload = dict(payload)
-    payload.setdefault("pending_created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
-    payload.setdefault("pending_attempts", 0)
-    payload.pop("pending_lease_until_unix", None)
-    with open(p, "w") as f:
-        json.dump(payload, f)
+    with _PENDING_LOCK:
+        p = HARNESS_DIR / "pending" / f"{decision_id}.json"
+        payload = dict(payload)
+        payload.setdefault("pending_created_at", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+        payload.setdefault("pending_attempts", 0)
+        payload.pop("pending_lease_until_unix", None)
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, p)
 
 
 def claim_pending(lease_sec: float = 15.0) -> Optional[dict]:
@@ -184,33 +216,34 @@ def claim_pending(lease_sec: float = 15.0) -> Optional[dict]:
     again.
     """
     ensure_dirs()
-    pending_dir = HARNESS_DIR / "pending"
-    now = time.time()
-    files = sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
-    for p in files:
-        try:
-            with open(p) as f:
-                payload = json.load(f)
-        except Exception:
-            p.unlink(missing_ok=True)
-            continue
-        lease_until = float(payload.get("pending_lease_until_unix") or 0)
-        if lease_until > now:
-            continue
-        if _pending_expired(payload, now):
-            _record_expired_pending(payload, now)
-            p.unlink(missing_ok=True)
-            continue
-        if payload.get("claimable_by_notch") is False:
-            continue
-        payload["pending_attempts"] = int(payload.get("pending_attempts") or 0) + 1
-        payload["pending_claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
-        payload["pending_lease_until_unix"] = now + float(lease_sec)
-        tmp = p.with_suffix(".json.tmp")
-        with open(tmp, "w") as f:
-            json.dump(payload, f)
-        os.replace(tmp, p)
-        return payload
+    with _PENDING_LOCK:
+        pending_dir = HARNESS_DIR / "pending"
+        now = time.time()
+        files = sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        for p in files:
+            try:
+                with open(p) as f:
+                    payload = json.load(f)
+            except Exception:
+                p.unlink(missing_ok=True)
+                continue
+            lease_until = float(payload.get("pending_lease_until_unix") or 0)
+            if lease_until > now:
+                continue
+            if _pending_expired(payload, now):
+                _record_expired_pending(payload, now)
+                p.unlink(missing_ok=True)
+                continue
+            if payload.get("claimable_by_notch") is False:
+                continue
+            payload["pending_attempts"] = int(payload.get("pending_attempts") or 0) + 1
+            payload["pending_claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+            payload["pending_lease_until_unix"] = now + float(lease_sec)
+            tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            os.replace(tmp, p)
+            return payload
     return None
 
 
@@ -263,52 +296,62 @@ def sweep_expired_pending(now: float | None = None) -> int:
     state even if the native capsule is closed, crashes, or never polls again.
     """
     ensure_dirs()
-    now = time.time() if now is None else now
-    expired = 0
-    pending_dir = HARNESS_DIR / "pending"
-    for p in sorted(pending_dir.glob("*.json"), key=lambda path: path.stat().st_mtime):
-        try:
-            with open(p) as f:
-                payload = json.load(f)
-        except Exception:
+    with _PENDING_LOCK:
+        now = time.time() if now is None else now
+        expired = 0
+        pending_dir = HARNESS_DIR / "pending"
+        for p in sorted(pending_dir.glob("*.json"), key=lambda path: path.stat().st_mtime):
+            try:
+                with open(p) as f:
+                    payload = json.load(f)
+            except Exception:
+                p.unlink(missing_ok=True)
+                continue
+            if not _pending_expired(payload, now):
+                continue
+            _record_expired_pending(payload, now)
             p.unlink(missing_ok=True)
-            continue
-        if not _pending_expired(payload, now):
-            continue
-        _record_expired_pending(payload, now)
-        p.unlink(missing_ok=True)
-        expired += 1
-    return expired
+            expired += 1
+        return expired
 
 
 def complete_pending(decision_id: str) -> bool:
     ensure_dirs()
-    p = HARNESS_DIR / "pending" / f"{decision_id}.json"
-    if not p.exists():
-        return False
-    p.unlink(missing_ok=True)
-    return True
+    with _PENDING_LOCK:
+        p = HARNESS_DIR / "pending" / f"{decision_id}.json"
+        if not p.exists():
+            return False
+        p.unlink(missing_ok=True)
+        return True
 
 
 def pending_payload(decision_id: str) -> dict | None:
     ensure_dirs()
-    p = HARNESS_DIR / "pending" / f"{decision_id}.json"
-    if not p.exists():
-        return None
-    try:
-        with open(p) as f:
-            payload = json.load(f)
-        if _pending_expired(payload, time.time()):
-            _record_expired_pending(payload, time.time())
+    with _PENDING_LOCK:
+        p = HARNESS_DIR / "pending" / f"{decision_id}.json"
+        if not p.exists():
+            return None
+        try:
+            with open(p) as f:
+                payload = json.load(f)
+            if _pending_expired(payload, time.time()):
+                _record_expired_pending(payload, time.time())
+                p.unlink(missing_ok=True)
+                return None
+            return payload if isinstance(payload, dict) else None
+        except Exception:
             p.unlink(missing_ok=True)
             return None
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        p.unlink(missing_ok=True)
-        return None
 
 
 def outcome_for_decision(decision_id: str) -> dict | None:
+    try:
+        from . import sql_store
+
+        if sql_store.db_path().exists() and sql_store.count_rows("outcomes") > 0:
+            return sql_store.outcome_for_decision(decision_id)
+    except Exception:
+        pass
     latest: dict | None = None
     for row in iter_jsonl("outcomes.jsonl"):
         if row.get("decision_id") == decision_id:
@@ -317,6 +360,13 @@ def outcome_for_decision(decision_id: str) -> dict | None:
 
 
 def delivery_actions_for_decision(decision_id: str) -> list[str]:
+    try:
+        from . import sql_store
+
+        if sql_store.db_path().exists() and sql_store.count_rows("deliveries") > 0:
+            return sql_store.delivery_actions_for_decision(decision_id)
+    except Exception:
+        pass
     out: list[str] = []
     for row in iter_jsonl("deliveries.jsonl"):
         if row.get("decision_id") == decision_id and row.get("delivery_action"):
@@ -325,6 +375,13 @@ def delivery_actions_for_decision(decision_id: str) -> list[str]:
 
 
 def decision_exists(decision_id: str) -> bool:
+    try:
+        from . import sql_store
+
+        if sql_store.db_path().exists() and sql_store.count_rows("decisions") > 0:
+            return sql_store.decision_exists(decision_id)
+    except Exception:
+        pass
     for row in iter_jsonl("decisions.jsonl"):
         if row.get("decision_id") == decision_id:
             return True
@@ -334,43 +391,45 @@ def decision_exists(decision_id: str) -> bool:
 def pop_pending() -> Optional[dict]:
     """Return the oldest pending payload and remove it; None if none."""
     ensure_dirs()
-    pending_dir = HARNESS_DIR / "pending"
-    files = sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
-    if not files:
-        return None
-    p = files[0]
-    try:
-        with open(p) as f:
-            payload = json.load(f)
-        if _pending_expired(payload, time.time()):
-            _record_expired_pending(payload, time.time())
+    with _PENDING_LOCK:
+        pending_dir = HARNESS_DIR / "pending"
+        files = sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        if not files:
+            return None
+        p = files[0]
+        try:
+            with open(p) as f:
+                payload = json.load(f)
+            if _pending_expired(payload, time.time()):
+                _record_expired_pending(payload, time.time())
+                p.unlink(missing_ok=True)
+                return None
+            p.unlink(missing_ok=True)
+            return payload
+        except Exception:
             p.unlink(missing_ok=True)
             return None
-        p.unlink(missing_ok=True)
-        return payload
-    except Exception:
-        p.unlink(missing_ok=True)
-        return None
 
 
 def list_pending() -> list[dict]:
     ensure_dirs()
-    pending_dir = HARNESS_DIR / "pending"
-    out: list[dict] = []
-    now = time.time()
-    for p in sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
-        try:
-            with open(p) as f:
-                payload = json.load(f)
-            if _pending_expired(payload, now):
-                _record_expired_pending(payload, now)
+    with _PENDING_LOCK:
+        pending_dir = HARNESS_DIR / "pending"
+        out: list[dict] = []
+        now = time.time()
+        for p in sorted(pending_dir.glob("*.json"), key=lambda p: p.stat().st_mtime):
+            try:
+                with open(p) as f:
+                    payload = json.load(f)
+                if _pending_expired(payload, now):
+                    _record_expired_pending(payload, now)
+                    p.unlink(missing_ok=True)
+                    continue
+                out.append(payload)
+            except Exception:
                 p.unlink(missing_ok=True)
                 continue
-            out.append(payload)
-        except Exception:
-            p.unlink(missing_ok=True)
-            continue
-    return out
+        return out
 
 
 def write_snapshot(snapshot_id: str, payload: dict) -> Path:

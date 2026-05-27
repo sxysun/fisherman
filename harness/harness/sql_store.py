@@ -25,6 +25,15 @@ KNOWN_TABLES = {
     "curation",
 }
 
+_COUNT_COLUMNS = {
+    "candidates": {"frontmost_app", "scene_label", "scene_source"},
+    "decisions": {"action", "intent", "policy_version"},
+    "outcomes": {"user_action", "intent_signal"},
+    "deliveries": {"delivery_action", "channel"},
+    "workflow_events": {"status", "app", "scene_label", "close_reason"},
+    "model_calls": {"purpose", "model", "status"},
+}
+
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -349,6 +358,58 @@ def update_trace_outcome(
         return changed
 
 
+def patch_trace_payload(
+    decision_id: str,
+    patch: dict,
+    *,
+    lifecycle_stage: str | None = None,
+    lifecycle_extra: dict | None = None,
+    base_dir: Path | None = None,
+) -> bool:
+    """Patch the indexed trace payload without rewriting traces.jsonl.
+
+    The JSONL file is an append/debug artifact. On a long-running dogfood
+    machine it can reach hundreds of MB, so live lifecycle updates must use
+    the SQLite query plane instead of rewriting the full file.
+    """
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            """
+            SELECT trace_id, payload_json
+            FROM traces
+            WHERE decision_id = ?
+            ORDER BY COALESCE(ts, '') DESC
+            LIMIT 1
+            """,
+            (decision_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            payload = json.loads(row["payload_json"])
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _deep_merge(payload, patch)
+        if lifecycle_stage:
+            lifecycle = payload.setdefault("lifecycle", [])
+            if not isinstance(lifecycle, list):
+                lifecycle = []
+                payload["lifecycle"] = lifecycle
+            lifecycle_row = {
+                "stage": lifecycle_stage,
+                "ts": _now_iso(),
+            }
+            if lifecycle_extra:
+                lifecycle_row.update({k: v for k, v in lifecycle_extra.items() if v is not None})
+            lifecycle.append(lifecycle_row)
+        payload_json = _payload_json(payload)
+        _upsert_trace(conn, payload, payload_json, _payload_hash(payload_json))
+        return True
+
+
 def upsert_trace_payload(row: dict, base_dir: Path | None = None) -> bool:
     """Upsert one decoded trace payload into the typed trace table."""
     if not isinstance(row, dict) or not row.get("trace_id"):
@@ -359,6 +420,14 @@ def upsert_trace_payload(row: dict, base_dir: Path | None = None) -> bool:
         _ensure_schema(conn)
         _upsert_trace(conn, row, payload_json, payload_hash)
     return True
+
+
+def _deep_merge(target: dict, patch: dict) -> None:
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = value
 
 
 def count_rows(table: str, base_dir: Path | None = None) -> int:
@@ -385,6 +454,131 @@ def count_payload_rows(
         _ensure_schema(conn)
         row = conn.execute(f"SELECT COUNT(*) AS n FROM {table} {where}", params).fetchone()
     return int(row["n"] if row else 0)
+
+
+def value_counts(
+    table: str,
+    column: str,
+    *,
+    since_iso: str | None = None,
+    limit: int = 20,
+    base_dir: Path | None = None,
+) -> dict[str, int]:
+    """Return grouped counts from typed SQLite columns without decoding payload JSON."""
+    _require_known_table(table)
+    if column not in _COUNT_COLUMNS.get(table, set()):
+        raise ValueError(f"unsupported count column {table}.{column}")
+    where = ""
+    params: list[Any] = []
+    if since_iso is not None:
+        where = "WHERE COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    params.append(max(1, min(int(limit), 100)))
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"""
+            SELECT COALESCE(NULLIF({column}, ''), '?') AS key, COUNT(*) AS n
+            FROM {table}
+            {where}
+            GROUP BY key
+            ORDER BY n DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return {str(row["key"]): int(row["n"]) for row in rows}
+
+
+def decision_reason_counts(
+    *,
+    since_iso: str | None = None,
+    limit: int = 20,
+    base_dir: Path | None = None,
+) -> dict[str, int]:
+    """Count decision reason codes from the compact typed reason column."""
+    params: list[Any] = []
+    where = ""
+    if since_iso is not None:
+        where = "WHERE COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"SELECT reason_codes_json FROM decisions {where}",
+            params,
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        try:
+            values = json.loads(row["reason_codes_json"] or "[]")
+        except (TypeError, json.JSONDecodeError):
+            values = []
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            key = str(value)
+            counts[key] = counts.get(key, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True)[: max(1, min(int(limit), 100))])
+
+
+def workflow_avg_duration(
+    *,
+    since_iso: str | None = None,
+    base_dir: Path | None = None,
+) -> float | None:
+    where = "WHERE status = 'closed'"
+    params: list[Any] = []
+    if since_iso is not None:
+        where += " AND COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            f"SELECT AVG(duration_sec) AS avg_duration FROM workflow_events {where}",
+            params,
+        ).fetchone()
+    value = row["avg_duration"] if row else None
+    return None if value is None else round(float(value), 2)
+
+
+def displayed_ping_decision_ids(
+    *,
+    since_iso: str | None = None,
+    base_dir: Path | None = None,
+) -> set[str]:
+    where = "WHERE delivery_action IN ('claimed', 'displayed_ack', 'displayed_inferred')"
+    params: list[Any] = []
+    if since_iso is not None:
+        where += " AND COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"SELECT DISTINCT decision_id FROM deliveries {where}",
+            params,
+        ).fetchall()
+    return {str(row["decision_id"]) for row in rows if row["decision_id"]}
+
+
+def decision_ids_by_action(
+    action: str,
+    *,
+    since_iso: str | None = None,
+    base_dir: Path | None = None,
+) -> set[str]:
+    where = "WHERE action = ?"
+    params: list[Any] = [action]
+    if since_iso is not None:
+        where += " AND COALESCE(ts, '') >= ?"
+        params.append(since_iso)
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            f"SELECT decision_id FROM decisions {where}",
+            params,
+        ).fetchall()
+    return {str(row["decision_id"]) for row in rows if row["decision_id"]}
 
 
 def trace_decision_ids(
@@ -503,6 +697,40 @@ def payload_rows_for_decisions(
         if isinstance(payload, dict):
             out.append(payload)
     return out
+
+
+def decision_exists(decision_id: str, base_dir: Path | None = None) -> bool:
+    if not decision_id:
+        return False
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        row = conn.execute(
+            "SELECT 1 FROM decisions WHERE decision_id = ? LIMIT 1",
+            (decision_id,),
+        ).fetchone()
+    return row is not None
+
+
+def outcome_for_decision(decision_id: str, base_dir: Path | None = None) -> dict | None:
+    rows = payload_rows_for_decisions("outcomes", [decision_id], base_dir=base_dir)
+    return rows[-1] if rows else None
+
+
+def delivery_actions_for_decision(decision_id: str, base_dir: Path | None = None) -> list[str]:
+    if not decision_id:
+        return []
+    with _connect(base_dir) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute(
+            """
+            SELECT delivery_action
+            FROM deliveries
+            WHERE decision_id = ? AND delivery_action IS NOT NULL AND delivery_action != ''
+            ORDER BY COALESCE(ts, '') ASC
+            """,
+            (decision_id,),
+        ).fetchall()
+    return [str(row["delivery_action"]) for row in rows if row["delivery_action"]]
 
 
 def backfill_jsonl_files(

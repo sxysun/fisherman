@@ -13,6 +13,26 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _pending_ttl_sec(config: dict) -> float:
+    """How long a notch payload may wait for claim/outcome before expiry.
+
+    `auto_dismiss_sec` used to be overloaded as this TTL, but HarnessNotch
+    displays pings for at least 30s before timing them out. An 8s pending TTL
+    makes valid pings expire before the native UI can report an outcome.
+    """
+    configured = config.get("pending_ttl_sec")
+    if configured is not None:
+        try:
+            return max(30.0, float(configured))
+        except (TypeError, ValueError):
+            pass
+    try:
+        auto_dismiss = float(config.get("auto_dismiss_sec", 30))
+    except (TypeError, ValueError):
+        auto_dismiss = 30.0
+    return max(120.0, auto_dismiss + 45.0)
+
+
 async def dispatch(
     decision: ProactiveDecision,
     realization: Realization,
@@ -26,6 +46,7 @@ async def dispatch(
                           (kept as a fallback when the notch app isn't running).
     """
     channel = config.get("channel", "notch_pill")
+    expires_at_unix = time.time() + _pending_ttl_sec(config)
     if channel == "terminal_notifier":
         payload = {
             "decision_id": decision.decision_id,
@@ -35,12 +56,12 @@ async def dispatch(
             "channel": channel,
             "claimable_by_notch": False,
             "ts": _now_iso(),
-            "expires_at_unix": time.time() + float(config.get("auto_dismiss_sec", 8)),
+            "expires_at_unix": expires_at_unix,
         }
-        write_pending(decision.decision_id, payload)
+        await asyncio.to_thread(write_pending, decision.decision_id, payload)
         ok, error = await _push_terminal_notifier(decision, realization, config)
         if ok:
-            _record_terminal_notifier_display(decision)
+            await asyncio.to_thread(_record_terminal_notifier_display, decision)
         return Delivery(
             pushed=ok,
             channel=channel,
@@ -54,9 +75,9 @@ async def dispatch(
         "intent": decision.intent,
         "message": realization.message,
         "ts": _now_iso(),
-        "expires_at_unix": time.time() + float(config.get("auto_dismiss_sec", 8)),
+        "expires_at_unix": expires_at_unix,
     }
-    write_pending(decision.decision_id, payload)
+    await asyncio.to_thread(write_pending, decision.decision_id, payload)
 
     return Delivery(pushed=True, channel=channel, displayed_at=_now_iso())
 
@@ -68,7 +89,8 @@ async def _push_terminal_notifier(
 ) -> tuple[bool, str | None]:
     binary = shutil.which("terminal-notifier")
     if not binary:
-        append_jsonl(
+        await asyncio.to_thread(
+            append_jsonl,
             "outcomes.jsonl",
             {
                 "decision_id": decision.decision_id,
@@ -105,7 +127,8 @@ async def _push_terminal_notifier(
             return False, f"terminal-notifier exited {proc.returncode}"
         return True, None
     except Exception as e:
-        append_jsonl(
+        await asyncio.to_thread(
+            append_jsonl,
             "outcomes.jsonl",
             {
                 "decision_id": decision.decision_id,

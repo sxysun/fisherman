@@ -1365,9 +1365,21 @@ async def _categorize_activity(
     )
     model = settings.get("model") or _DEFAULT_STATUS_LLM_MODEL
 
+    # If the app name looks like a game/entertainment title but the screen has
+    # substantial text content, the game is almost certainly running in a background
+    # Space. Omit the app name so the LLM classifies from what's actually on screen.
+    effective_app = app
+    if app and len(ocr_text or "") > 300:
+        app_lower = app.lower()
+        game_hints = ("civilization", "minecraft", "steam", "epic games", "gog ",
+                      "league of legends", "fortnite", "valorant", "starcraft",
+                      "diablo", "world of warcraft", "overwatch", "apex legends")
+        if any(h in app_lower for h in game_hints):
+            effective_app = None
+
     prompt = f"""Generate a short ambient status (max 30 chars) describing what this person is doing, based on their screen.
 
-App: {app or "unknown"}
+App: {effective_app or "unknown"}
 Window title: {window[:200] if window else ""}
 Visible text: {ocr_text[:500] if ocr_text else ""}
 

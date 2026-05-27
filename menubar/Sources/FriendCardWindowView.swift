@@ -194,7 +194,7 @@ private func fetchFriendActivityHistory(
                 [
                     "friend", "status", target,
                     "--since", String(since.timeIntervalSince1970),
-                    "--limit", "500",
+                    "--limit", "200",
                 ],
                 timeout: 15
             )

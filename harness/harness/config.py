@@ -61,6 +61,7 @@ timeout_sec = 8
 max_tokens = 220
 temperature = 0.0
 max_examples = 16
+use_kg_priors = false
 kg_window = "30d"
 min_interval_sec = 15
 min_confidence_to_ping = 0.55
@@ -176,7 +177,10 @@ api_key = ""
 
 [push]
 channel = "notch_pill"
-auto_dismiss_sec = 8
+# Pending payload TTL. HarnessNotch displays a ping for at least 30s before
+# reporting timed_out, so this must be longer than the native display lifecycle.
+pending_ttl_sec = 120
+auto_dismiss_sec = 30
 
 [reward]
 version = "v2"
