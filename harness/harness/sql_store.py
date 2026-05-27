@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 
 DB_FILENAME = "harness.db"
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 KNOWN_TABLES = {
     "event_log",
@@ -103,6 +103,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_candidates_ts
             ON candidates(ts);
+        CREATE INDEX IF NOT EXISTS idx_candidates_scene_ts
+            ON candidates(scene_label, ts);
+        CREATE INDEX IF NOT EXISTS idx_candidates_app_ts
+            ON candidates(frontmost_app, ts);
 
         CREATE TABLE IF NOT EXISTS decisions (
             decision_id TEXT PRIMARY KEY,
@@ -121,6 +125,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ON decisions(candidate_id);
         CREATE INDEX IF NOT EXISTS idx_decisions_ts
             ON decisions(ts);
+        CREATE INDEX IF NOT EXISTS idx_decisions_action_ts
+            ON decisions(action, ts);
+        CREATE INDEX IF NOT EXISTS idx_decisions_intent_ts
+            ON decisions(intent, ts);
 
         CREATE TABLE IF NOT EXISTS traces (
             trace_id TEXT PRIMARY KEY,
@@ -157,6 +165,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ON outcomes(decision_id);
         CREATE INDEX IF NOT EXISTS idx_outcomes_ts
             ON outcomes(ts);
+        CREATE INDEX IF NOT EXISTS idx_outcomes_action_ts
+            ON outcomes(user_action, ts);
+        CREATE INDEX IF NOT EXISTS idx_outcomes_intent_signal_ts
+            ON outcomes(intent_signal, ts);
 
         CREATE TABLE IF NOT EXISTS deliveries (
             delivery_id TEXT PRIMARY KEY,
@@ -173,6 +185,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ON deliveries(decision_id);
         CREATE INDEX IF NOT EXISTS idx_deliveries_ts
             ON deliveries(ts);
+        CREATE INDEX IF NOT EXISTS idx_deliveries_action_ts
+            ON deliveries(delivery_action, ts);
 
         CREATE TABLE IF NOT EXISTS model_calls (
             model_call_id TEXT PRIMARY KEY,
@@ -228,6 +242,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             ON workflow_events(ts);
         CREATE INDEX IF NOT EXISTS idx_workflow_events_app
             ON workflow_events(app, ts);
+        CREATE INDEX IF NOT EXISTS idx_workflow_events_status_ts
+            ON workflow_events(status, ts);
 
         CREATE TABLE IF NOT EXISTS context_packets (
             packet_id TEXT PRIMARY KEY,
@@ -316,7 +332,7 @@ def update_trace_outcome(
             SELECT trace_id, payload_json
             FROM traces
             WHERE decision_id = ?
-            ORDER BY COALESCE(ts, '') DESC
+            ORDER BY ts DESC
             """,
             (decision_id,),
         ).fetchall()
@@ -379,7 +395,7 @@ def patch_trace_payload(
             SELECT trace_id, payload_json
             FROM traces
             WHERE decision_id = ?
-            ORDER BY COALESCE(ts, '') DESC
+            ORDER BY ts DESC
             LIMIT 1
             """,
             (decision_id,),
@@ -448,7 +464,7 @@ def count_payload_rows(
     where = ""
     params: list[Any] = []
     if since_iso is not None:
-        where = "WHERE COALESCE(ts, '') >= ?"
+        where = "WHERE ts >= ?"
         params.append(since_iso)
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
@@ -471,7 +487,7 @@ def value_counts(
     where = ""
     params: list[Any] = []
     if since_iso is not None:
-        where = "WHERE COALESCE(ts, '') >= ?"
+        where = "WHERE ts >= ?"
         params.append(since_iso)
     params.append(max(1, min(int(limit), 100)))
     with _connect(base_dir) as conn:
@@ -500,7 +516,7 @@ def decision_reason_counts(
     params: list[Any] = []
     where = ""
     if since_iso is not None:
-        where = "WHERE COALESCE(ts, '') >= ?"
+        where = "WHERE ts >= ?"
         params.append(since_iso)
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
@@ -530,7 +546,7 @@ def workflow_avg_duration(
     where = "WHERE status = 'closed'"
     params: list[Any] = []
     if since_iso is not None:
-        where += " AND COALESCE(ts, '') >= ?"
+        where += " AND ts >= ?"
         params.append(since_iso)
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
@@ -550,7 +566,7 @@ def displayed_ping_decision_ids(
     where = "WHERE delivery_action IN ('claimed', 'displayed_ack', 'displayed_inferred')"
     params: list[Any] = []
     if since_iso is not None:
-        where += " AND COALESCE(ts, '') >= ?"
+        where += " AND ts >= ?"
         params.append(since_iso)
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
@@ -570,7 +586,7 @@ def decision_ids_by_action(
     where = "WHERE action = ?"
     params: list[Any] = [action]
     if since_iso is not None:
-        where += " AND COALESCE(ts, '') >= ?"
+        where += " AND ts >= ?"
         params.append(since_iso)
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
@@ -589,7 +605,7 @@ def trace_decision_ids(
     where = "WHERE decision_id IS NOT NULL AND decision_id != ''"
     params: list[Any] = []
     if since_iso is not None:
-        where += " AND COALESCE(ts, '') >= ?"
+        where += " AND ts >= ?"
         params.append(since_iso)
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
@@ -599,7 +615,7 @@ def trace_decision_ids(
         ).fetchall()
         count_row = conn.execute(
             "SELECT COUNT(*) AS n FROM traces"
-            + (" WHERE COALESCE(ts, '') >= ?" if since_iso is not None else ""),
+            + (" WHERE ts >= ?" if since_iso is not None else ""),
             params,
         ).fetchone()
     return int(count_row["n"] if count_row else 0), {str(row["decision_id"]) for row in rows}
@@ -608,7 +624,7 @@ def trace_decision_ids(
 def recent_rows(table: str, limit: int = 50, base_dir: Path | None = None) -> list[dict]:
     _require_known_table(table)
     limit = max(1, min(int(limit), 500))
-    order = "id" if table == "event_log" else "COALESCE(ts, '')"
+    order = "id" if table == "event_log" else "ts"
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
         rows = conn.execute(
@@ -637,12 +653,12 @@ def payload_rows(
     if table == "event_log":
         order = "id"
     else:
-        order = "COALESCE(ts, '')"
+        order = "ts"
     direction = "DESC" if newest_first else "ASC"
     where = ""
     params: list[Any] = []
     if since_iso is not None:
-        where = "WHERE COALESCE(ts, '') >= ?"
+        where = "WHERE ts >= ?"
         params.append(since_iso)
     limit_sql = ""
     if limit is not None:
@@ -680,12 +696,12 @@ def payload_rows_for_decisions(
     where = f"decision_id IN ({placeholders})"
     params: list[Any] = [*ids]
     if since_iso is not None:
-        where += " AND COALESCE(ts, '') >= ?"
+        where += " AND ts >= ?"
         params.append(since_iso)
     with _connect(base_dir) as conn:
         _ensure_schema(conn)
         rows = conn.execute(
-            f"SELECT payload_json FROM {table} WHERE {where} ORDER BY COALESCE(ts, '') ASC",
+            f"SELECT payload_json FROM {table} WHERE {where} ORDER BY ts ASC",
             params,
         ).fetchall()
     out: list[dict] = []
@@ -726,7 +742,7 @@ def delivery_actions_for_decision(decision_id: str, base_dir: Path | None = None
             SELECT delivery_action
             FROM deliveries
             WHERE decision_id = ? AND delivery_action IS NOT NULL AND delivery_action != ''
-            ORDER BY COALESCE(ts, '') ASC
+            ORDER BY ts ASC
             """,
             (decision_id,),
         ).fetchall()

@@ -64,7 +64,7 @@ Decision labels and event labels are intentionally separate. `/label` labels one
 
 ## Settings Tab
 
-The Settings tab edits local config and policy state. API key fields are masked in the collapsed view: the UI shows a small prefix/suffix preview so you can recognize the key without displaying the full value. Use the edit control beside a key field to reveal/edit it intentionally.
+The Settings tab edits local config and policy state. The primary controls are Today goal, sensitivity, and ping policy knobs; endpoint/model fields are tucked behind Advanced. API key fields are masked in the collapsed view: the UI shows a small prefix/suffix preview so you can recognize the key without displaying the full value. Use the edit control beside a key field to reveal/edit it intentionally.
 
 `Learner endpoint` configures the LLM-ICL policy learner in `harness/policies/llm_icl_v0.py`, not the message realizer. The learner is the component that decides `notch_ping` versus `no_ping`.
 

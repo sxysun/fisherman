@@ -390,7 +390,7 @@
       <span class="pill">Scope: <code>harness/</code> plus app boundary checks</span>
       <span class="pill">Smoke tests: 72 passing in CI</span>
       <span class="pill">Approx. source/docs: 55 files, 10k lines</span>
-      <span class="pill">Updated: 2026-05-25</span>
+      <span class="pill">Updated: 2026-05-26</span>
     </div>
   </header>
 
@@ -398,8 +398,8 @@
     <div class="card">
       <h2 style="margin-top:0;border-top:0;padding-top:0;">Executive Verdict</h2>
       <p><strong>The harness is architecturally coherent for a local research prototype.</strong> It has the right primitive loop: observe screen state, turn it into a candidate event, decide whether to ping, realize a goal-aware message, push it through a low-friction UI, capture outcomes, and audit policy behavior offline.</p>
-      <p><strong>It is now a serious local dogfood harness, but not yet a validated policy.</strong> The engineering gaps called out in the first audit now have concrete implementations: deterministic holdouts, endpoint trust boundaries, native metrics, durable trace lifecycle, workflow-event joins, KG priors, hard-example mining, curation records, launchd packaging, capsule respawn, masked settings keys, all-Spaces capsule behavior, and SQLite-backed read paths. The remaining gap is evidence: enough labels, outcomes, and frozen evaluation slices to justify policy changes.</p>
-      <p><strong>Best current use:</strong> dogfood on one machine with an explicit daily goal, collect labels, and use the trace data to harden the policy. Do not treat current ping quality as validated.</p>
+      <p><strong>It is now a serious local dogfood harness, but not yet a validated policy.</strong> The engineering gaps called out in the first audit now have concrete implementations: deterministic holdouts, endpoint trust boundaries, native metrics, durable trace lifecycle, workflow-event joins, optional KG priors, hard-example mining, curation records, launchd packaging, capsule respawn, masked settings keys, all-Spaces capsule behavior, a standalone API process, and SQLite-backed read paths. The remaining gap is evidence: enough labels, outcomes, and frozen evaluation slices to justify policy changes.</p>
+      <p><strong>Best current use:</strong> dogfood on one machine with an explicit daily goal, use the optional Draft goal helper only when it saves effort, collect labels, and use the trace data to harden the policy. Do not treat current ping quality as validated.</p>
     </div>
     <div class="score">
       <div class="num">7/10</div>
@@ -432,7 +432,7 @@
     <div class="phase">
       <b>2</b>
       <h3>Decide</h3>
-      <p>Apply hard safety gates, then let the LLM ICL policy decide ping vs. not-ping using the daily goal, recent workflow, priors, and labeled examples.</p>
+      <p>Apply hard safety gates, then let the LLM ICL policy decide ping vs. not-ping using the daily goal, recent workflow, optional priors, and labeled examples.</p>
     </div>
     <div class="phase">
       <b>3</b>
@@ -445,11 +445,11 @@
   <div class="cheatsheet">
     <div>
       <strong>Floating capsule</strong>
-      <p>The native UI. It shows pings, lets you answer yes/later/dismiss, exposes Pipeline/Diet/Settings, and records interaction signals.</p>
+      <p>The native UI. It shows pings, lets you answer yes/later/dismiss, exposes Pipeline/Diet/Settings, keeps endpoints behind Advanced, includes an optional Draft goal helper, and records interaction signals.</p>
     </div>
     <div>
       <strong>Dashboard at <code>:7893/dashboard</code></strong>
-      <p>The browser workbench. It shows eval reports, information diet summaries, and label/review links when the native capsule is not enough.</p>
+      <p>The browser workbench. It is served by the standalone local API process and shows eval reports, information diet summaries, and label/review links when the native capsule is not enough.</p>
     </div>
     <div>
       <strong>Local state at <code>~/.harness</code></strong>
@@ -502,13 +502,13 @@
     <div class="step">
       <div>
         <strong>The policy chooses ping or not-ping.</strong>
-        <span><code>rule_v0</code> is the hard guardrail and fallback. <code>llm_icl_v0</code> is the live policy learner: it uses in-context examples, recent trajectory, and KG-style priors.</span>
+        <span><code>rule_v0</code> is the hard guardrail and fallback. <code>llm_icl_v0</code> is the live policy learner: it uses in-context examples, recent trajectory, and optional KG-style priors.</span>
       </div>
     </div>
     <div class="step">
       <div>
         <strong>The realizer writes the actual message.</strong>
-        <span>The message is not a template tied to a rigid reason code. It is generated from the daily goal, why-now rationale, compact state, and privacy-approved screen context.</span>
+        <span>The message is not a template tied to a rigid reason code. It is generated from the daily goal, why-now rationale, compact state, and privacy-approved screen context. If the endpoint fails, a local redacted fallback message keeps the ping from disappearing.</span>
       </div>
     </div>
     <div class="step">
@@ -529,13 +529,25 @@
     <div class="node"><strong>2. Candidate synthesis</strong><small><code>candidate.py</code> snapshots screen context and current user prefs into a typed <code>CandidateEvent</code>.</small></div>
     <div class="node"><strong>3. Scene reading</strong><small>Rules tag coarse scenes. Optional VLM overlay adds specificity, sensitivity, and intent signals.</small></div>
     <div class="node"><strong>4. Short memory</strong><small><code>SessionMemory</code> tracks recent effective apps/scenes, switches, time on current app, and recent outcomes.</small></div>
-    <div class="node"><strong>5. Context packet</strong><small><code>EventContextPacket</code> freezes the exact policy input: current screen, raw/effective app identity, workflow run, 5-minute trajectory, examples, KG priors, optional wiki memory, and provenance.</small></div>
+    <div class="node"><strong>5. Context packet</strong><small><code>EventContextPacket</code> freezes the exact policy input: current screen, raw/effective app identity, workflow run, 5-minute trajectory, examples, optional KG priors, optional wiki memory, and provenance.</small></div>
     <div class="node"><strong>6. Policy</strong><small><code>rule_v0</code> applies hard gates and fallback behavior; the default <code>llm_icl_v0</code> learner chooses ping/not-ping from the frozen packet.</small></div>
     <div class="node"><strong>7. Realizer</strong><small>OpenAI-compatible chat endpoint receives daily goal, why-now, compact state, and optionally the current JPEG. Hermes may use its own long-term mind server-side.</small></div>
     <div class="node"><strong>8. Critic</strong><small>Regex critic blocks obvious secrets, long quotes, verbose output, or empty/multi-paragraph messages. LLM critic is optional.</small></div>
     <div class="node"><strong>9. Capsule + reward</strong><small>Swift capsule displays the ping, captures hover/approach/click/dismiss/timeout, and writes signal-derived reward.</small></div>
   </div>
   <p class="arrow">Fisherman -> CandidateEvent -> WorkflowEvent/Memory -> EventContextPacket -> Policy -> Realizer -> Critic -> Pending ping -> Outcome -> Reward -> Trace -> Labels/eval</p>
+
+  <h2>Daily Goal Draft Loop</h2>
+  <div class="grid two">
+    <div class="card">
+      <h3>Why it exists</h3>
+      <p>The daily goal is the strongest steering variable in the harness. The main path is still a direct text field; the collapsed Draft goal helper can synthesize a terse operational goal from a short answer when that is faster.</p>
+    </div>
+    <div class="card">
+      <h3>How it works</h3>
+      <p>The UI posts turns to <code>/goal/interview</code>. The endpoint runs locally by default so Settings does not wait on Hermes. If <code>[goal_interview].use_model = true</code>, it calls the configured OpenAI-compatible endpoint if trusted and returns either one sharper follow-up question or a proposed goal plus sensitivity. The final goal is only applied through the normal Save/<code>/goal</code> path.</p>
+    </div>
+  </div>
 
   <h2>Dataflow With Stored Objects</h2>
   <p>The paper's framing is event-first: recent temporal context plus user memory feeds a binary <em>when to assist</em> decision, and only positive decisions move to <em>how to assist</em>. The harness now has the same shape, but the object boundaries matter.</p>
@@ -558,7 +570,7 @@
     <div class="artifact">
       <strong>Policy input</strong>
       <code>EventContextPacket</code>
-      <small>Frozen decision example. It materializes exactly what the policy saw: current observation, app identity, workflow context, recent outcomes, few-shot examples, KG priors, optional wiki memory, privacy state, and provenance.</small>
+      <small>Frozen decision example. It materializes exactly what the policy saw: current observation, app identity, workflow context, recent outcomes, few-shot examples, optional KG priors, optional wiki memory, privacy state, and provenance.</small>
     </div>
     <div class="artifact">
       <strong>When policy</strong>
@@ -573,7 +585,7 @@
     <div class="artifact">
       <strong>Learning rows</strong>
       <code>Labels + outcomes</code>
-      <small>Explicit labels and usable implicit outcomes become weak training/eval examples, hard negatives, and KG-style priors.</small>
+      <small>Explicit labels and usable implicit outcomes become weak training/eval examples, hard negatives, and optional KG-style priors for ablation.</small>
     </div>
   </div>
   <div class="join-note">
@@ -775,18 +787,18 @@ p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
     </div>
     <div class="card">
       <h3>Recent prior table sample</h3>
-      <p>Current local build: <code>111</code> usable examples. Top features include:</p>
+      <p>Example prior table from an earlier local build. Top features included:</p>
       <ul>
         <li><code>kw:edit</code>: <code>p_should_ping=0.237</code>, <code>n=57.0</code></li>
         <li><code>app:google chrome</code>: <code>p_should_ping=0.257</code>, <code>n=52.8</code></li>
         <li><code>scene:coding</code>: <code>p_should_ping=0.303</code>, <code>n=30.4</code></li>
         <li><code>app_kw:google chrome|view</code>: <code>p_should_ping=0.184</code>, <code>n=27.6</code></li>
       </ul>
-      <p>This becomes soft context in the live LLM policy prompt. It should influence the policy, not override evidence from the current screen.</p>
+      <p>This is available as soft context for policy ablations. Live defaults keep it off with <code>[policy_learner].use_kg_priors = false</code> until frozen eval shows that it helps.</p>
     </div>
   </div>
   <div class="callout">
-    <p><strong>What this means:</strong> KG priors are a transparent memory hint. They answer, "In past local data, were moments like this usually helpful to ping on?" They are not a calibrated classifier yet. The next lab-grade step is comparing policy variants with and without these priors on frozen temporal splits.</p>
+    <p><strong>What this means:</strong> KG priors are a transparent memory hint. They answer, "In past local data, were moments like this usually helpful to ping on?" They are not a calibrated classifier yet, and they are not part of the live default policy. The next lab-grade step is comparing policy variants with and without these priors on frozen temporal splits.</p>
   </div>
 
   <h2>What Is Strong</h2>
@@ -813,7 +825,7 @@ p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
     </div>
     <div class="card risk-low">
       <h3>Testable seams</h3>
-      <p>The modules are small enough to unit test: gate, scene overlay, reward, trace patching, delivery lifecycle, frozen eval, and snooze behavior now have 72 smoke tests.</p>
+      <p>The modules are small enough to unit test: gate, scene overlay, reward, trace patching, delivery lifecycle, API startup, local realizer fallback, daily goal drafting, frozen eval, and snooze behavior now have 83 smoke tests.</p>
     </div>
   </div>
 
@@ -830,7 +842,7 @@ p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
     <tbody>
       <tr>
         <td>Evaluation data</td>
-        <td>Live traces, sparse retro labels, confidence-weighted implicit weak labels from notification behavior, native metrics, deterministic holdouts, KG priors, hard-example mining, frozen eval manifest generation, split assignment checks, source/confidence-weighted metrics, optional live-model attestation, and <code>harness shadow</code> now report ping rate, trace completeness, outcome capture, precision/recall/F1, false-interruption rate, missed-help rate, and simple shadow-policy comparisons.</td>
+        <td>Live traces, sparse retro labels, confidence-weighted implicit weak labels from notification behavior, native metrics, deterministic holdouts, optional KG priors, hard-example mining, frozen eval manifest generation, split assignment checks, source/confidence-weighted metrics, optional live-model attestation, and <code>harness shadow</code> now report ping rate, trace completeness, outcome capture, precision/recall/F1, false-interruption rate, missed-help rate, and simple shadow-policy comparisons.</td>
         <td>More human labels, native event-level review, disagreement analysis, stable promotion criteria, and leakage-tested RAG/similar-event retrieval before use in offline comparison.</td>
         <td class="status-bad">P0</td>
       </tr>
@@ -848,13 +860,13 @@ p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
       </tr>
       <tr>
         <td>Persistent storage</td>
-        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, deliveries, outcomes, labels, workflow events, curation, and model calls. Dashboard, metrics, replay, score, dataset mining, and shadow prefer SQLite payload rows. A CLI backfill can rebuild the sidecar from JSONL. Pending notch delivery is leased, requires displayed ack, completes on outcome, and expires stuck terminal states.</td>
+        <td>JSONL files under <code>~/.harness</code> are mirrored into <code>harness.db</code> with typed tables for candidates, decisions, traces, deliveries, outcomes, labels, workflow events, curation, and model calls. The standalone API process keeps dashboard/settings/pending separate from the policy loop. Dashboard, metrics, eval-report, dataset mining, and shadow prefer indexed SQLite payload rows. A CLI backfill can rebuild the sidecar from JSONL. Pending notch delivery is leased, requires displayed ack, becomes non-claimable after display, completes on outcome, and expires stuck terminal states.</td>
         <td>Formal migrations, retention/compaction, and automated recovery/backfill validation.</td>
         <td class="status-warn">P1</td>
       </tr>
       <tr>
         <td>Policy learning</td>
-        <td>Default live <code>llm_icl_v0</code> policy learner uses recent workflow trajectory, explicit/implicit few-shot examples, and local KG-style app/scene/keyword priors, with <code>rule_v0</code> kept as hard gate and fallback. This is useful ICL personalization, not yet a trained calibrated classifier.</td>
+        <td>Default live <code>llm_icl_v0</code> policy learner uses recent workflow trajectory and explicit/implicit few-shot examples, with <code>rule_v0</code> kept as hard gate and fallback. Local KG-style app/scene/keyword priors are available but disabled by default for ablations. This is useful ICL personalization, not yet a trained calibrated classifier.</td>
         <td>Stable labeled datasets, calibrated learned gate or promotion-tested ICL policy, exploration/exploitation discipline, and rollbackable policy versions.</td>
         <td class="status-warn">P1</td>
       </tr>
@@ -907,7 +919,7 @@ p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
         <li>Added live lab metrics for outcome capture, reward, label agreement, false interruptions, missed help, and data-readiness thresholds.</li>
         <li>Added durable trace lifecycle patching so ping decisions get trace rows before realization starts.</li>
         <li>Added <code>workflow_event_id</code> joins on candidates, decisions, and traces.</li>
-        <li>Added KG priors to the live <code>llm_icl_v0</code> policy prompt.</li>
+        <li>Added KG priors as an optional <code>llm_icl_v0</code> policy-prompt ablation, disabled by default.</li>
         <li>Added hard-example mining, curation records, and frozen eval manifest export.</li>
         <li>Added explicit precision/recall/F1 and trace-completeness metrics.</li>
         <li>Made pending notch delivery idempotent with leases, so a notch crash between poll and outcome does not silently drop a message.</li>
@@ -931,7 +943,7 @@ p_should_ping = (positive_weight + 0.5) / (total_weight + 1.0)</span>
   </div>
   <div class="card risk-med">
     <h3>P1: Storage has a typed sidecar, but not a migration contract</h3>
-    <p>The harness now mirrors JSONL into SQLite and dashboard/metrics/replay/score/dataset builders/shadow prefer SQLite payload rows. It has backfill and delivery-lifecycle recovery coverage, but still needs explicit migration tests across old local databases and an automatic retention/compaction policy before storage can be treated as long-lived lab infrastructure.</p>
+    <p>The harness now mirrors JSONL into SQLite and dashboard/metrics/eval-report/dataset builders/shadow prefer indexed SQLite payload rows. It has backfill and delivery-lifecycle recovery coverage, but still needs explicit migration tests across old local databases and an automatic retention/compaction policy before storage can be treated as long-lived lab infrastructure.</p>
   </div>
   <div class="card risk-med">
     <h3>P1: Replay is still not the real system</h3>

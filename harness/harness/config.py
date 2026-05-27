@@ -66,6 +66,13 @@ kg_window = "30d"
 min_interval_sec = 15
 min_confidence_to_ping = 0.55
 
+[goal_interview]
+# Keep daily goal drafting local by default. Set use_model=true if you want the
+# interview to wait on the configured LLM endpoint for a richer synthesis.
+enabled = true
+use_model = false
+timeout_sec = 2
+
 [scene]
 llm_fallback_enabled = false
 
@@ -149,6 +156,9 @@ skip_vision_on_sensitive_ocr = true
 # on the JPEG and mask matching text boxes before attaching the image. Failure
 # still falls back to skip_vision_on_sensitive_ocr.
 redact_sensitive_screenshots = true
+# If the model endpoint fails, dispatch a local terse message from why_now /
+# daily_goal instead of silently losing a would-ping decision.
+fallback_on_error = true
 
 [realizer.tools]
 query_fisherman_history = false

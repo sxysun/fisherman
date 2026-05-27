@@ -16,6 +16,7 @@ import structlog
 from . import config as config_mod
 from .store import (
     HARNESS_DIR,
+    append_jsonl,
     ensure_dirs,
     read_policy_state,
     tail_jsonl,
@@ -319,13 +320,32 @@ def test(intent: str, push: bool, message: Optional[str], app: Optional[str]) ->
         click.echo("")
         click.echo("calling realizer...")
 
-        r = await realizer_mod.realize(
-            intent=intent,
-            event=event,
-            memory=mem,
-            fisherman=fc,
-            config=dict(cfg["realizer"]) | {"privacy": cfg.get("privacy", {})},
-        )
+        realizer_cfg = dict(cfg["realizer"]) | {"privacy": cfg.get("privacy", {})}
+        state = read_policy_state()
+        try:
+            r = await realizer_mod.realize(
+                intent=intent,
+                event=event,
+                memory=mem,
+                fisherman=fc,
+                config=realizer_cfg,
+                daily_goal=state.get("daily_goal", ""),
+                why_now=message or "manual test ping",
+            )
+        except Exception as e:
+            r = realizer_mod.fallback_realization(
+                event=event,
+                daily_goal=state.get("daily_goal", ""),
+                why_now=message or "manual test ping",
+                error=f"{type(e).__name__}: {e}",
+            )
+        if r.error and bool(realizer_cfg.get("fallback_on_error", True)):
+            r = realizer_mod.fallback_realization(
+                event=event,
+                daily_goal=state.get("daily_goal", ""),
+                why_now=message or "manual test ping",
+                error=r.error,
+            )
         click.echo(f"  latency:  {r.latency_ms} ms")
         click.echo(f"  tokens:   in={r.tokens_in} out={r.tokens_out}")
         click.echo(f"  prompt:   {r.prompt_version}")
@@ -339,9 +359,11 @@ def test(intent: str, push: bool, message: Optional[str], app: Optional[str]) ->
             click.echo(f"  tools:    {len(r.tool_calls)} call(s)")
             for tc in r.tool_calls:
                 click.echo(f"    - {tc.name}({tc.arguments}) → {tc.result_summary}")
-        if r.error:
+        if r.error and r.model != "local_fallback":
             click.echo("")
             raise click.ClickException(f"realizer error: {r.error}")
+        if r.error:
+            click.echo(f"  fallback: local realization used because {r.error[:120]}")
         click.echo("")
         click.echo(f"  message:  {r.message!r}")
 
@@ -372,6 +394,7 @@ def test(intent: str, push: bool, message: Optional[str], app: Optional[str]) ->
                 confidence=1.0,
                 propensity=1.0,
             )
+            append_jsonl("decisions.jsonl", decision.to_dict() | {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
             push_cfg = dict(cfg.get("push", {}))
             push_cfg["harness_port"] = cfg["daemon"]["http_port"]
             delivery = await push_mod.dispatch(decision, r, push_cfg)

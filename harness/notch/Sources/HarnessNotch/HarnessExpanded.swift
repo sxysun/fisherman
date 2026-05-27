@@ -381,6 +381,13 @@ private struct SettingsNotchPanel: View {
     @State private var loading = false
     @State private var loaded = false
     @State private var saving = false
+    @State private var interviewBusy = false
+    @State private var interviewQuestion = "What should the harness steer you toward today, and what should it pull you away from?"
+    @State private var interviewAnswer = ""
+    @State private var interviewTurns: [[String: String]] = []
+    @State private var interviewStatus = "ready"
+    @State private var showGoalDraft = false
+    @State private var showAdvanced = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -406,6 +413,61 @@ private struct SettingsNotchPanel: View {
                                     selected: model.sensitivity == value,
                                     action: { model.sensitivity = value }
                                 )
+                            }
+                        }
+
+                        HStack(spacing: 8) {
+                            SettingsChip(
+                                title: showGoalDraft ? "Hide draft" : "Draft goal",
+                                selected: showGoalDraft,
+                                action: { showGoalDraft.toggle() }
+                            )
+                            SettingsChip(
+                                title: "Clear",
+                                selected: false,
+                                action: { model.dailyGoal = "" }
+                            )
+                        }
+
+                        if showGoalDraft {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(interviewQuestion)
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(.white.opacity(0.82))
+                                    .lineLimit(2)
+                                TextEditor(text: $interviewAnswer)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .scrollContentBackground(.hidden)
+                                    .padding(7)
+                                    .frame(minHeight: 48, maxHeight: 64)
+                                    .background(NotchInputBackground())
+                                HStack(spacing: 8) {
+                                    Button(interviewBusy ? "Thinking..." : "Draft") {
+                                        Task { await sendInterviewTurn() }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(interviewBusy)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Capsule().fill(Color.white.opacity(0.08)))
+
+                                    Button("Reset") {
+                                        interviewTurns = []
+                                        interviewAnswer = ""
+                                        interviewQuestion = "What should the harness steer you toward today, and what should it pull you away from?"
+                                        interviewStatus = "ready"
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Capsule().fill(Color.white.opacity(0.06)))
+
+                                    NotchMutedText(interviewStatus)
+                                        .lineLimit(1)
+                                }
+                                .font(.system(size: 10.8, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.78))
                             }
                         }
                     }
@@ -448,36 +510,48 @@ private struct SettingsNotchPanel: View {
                         )
                     }
 
-                    SettingsBand(title: "Learner endpoint") {
-                        SettingsTextField(title: "Base URL", text: $model.policyLearnerBaseURL)
-                        SettingsTextField(title: "Model", text: $model.policyLearnerModel)
-                        SettingsSecretField(title: "API key", text: $model.policyLearnerApiKey)
-                        HStack(spacing: 10) {
-                            Stepper("Examples \(model.policyLearnerMaxExamples)", value: $model.policyLearnerMaxExamples, in: 0...64, step: 2)
-                            Stepper("Call gap \(model.policyLearnerMinInterval)s", value: $model.policyLearnerMinInterval, in: 0...120, step: 5)
-                        }
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.72))
+                    HStack(spacing: 8) {
+                        SettingsChip(
+                            title: showAdvanced ? "Hide advanced" : "Advanced",
+                            selected: showAdvanced,
+                            action: { showAdvanced.toggle() }
+                        )
+                        NotchMutedText(model.statusLine)
+                            .lineLimit(1)
                     }
 
-                    SettingsBand(title: "Message model") {
-                        SettingsTextField(title: "Base URL", text: $model.realizerBaseURL)
-                        SettingsTextField(title: "Model", text: $model.realizerModel)
-                        SettingsSecretField(title: "API key", text: $model.realizerApiKey)
-                        HStack(spacing: 8) {
-                            SettingsToggle(title: "Vision", isOn: $model.includeVision)
-                            SettingsToggle(title: "Secret OCR guard", isOn: $model.skipVisionOnSensitiveOCR)
-                            SettingsToggle(title: "Screenshot redaction", isOn: $model.redactSensitiveScreenshots)
+                    if showAdvanced {
+                        SettingsBand(title: "Learner endpoint") {
+                            SettingsTextField(title: "Base URL", text: $model.policyLearnerBaseURL)
+                            SettingsTextField(title: "Model", text: $model.policyLearnerModel)
+                            SettingsSecretField(title: "API key", text: $model.policyLearnerApiKey)
+                            HStack(spacing: 10) {
+                                Stepper("Examples \(model.policyLearnerMaxExamples)", value: $model.policyLearnerMaxExamples, in: 0...64, step: 2)
+                                Stepper("Call gap \(model.policyLearnerMinInterval)s", value: $model.policyLearnerMinInterval, in: 0...120, step: 5)
+                            }
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.72))
                         }
-                    }
 
-                    SettingsBand(title: "Scene reader") {
-                        HStack(spacing: 8) {
-                            SettingsToggle(title: "Enabled", isOn: $model.vlmEnabled)
-                            SettingsTextField(title: "Model", text: $model.vlmModel)
+                        SettingsBand(title: "Message model") {
+                            SettingsTextField(title: "Base URL", text: $model.realizerBaseURL)
+                            SettingsTextField(title: "Model", text: $model.realizerModel)
+                            SettingsSecretField(title: "API key", text: $model.realizerApiKey)
+                            HStack(spacing: 8) {
+                                SettingsToggle(title: "Vision", isOn: $model.includeVision)
+                                SettingsToggle(title: "Secret OCR guard", isOn: $model.skipVisionOnSensitiveOCR)
+                                SettingsToggle(title: "Screenshot redaction", isOn: $model.redactSensitiveScreenshots)
+                            }
                         }
-                        SettingsTextField(title: "Base URL", text: $model.vlmBaseURL)
-                        SettingsSecretField(title: "API key", text: $model.vlmApiKey)
+
+                        SettingsBand(title: "Scene reader") {
+                            HStack(spacing: 8) {
+                                SettingsToggle(title: "Enabled", isOn: $model.vlmEnabled)
+                                SettingsTextField(title: "Model", text: $model.vlmModel)
+                            }
+                            SettingsTextField(title: "Base URL", text: $model.vlmBaseURL)
+                            SettingsSecretField(title: "API key", text: $model.vlmApiKey)
+                        }
                     }
 
                     HStack(spacing: 8) {
@@ -552,6 +626,40 @@ private struct SettingsNotchPanel: View {
         await model.save()
         await model.refreshSettings()
         saving = false
+    }
+
+    private func sendInterviewTurn() async {
+        let answer = interviewAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !answer.isEmpty {
+            interviewTurns.append(["question": interviewQuestion, "answer": answer])
+        }
+        interviewBusy = true
+        let result = await HarnessAPI.morningInterview(turns: interviewTurns)
+        interviewBusy = false
+        guard let result else {
+            interviewStatus = "interview unavailable"
+            return
+        }
+        let status = result["status"].string
+        if status == "needs_more_input" {
+            let next = result["question"].string
+            interviewQuestion = next.isEmpty ? "What would count as a useful interruption today?" : next
+            interviewAnswer = ""
+            interviewStatus = "follow-up"
+            return
+        }
+        let proposed = result["proposed_goal"].string
+        if !proposed.isEmpty {
+            model.dailyGoal = proposed
+            let sensitivity = result["sensitivity"].string
+            if ["gentle", "balanced", "responsive"].contains(sensitivity) {
+                model.sensitivity = sensitivity
+            }
+            interviewAnswer = ""
+            interviewStatus = "inserted"
+            return
+        }
+        interviewStatus = "no proposal returned"
     }
 
     private func openLocal(_ path: String) {

@@ -25,10 +25,11 @@ cd notch && ./build.sh && cd ..
 .venv/bin/harness install-launchd
 
 # Hover the Harness floating capsule → Settings.
-# Write what you're trying to do today, set sensitivity, and save.
+# Write today's goal directly; use Draft goal only when helpful.
+# Set sensitivity and save.
 # Pings will appear in the floating capsule.
 
-# Force a test ping (skips the gate, calls the LLM directly)
+# Force a test ping (skips the gate; uses local fallback if the LLM is down)
 .venv/bin/harness test --intent focus_nudge --push
 
 # Label retro decisions to seed personalization data
@@ -37,7 +38,7 @@ cd notch && ./build.sh && cd ..
 
 ## Architecture in one paragraph
 
-A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter when enabled), and groups adjacent candidates into local workflow runs keyed by active app/window plus sleep/capture-gap boundaries. Fisherman's raw `frontmost_app` is preserved, but the harness also computes a conservative `effective_app` from OCR menu-bar evidence and marks `app_metadata_mismatch` when app metadata looks stale. Before the live LLM policy runs, the harness persists an `EventContextPacket`: a frozen policy-input row containing the current observation, raw/effective app identity, current workflow run, recent 5-minute trajectory, short memory, local KG-style priors, optional long-term memory snippets, few-shot explicit/implicit examples, privacy state, and provenance. The default live policy is `llm_icl_v0`: it runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from that packet. Low-rate holdouts are logged for counterfactual measurement; exploration pings default to 3% on eligible ambiguous moments so the harness can learn when it is too timid without becoming noisy. Every decision immediately gets a trace row with a lifecycle stage before realization starts, then that trace is patched through realizer, critic, dispatch, claim, and outcome stages. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. Hermes may use its own long-term memory server-side; direct policy retrieval from long-term memory is feature-flagged off by default, text-only when enabled, allowlist-checked, and recorded in `retrieved_wiki_memory` for audit/ablation. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift floating capsule claims the pending payload via HTTP polling and renders it; that claim is logged separately from the original ping decision so eval can distinguish queued, claimed, and missing-outcome cases. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, replay, score, shadow comparison, dataset mining, and the eval report prefer indexed read paths where available.
+A Python daemon polls Fisherman's HTTP every 5s, builds a CandidateEvent from screen metadata + OCR, optionally enriches it with a per-candidate VLM scene tag (Gemma-3-4b-it via OpenRouter when enabled), and groups adjacent candidates into local workflow runs keyed by active app/window plus sleep/capture-gap boundaries. The localhost API on `:7893` runs as a supervised child process instead of sharing the daemon's policy loop, so dashboard/metrics/eval/labeler/settings requests do not stall screen polling or capsule `/pending` checks. Fisherman's raw `frontmost_app` is preserved, but the harness also computes a conservative `effective_app` from OCR menu-bar evidence and marks `app_metadata_mismatch` when app metadata looks stale. Before the live LLM policy runs, the harness persists an `EventContextPacket`: a frozen policy-input row containing the current observation, raw/effective app identity, current workflow run, recent 5-minute trajectory, short memory, optional local KG-style priors, optional long-term memory snippets, few-shot explicit/implicit examples, privacy state, and provenance. The default live policy is `llm_icl_v0`: it runs `rule_v0` first for hard gates/fallback, then asks an OpenAI-compatible LLM to choose `notch_ping` or `no_ping` from that packet. KG priors remain available for ablations but are disabled by default with `[policy_learner].use_kg_priors = false`. Low-rate holdouts are logged for counterfactual measurement; exploration pings default to 3% on eligible ambiguous moments so the harness can learn when it is too timid without becoming noisy. Every decision immediately gets a trace row with a lifecycle stage before realization starts, then that trace is patched through realizer, critic, dispatch, dequeue, displayed ack, and outcome stages. If ping is warranted, the realizer calls an OpenAI-compatible LLM with the current screenshot + a `goal_aware_v1` prompt that incorporates the user's daily intention. Hermes may use its own long-term memory server-side; direct policy retrieval from long-term memory is feature-flagged off by default, text-only when enabled, allowlist-checked, and recorded in `retrieved_wiki_memory` for audit/ablation. A model endpoint allowlist blocks untrusted hosts before any prompt or image leaves the machine. Local OCR privacy preflight redacts secret-like text and, when the frame looks sensitive, reruns local Apple Vision OCR on the JPEG to mask key/token text boxes before any screenshot model call; if masking fails, the image is suppressed. Model calls are logged to a privacy-safe audit ledger with endpoint/model/status/image metadata but no raw prompts or screenshots. A critic vets the message, then a Swift floating capsule claims the pending payload via HTTP polling and renders it; displayed pings are marked non-claimable until outcome/expiry, so an expired lease cannot make the same ping reappear. User reactions (click / hover / approach / dismiss / timeout) feed back as signal-derived rewards and confidence-weighted implicit weak labels. Runtime events are still written to JSONL for debuggability/export and mirrored into `~/.harness/harness.db`; dashboard, metrics, dataset mining, and the eval report use indexed SQLite read paths where available and fall back to JSONL for older installs.
 
 ## Configuration
 
@@ -64,8 +65,14 @@ enabled = true
 base_url = "http://3.82.134.133:8642"
 model = "hermes-agent"
 max_examples = 16
-kg_window = "30d"                         # local app/scene/keyword priors
+use_kg_priors = false                    # optional ablation memory hint, off by default
+kg_window = "30d"                         # local app/scene/keyword prior window
 min_confidence_to_ping = 0.55
+
+[goal_interview]                         # optional draft helper in Settings → Today
+enabled = true
+use_model = false                         # local by default; true waits on the model endpoint
+timeout_sec = 2
 
 [realizer]
 base_url = "http://3.82.134.133:8642"    # OpenAI-compatible
@@ -74,6 +81,7 @@ api_key = ""                             # set in floating capsule Settings or H
 include_vision = true                     # send screenshot
 skip_vision_on_sensitive_ocr = true       # do not attach image if OCR looks secret-like
 redact_sensitive_screenshots = true       # first try local OCR box masking
+fallback_on_error = true                  # local terse message if endpoint fails
 
 [privacy]
 block_untrusted_model_hosts = true
@@ -106,6 +114,12 @@ enabled = true                              # persist exact model-facing policy 
 ```
 
 The Settings tab also exposes learner controls. `Examples` is `[policy_learner].max_examples`: the maximum number of explicit/implicit few-shot examples sent to the LLM ping/not-ping learner. It is a cap, not the current label count. `Label coverage` in Pipeline/Eval is explicit retro labels divided by decisions in the selected window, so `0.0%` means no human labels in that window even if implicit hover/dismiss/timeout signal exists.
+
+## Daily goal drafting
+
+The floating capsule Settings tab keeps the daily goal as the primary control. A collapsed `Draft goal` helper can turn a short answer into a proposed goal plus sensitivity via `POST /goal/interview`; by default this is local and deterministic so Settings does not block on Hermes. Set `[goal_interview].use_model = true` if you want it to call the configured policy learner or realizer endpoint with the same model-host trust checks. The proposed goal is inserted into the Today field; pressing Save applies it through the existing `/goal` state path.
+
+Every draft request is written to `~/.harness/goal_interviews.jsonl`. When model mode is enabled, call metadata is recorded in `model_calls.jsonl` with `purpose="goal_interview"` and no raw prompt or secret payload.
 
 Inspect frozen policy inputs with:
 
@@ -186,7 +200,7 @@ The browser labeler now has two scopes: `/label` for exact decision moments and 
 
 Runtime state lives outside the repo at `~/.harness/`. See `HANDOFF.md` for the full layout.
 
-The canonical append path still writes JSONL files such as `candidates.jsonl`, `workflow_events.jsonl`, `decisions.jsonl`, `deliveries.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, `curation.jsonl`, and `model_calls.jsonl`. Each append is also mirrored into `~/.harness/harness.db` event history, with typed tables for the core candidate/workflow/decision/trace/delivery/outcome/model/label/curation streams. Trace lifecycle patching and late outcome attachment update both `traces.jsonl` and the typed SQLite trace row. Dashboard, metrics, replay, score, dataset mining, and shadow comparison read from SQLite when the sidecar is present and fall back to JSONL for old installs. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
+The canonical append path still writes JSONL files such as `candidates.jsonl`, `workflow_events.jsonl`, `decisions.jsonl`, `deliveries.jsonl`, `traces.jsonl`, `outcomes.jsonl`, `retro_labels.jsonl`, `curation.jsonl`, `goal_interviews.jsonl`, and `model_calls.jsonl`. Each append is also mirrored into `~/.harness/harness.db` event history, with typed tables for the core candidate/workflow/decision/trace/delivery/outcome/model/label/curation streams. Trace lifecycle patching and late outcome attachment update both `traces.jsonl` and the typed SQLite trace row; large trace files use SQLite as the live patch plane so a missing manual/synthetic decision cannot trigger a full `traces.jsonl` rewrite. Dashboard, metrics, dataset mining, and eval-report read from indexed SQLite when the sidecar is present and fall back to JSONL for old installs. Use `harness storage-backfill --reset` to mirror existing JSONL history into a fresh sidecar.
 
 Retention is intentionally conservative right now: JSONL and SQLite are append-mostly so the eval trail is inspectable. There is not yet an automatic prune/compact job for `~/.harness`; treat retention/compaction as the next storage-hardening item once the eval protocol is stable.
 
@@ -196,4 +210,4 @@ Retention is intentionally conservative right now: JSONL and SQLite are append-m
 .venv/bin/python -m pytest tests/test_smoke.py
 ```
 
-The smoke suite currently has 72 tests. It covers schemas, config default merging, workflow eventization, trace lifecycle patching, delivery ack/expiry handling, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay/backoff, gate, LLM ICL policy, KG priors, hard-example mining, frozen manifest eval, split assignment checks, live-model attestation, source weighting, sleep/resume continuity, experiments, launchd plist generation, labeler queueing, metrics, information-diet reporting, shadow eval, critic, and reward.
+The smoke suite currently has 83 tests. It covers schemas, config default merging, workflow eventization, trace lifecycle patching, delivery ack/expiry handling, pending lease races, standalone API startup, store/SQLite mirroring, privacy/trust checks, scene tagger, VLM overlay/backoff, gate, LLM ICL policy, optional KG priors, local realizer fallback, daily-goal draft fallback/model paths, hard-example mining, frozen manifest eval, split assignment checks, live-model attestation, source weighting, sleep/resume continuity, experiments, launchd plist generation, labeler queueing, metrics, information-diet reporting, shadow eval, critic, and reward.

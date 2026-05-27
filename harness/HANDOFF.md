@@ -19,21 +19,26 @@ The harness produces **traces**: structured logs of (state, decision, message, o
 
 ---
 
-## The five-process picture
+## The local process picture
 
 ```
 ┌─────────────────────────┐    HTTP :7892    ┌─────────────────────────┐
 │  Fisherman daemon       │◀─────────────────│  Harness daemon (Python)│
-│  (user has installed)   │   (read-only)    │  port :7893             │
+│  (user has installed)   │   (read-only)    │  poll/policy loop       │
 │                         │                  │                         │
 │  /status /frames /query │                  │  poll → scene tag →     │
 │  /transcripts           │                  │  memory → gate →        │
 │                         │                  │  if ping: realizer →    │
 │  captures screen, runs  │                  │  critic → push          │
 │  Apple Vision OCR       │                  │                         │
-└─────────────────────────┘                  └─────────────────────────┘
-                                                  │             ▲
-                                          HTTPS   │             │  HTTP :7893
+└─────────────────────────┘                  └──────────┬──────┘
+                                                        │ supervises
+                                                ┌───────▼──────────┐
+                                                │ API server :7893 │◀──────────┐
+                                                │ settings/pending │           │
+                                                └───────┬──────────┘           │
+                                                  │     │                      │
+                                          HTTPS   │     │ HTTP :7893           │
                                    to OpenRouter  │             │
                                        (VLM)      ▼             │
                               ┌─────────────────────┐    ┌──────────────────┐
@@ -66,7 +71,8 @@ harness/
 ├── harness/                      Python package
 │   ├── cli.py                    `harness <verb>` CLI
 │   ├── daemon.py                 the loop: poll → scene → gate → realize → critic → push
-│   ├── server.py                 HTTP server on :7893 (/pending /outcome /goal etc)
+│   ├── api_server.py             supervised standalone HTTP process on :7893
+│   ├── server.py                 aiohttp routes (/pending /outcome /goal /dashboard etc)
 │   ├── fisherman_client.py       HTTP client to Fisherman (only file aware of its API)
 │   ├── candidate.py              builds CandidateEvent from Fisherman reads
 │   ├── scene.py                  rule-based scene tagger (fast path)
@@ -75,6 +81,7 @@ harness/
 │   ├── workflow_events.py        local app/window run eventizer for policy trajectory
 │   ├── app_identity.py           raw vs OCR-inferred effective app identity
 │   ├── context_packets.py        frozen policy-input packet builder
+│   ├── goal_interview.py         optional goal draft helper → synthesized daily goal
 │   ├── long_term_memory.py       optional text-only Hermes/mind policy bridge
 │   ├── gate.py                   loads policy module by name
 │   ├── realizer.py               openai-compatible agent loop, sends vision JPEG
@@ -127,7 +134,7 @@ harness/
 │   │   └── HarnessState.swift    ObservedObject for the live capsule/ping
 │   └── build.sh                  → installs binary to ~/.harness/HarnessNotch
 │
-└── tests/test_smoke.py           72 tests; pytest passes
+└── tests/test_smoke.py           83 tests; pytest passes
 ```
 
 State on disk (outside the repo):
@@ -146,7 +153,9 @@ State on disk (outside the repo):
 ├── context_packets.jsonl         exact model-facing packet per llm_icl_v0 decision
 ├── retro_labels.jsonl            from the labeling UI
 ├── curation.jsonl                local retain/exclude/delete/blur decisions
+├── goal_interviews.jsonl         goal draft turns and proposed goals
 ├── model_calls.jsonl             privacy-safe model-call audit rows
+├── api-server.log                standalone :7893 API process log
 ├── harness.db                    SQLite sidecar with typed query tables
 ├── memory/
 │   ├── session.jsonl
@@ -188,14 +197,25 @@ User flow once it's running:
 ## Current state — what works
 
 ```
+✅ Local API responsiveness is separated from the policy loop
+   - The daemon launches `harness.api_server` as a supervised child process.
+     Heavy dashboard/eval/settings requests no longer share the screen-polling
+     loop, so local API stalls do not stop capture, policy ticks, or notch
+     polling.
+   - Dashboard, metrics, and eval handlers offload heavy work from aiohttp.
+     Dashboard and metrics prefer typed SQLite/indexed read paths; eval-report
+     may still take a few seconds but no longer blocks `/status` or `/pending`.
+   - Latest live timing after restart: `/status` and `/pending` answered in
+     2-4ms while dashboard/metrics/eval were running concurrently.
+
 ✅ End-to-end pipeline live
-   poll → scene → memory/workflow → context packet → gate → trace → realizer → critic → push → claim → outcome
+   poll → scene → memory/workflow → context packet → gate → trace → realizer → critic → push → dequeue/display ack → outcome
    - A trace is appended immediately after each decision and patched through
      lifecycle stages, so ping decisions are no longer allowed to disappear
      before realization or delivery.
    - `llm_icl_v0` now persists an `EventContextPacket` before the model call;
      decisions include `evidence.context_packet_id` so audits can recover the
-     exact current observation, 5-minute workflow context, examples, KG priors,
+     exact current observation, 5-minute workflow context, examples, optional KG priors,
      and privacy/provenance state used by the binary policy.
    - Fisherman's raw `frontmost_app` is preserved, but policy-facing packets
      also include `effective_app` and `app_identity`. Workflow/memory/prior
@@ -209,10 +229,20 @@ User flow once it's running:
    - Realizer (hermes-agent, multimodal): sees current JPEG when composing messages
      unless local OCR privacy preflight suppresses image attachment; sensitive
      JPEGs are locally masked first when Apple Vision can locate matching boxes
+   - If the configured realizer endpoint fails, `[realizer].fallback_on_error`
+     defaults to true and dispatches a local terse message from `why_now` or
+     the daily goal. The trace still records `realizer_failed` and
+     `realizer_fallback`, so endpoint failures do not silently erase pings.
    Together: VLM can compensate when Fisherman's frontmost_app metadata is stale
 
 ✅ Goal-driven model
    - Daily goal field in the floating capsule Settings tab
+   - Optional collapsed Draft goal helper in the Today settings band:
+     `/goal/interview` asks one follow-up or proposes a daily goal, and Save
+     applies that goal through the existing `/goal` state path
+   - Drafting is local/deterministic by default so Settings stays responsive.
+     Set `[goal_interview].use_model = true` to opt into the configured
+     OpenAI-compatible endpoint with the same model-host trust checks.
    - Sensitivity (gentle/balanced/responsive) → cooldown_min mapping
    - Single goal_aware_v1.md prompt; no fixed intent catalog
    - `reason_codes` stay machine-readable for audit/training; `why_now` is the
@@ -290,8 +320,10 @@ User flow once it's running:
    - `harness kg-priors --since 30d` builds local KG-style priors from explicit
      labels and usable implicit outcomes (`app`, `scene`, `app_scene`,
      keyword, app+keyword)
-   - `llm_icl_v0` includes matching KG priors in the policy prompt alongside
-     workflow trajectory and few-shot examples
+   - `llm_icl_v0` can include matching KG priors in the policy prompt alongside
+     workflow trajectory and few-shot examples, but live defaults keep this
+     off with `[policy_learner].use_kg_priors = false`; use it for ablations
+     before trusting it as policy memory
    - `harness hard-examples --since 30d` mines useful pings, dismissed/ignored
      pings, context-matched hard negatives, and missed-help candidates
    - `harness freeze-eval` writes sanitized, time-ordered train/validation/test
@@ -350,7 +382,7 @@ User flow once it's running:
    - Trace lifecycle patching and late outcome attachment update both
      `traces.jsonl` and the typed trace row
    - `harness storage-backfill --reset` rebuilds the sidecar from existing JSONL
-   - Dashboard, metrics, replay, score, dataset mining, and shadow comparison
+   - Dashboard, metrics, eval-report, dataset mining, and shadow comparison
      prefer typed SQLite payload rows and fall back to JSONL when the sidecar
      is absent
 
@@ -367,6 +399,9 @@ User flow once it's running:
 ✅ Idempotent pending delivery
    - `/pending` now leases the oldest pending payload instead of deleting it
      at poll time
+   - `/delivery-ack` marks a displayed ping as non-claimable while it waits
+     for outcome/expiry, so an expired lease cannot make the same ping appear
+     twice after the user already saw it
    - `/outcome` removes the pending payload only after feedback is recorded
    - If HarnessNotch crashes between poll and outcome, the lease expires and
      the message can be claimed again
@@ -399,6 +434,14 @@ User flow once it's running:
    enabled, allowlist-checked, and persisted into `retrieved_wiki_memory`.
    A dedicated non-generative Hermes/mind retrieval API would still be cleaner
    than provider-chat retrieval.
+
+⚠ Hermes endpoint health still needs a separate debug pass
+   The local harness path is responsive, but recent goal-interview/model calls
+   fell back locally because the configured Hermes-compatible chat endpoint
+   returned `502 agent_incomplete` / timed out. That is intentionally non-fatal
+   for the harness now: pings use a local realization fallback, and daily goal
+   drafting is local by default. Message quality and opt-in model-generated
+   goal drafts still depend on fixing the Hermes host/service.
 
 ⚠ Settings reload is partial
    Goal, sensitivity, policy state, and several capsule-facing controls update
@@ -436,9 +479,11 @@ User flow once it's running:
 
 ### Tier 1 — actually use it
 
-1. **Dogfood for a day.** Set a goal in the floating capsule Settings tab in
-   the morning. Let it run. Pay attention to what fires, what should have fired,
-   and whether ignored timeouts are correctly treated as attention-cost signal.
+1. **Dogfood for a day.** Set a concrete daily goal in the floating capsule
+   Settings tab, save it, and let it run. Use Draft goal only when helpful.
+   Pay attention to
+   what fires, what should have fired, and whether ignored timeouts are
+   correctly treated as attention-cost signal.
 
 2. **Label 20-30 retros.** Open `:7893/label`, drag, press 1-3. This is
    the single highest-leverage thing right now — it unlocks recall metrics

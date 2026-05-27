@@ -454,66 +454,77 @@ async def _tick(
     await _append_jsonl_async("traces.jsonl", trace.to_dict())
     await _append_jsonl_async("decisions.jsonl", decision_row)
     await _patch_trace_async(decision.decision_id, {}, lifecycle_stage="realizer_started")
+    realizer_cfg = dict(config["realizer"]) | {"privacy": config.get("privacy", {})}
+    why_now = (getattr(decision, "why_now", None) or ", ".join(decision.reason_codes))
+    used_realizer_fallback = False
     try:
         realization = await realizer_mod.realize(
             intent=decision.intent or "goal_aware",
             event=event,
             memory=mem_snap,
             fisherman=fc,
-            config=dict(config["realizer"]) | {"privacy": config.get("privacy", {})},
+            config=realizer_cfg,
             daily_goal=daily_goal,
-            why_now=(getattr(decision, "why_now", None) or ", ".join(decision.reason_codes)),
+            why_now=why_now,
         )
         trace.realization = realization.to_dict()
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
         log.warning("realizer_exception", error=error)
-        trace.realization = {
-            "model": str((config.get("realizer") or {}).get("model") or ""),
-            "base_url": str((config.get("realizer") or {}).get("base_url") or ""),
-            "prompt_version": "unavailable",
-            "message": "",
-            "tool_calls": [],
-            "tokens_in": 0,
-            "tokens_out": 0,
-            "latency_ms": 0,
-            "vision_used": False,
-            "image_bytes": 0,
-            "privacy_flags": [],
-            "privacy_provenance": {},
-            "error": error,
-        }
+        realization = realizer_mod.fallback_realization(
+            event=event,
+            daily_goal=daily_goal,
+            why_now=why_now,
+            error=error,
+        )
+        used_realizer_fallback = True
+        trace.realization = realization.to_dict()
         await _patch_trace_async(
             decision.decision_id,
             {"realization": trace.realization},
             lifecycle_stage="realizer_failed",
             lifecycle_extra={"error": error},
         )
-        trace.delivery = {"pushed": False, "channel": "skipped", "error": error}
         await _patch_trace_async(
             decision.decision_id,
-            {"delivery": trace.delivery},
-            lifecycle_stage="terminal_skipped",
-            lifecycle_extra={"error": error},
+            {"realization": trace.realization},
+            lifecycle_stage="realizer_fallback",
+            lifecycle_extra={"message_chars": len(realization.message)},
         )
-        return
-    await _patch_trace_async(
-        decision.decision_id,
-        {"realization": trace.realization},
-        lifecycle_stage="realizer_failed" if realization.error or not realization.message.strip() else "realizer_done",
-        lifecycle_extra={"latency_ms": realization.latency_ms, "vision_used": realization.vision_used},
-    )
+    if not used_realizer_fallback:
+        await _patch_trace_async(
+            decision.decision_id,
+            {"realization": trace.realization},
+            lifecycle_stage="realizer_failed" if realization.error or not realization.message.strip() else "realizer_done",
+            lifecycle_extra={"latency_ms": realization.latency_ms, "vision_used": realization.vision_used},
+        )
 
-    if realization.error or not realization.message.strip():
+    if not used_realizer_fallback and (realization.error or not realization.message.strip()):
         log.warning("realizer_failed", error=realization.error)
-        trace.delivery = {"pushed": False, "channel": "skipped"}
+        if not bool(realizer_cfg.get("fallback_on_error", True)):
+            trace.delivery = {"pushed": False, "channel": "skipped"}
+            await _patch_trace_async(
+                decision.decision_id,
+                {"delivery": trace.delivery},
+                lifecycle_stage="terminal_skipped",
+                lifecycle_extra={"error": realization.error or "empty_message"},
+            )
+            return
+        fallback_error = realization.error or "empty_message"
+        realization = realizer_mod.fallback_realization(
+            event=event,
+            daily_goal=daily_goal,
+            why_now=why_now,
+            error=fallback_error,
+        )
+        used_realizer_fallback = True
+        trace.realization = realization.to_dict()
         await _patch_trace_async(
             decision.decision_id,
-            {"delivery": trace.delivery},
-            lifecycle_stage="terminal_skipped",
-            lifecycle_extra={"error": realization.error or "empty_message"},
+            {"realization": trace.realization},
+            lifecycle_stage="realizer_fallback",
+            lifecycle_extra={"error": fallback_error, "message_chars": len(realization.message)},
         )
-        return
 
     critic_cfg = dict(config.get("critic", {}))
     critic_cfg["privacy"] = config.get("privacy", {})

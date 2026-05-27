@@ -8,7 +8,7 @@ The harness now separates raw telemetry from the model-facing decision example.
 `CandidateEvent` remains a thin atomic screen tick. `WorkflowEvent` groups ticks
 into app/window task runs. `EventContextPacket` is the frozen policy input: the
 exact current observation, recent 5-minute workflow trajectory, short memory,
-examples, KG-style priors, and provenance used for one binary `ping`/`no_ping`
+examples, optional KG-style priors, and provenance used for one binary `ping`/`no_ping`
 decision.
 
 This follows the useful part of ProAgentBench: evaluate proactive assistance at
@@ -70,7 +70,7 @@ Fisherman frame / OCR / app metadata
   - recent attention outcomes
   - retrieved wiki memory blocks, if injected
   - similar event blocks, if injected
-  - KG-style priors
+  - KG-style priors, only when `[policy_learner].use_kg_priors = true`
   - few-shot examples
   - rule baseline
   - privacy state
@@ -81,6 +81,11 @@ Fisherman frame / OCR / app metadata
 The live `llm_icl_v0` policy now builds and persists an `EventContextPacket`
 before calling the model. The model prompt receives `policy_context_packet`,
 not an ad hoc reconstruction of candidate + memory + priors.
+
+KG-style priors are deliberately optional. The builder remains available for
+frozen ablations and manual inspection, but the live default keeps
+`[policy_learner].use_kg_priors = false` until labels/outcomes prove that the
+prior table improves ping precision/recall instead of reinforcing stale habits.
 
 The policy still outputs only:
 
@@ -143,6 +148,27 @@ Dashboard:
 
 - `http://127.0.0.1:7893/dashboard`
 - Activity tab shows recent policy context packets.
+
+The local API serving these inspection routes runs as a supervised child
+process (`harness.api_server`), separate from the daemon's policy loop. Heavy
+dashboard/eval reads therefore should not block `/pending`, `/status`, or the
+screen-polling loop.
+
+## Daily Goal Boundary
+
+The daily goal is still the top-level steering variable for the binary policy.
+It can be written directly through Settings or generated through the collapsed
+Draft goal helper:
+
+- UI: floating capsule → Settings → Today → Draft goal
+- HTTP: `POST /goal/interview`
+- Storage: `~/.harness/goal_interviews.jsonl`
+
+The endpoint runs locally by default so Settings stays responsive. If
+`[goal_interview].use_model = true`, it uses the configured OpenAI-compatible
+endpoint and model-host trust checks. It only writes the actual goal when the
+user saves/applies through the existing `/goal` state path. This keeps goal
+synthesis separate from policy decisions and makes it auditable.
 
 ## Remaining Memory Gap
 

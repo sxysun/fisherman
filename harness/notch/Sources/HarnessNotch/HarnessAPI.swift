@@ -139,6 +139,15 @@ enum HarnessAPI {
         _ = try? await session.data(for: req)
     }
 
+    static func morningInterview(turns: [[String: String]], apply: Bool = false) async -> JSON? {
+        var req = URLRequest(url: baseURL().appendingPathComponent("goal/interview"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["turns": turns, "apply": apply]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return await postJSON(req)
+    }
+
     static func clearGoal() async {
         var req = URLRequest(url: baseURL().appendingPathComponent("goal/clear"))
         req.httpMethod = "POST"

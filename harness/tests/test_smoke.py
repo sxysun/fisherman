@@ -24,6 +24,7 @@ from harness import fisherman_client as fc_mod
 from harness import experiments as experiments_mod
 from harness import gate as gate_mod
 from harness import frozen_eval as frozen_eval_mod
+from harness import goal_interview as goal_interview_mod
 from harness import image_redaction as image_redaction_mod
 from harness import implicit as implicit_mod
 from harness import information_diet as information_diet_mod
@@ -67,6 +68,7 @@ def test_imports():
     assert memory_mod
     assert gate_mod
     assert frozen_eval_mod
+    assert goal_interview_mod
     assert realizer_mod
     assert critic_mod
     assert push_mod
@@ -736,6 +738,68 @@ def test_config_load_merges_new_defaults(tmp_path):
         config_mod.CONFIG_PATH = old_path
 
 
+def test_goal_interview_bootstraps_then_falls_back_and_applies(tmp_path, monkeypatch):
+    store_mod.HARNESS_DIR = tmp_path
+    monkeypatch.setattr(goal_interview_mod, "_recent_context", lambda: {"current_goal": ""})
+    monkeypatch.setattr(
+        goal_interview_mod,
+        "_call_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("offline")),
+    )
+
+    first = goal_interview_mod.run(turns=[], config={}, apply_goal=False)
+    assert first["status"] == "needs_more_input"
+    assert "question" in first
+
+    result = goal_interview_mod.run(
+        turns=[{
+            "question": first["question"],
+            "answer": "Ship the harness reliability work today and avoid distracting browser detours.",
+        }],
+        config={
+            "policy_learner": {"base_url": "http://127.0.0.1:9999", "model": "test-model"},
+            "privacy": {"allow_local_model_hosts": True, "block_untrusted_model_hosts": True},
+        },
+        apply_goal=True,
+    )
+    assert result["status"] == "proposal"
+    assert result["source"] == "heuristic"
+    assert result.get("error") is None
+    assert "harness reliability" in result["proposed_goal"]
+    assert store_mod.read_policy_state()["daily_goal"] == result["proposed_goal"]
+    assert list(store_mod.iter_jsonl("goal_interviews.jsonl"))
+
+
+def test_goal_interview_uses_model_proposal(tmp_path, monkeypatch):
+    store_mod.HARNESS_DIR = tmp_path
+    monkeypatch.setattr(goal_interview_mod, "_recent_context", lambda: {"current_goal": "old"})
+    monkeypatch.setattr(
+        goal_interview_mod,
+        "_call_model",
+        lambda *args, **kwargs: {
+            "status": "proposal",
+            "proposed_goal": "finish the daily goal draft helper and keep pings reliable",
+            "sensitivity": "responsive",
+            "rationale": "The user asked to replace manual goal writing.",
+            "steering_checks": ["lost in settings", "missing pings"],
+        },
+    )
+
+    result = goal_interview_mod.run(
+        turns=[{"question": "q", "answer": "I want the harness to cook up my daily goal."}],
+        config={
+            "policy_learner": {"base_url": "http://127.0.0.1:9999", "model": "test-model"},
+            "privacy": {"allow_local_model_hosts": True, "block_untrusted_model_hosts": True},
+            "goal_interview": {"use_model": True},
+        },
+        apply_goal=False,
+    )
+    assert result["status"] == "proposal"
+    assert result["source"] == "model"
+    assert result["sensitivity"] == "responsive"
+    assert result["proposed_goal"].startswith("finish the daily goal draft helper")
+
+
 def test_scene_tag_codes_for_todo():
     event = schemas.CandidateEvent()
     event.screen.frontmost_app = "Cursor"
@@ -940,10 +1004,12 @@ def test_scene_vlm_backoff_blocks_repeated_failures():
         scene_vlm_mod._backoff_until_ts = old_backoff
 
 
-def test_daemon_realizer_exception_records_skipped_trace(monkeypatch, tmp_path):
+def test_daemon_realizer_exception_uses_local_fallback_ping(monkeypatch, tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path
     try:
+        store_mod.write_policy_state({"daily_goal": "ship harness reliability", "sensitivity": "responsive"})
+
         async def fake_synthesize(fc, user_pref, minutes_since_last_push):
             event = schemas.CandidateEvent(candidate_id="cand_realizer_fail")
             event.ts = "2026-05-19T12:00:00Z"
@@ -974,7 +1040,7 @@ def test_daemon_realizer_exception_records_skipped_trace(monkeypatch, tmp_path):
             "experiment": {"enabled": False},
             "policy_learner": {"enabled": False},
             "privacy": {},
-            "realizer": {"base_url": "http://localhost:9000", "model": "test"},
+            "realizer": {"base_url": "http://localhost:9000", "model": "test", "fallback_on_error": True},
             "critic": {},
             "push": {"channel": "notch_pill"},
         }
@@ -990,11 +1056,78 @@ def test_daemon_realizer_exception_records_skipped_trace(monkeypatch, tmp_path):
         decisions = store_mod.tail_jsonl("decisions.jsonl")
         traces = store_mod.tail_jsonl("traces.jsonl")
         assert decisions[-1]["action"] == "notch_ping"
-        assert traces[-1]["delivery"]["channel"] == "skipped"
+        assert traces[-1]["delivery"]["channel"] == "notch_pill"
+        assert traces[-1]["delivery"]["pushed"] is True
+        assert "Return to today's goal" in traces[-1]["realization"]["message"]
         assert "FileNotFoundError" in traces[-1]["realization"]["error"]
         stages = [row["stage"] for row in traces[-1]["lifecycle"]]
         assert "realizer_failed" in stages
+        assert "realizer_fallback" in stages
+        assert "dispatch_done" in stages
+        assert store_mod.list_pending()
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+
+
+def test_daemon_realizer_exception_can_disable_fallback(monkeypatch, tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    store_mod.HARNESS_DIR = tmp_path
+    try:
+        async def fake_synthesize(fc, user_pref, minutes_since_last_push):
+            event = schemas.CandidateEvent(candidate_id="cand_realizer_fail_disabled")
+            event.ts = "2026-05-19T12:00:00Z"
+            event.user_pref = user_pref
+            event.screen.frontmost_app = "Cursor"
+            event.screen.ocr_snippet = "TODO ship harness notification"
+            event.screen.frame_age_sec = 1
+            event.context.minutes_since_last_push = minutes_since_last_push
+            return event
+
+        async def failed_realize(*args, **kwargs):
+            return schemas.Realization(
+                model="test",
+                base_url="http://localhost:9000",
+                prompt_version="test",
+                message="",
+                error="http_502",
+            )
+
+        monkeypatch.setattr(daemon_mod, "synthesize", fake_synthesize)
+        monkeypatch.setattr(daemon_mod.realizer_mod, "realize", failed_realize)
+        memory = memory_mod.SessionMemory(window_min=120, idle_boundary_sec=90)
+        cfg = {
+            "daemon": {"http_port": 7893},
+            "gate": {
+                "active_policy": "rule_v0",
+                "cooldown_min": 0,
+                "negative_feedback_backoff_min": 0,
+                "resume_suppression_sec": 90,
+                "quiet_hours_start": 3,
+                "quiet_hours_end": 4,
+            },
+            "intents": {"enabled": ["focus_nudge"]},
+            "experiment": {"enabled": False},
+            "policy_learner": {"enabled": False},
+            "privacy": {},
+            "realizer": {"base_url": "http://localhost:9000", "model": "test", "fallback_on_error": False},
+            "critic": {},
+            "push": {"channel": "notch_pill"},
+        }
+
+        asyncio.run(daemon_mod._tick(
+            config=cfg,
+            fc=object(),
+            memory=memory,
+            workflow_events=None,
+            last_push_at_ref=[None],
+        ))
+
+        traces = store_mod.tail_jsonl("traces.jsonl")
+        assert traces[-1]["delivery"]["channel"] == "skipped"
+        stages = [row["stage"] for row in traces[-1]["lifecycle"]]
+        assert "realizer_failed" in stages
         assert "terminal_skipped" in stages
+        assert not store_mod.list_pending()
     finally:
         store_mod.HARNESS_DIR = old_dir
 
@@ -1545,6 +1678,30 @@ def test_store_large_trace_fast_patch_uses_sql_and_patch_ledger(tmp_path):
         store_mod.PATCH_TRACE_REWRITE_MAX_BYTES = old_limit
 
 
+def test_store_large_trace_patch_miss_does_not_scan_jsonl(tmp_path):
+    old_dir = store_mod.HARNESS_DIR
+    old_limit = store_mod.PATCH_TRACE_REWRITE_MAX_BYTES
+    store_mod.HARNESS_DIR = tmp_path
+    store_mod.PATCH_TRACE_REWRITE_MAX_BYTES = 1
+    try:
+        trace = {
+            "trace_id": "tr_fast_patch_miss",
+            "ts": "2026-05-19T12:00:00Z",
+            "action": {"decision_id": "pd_existing", "action": "notch_ping"},
+        }
+        store_mod.append_jsonl("traces.jsonl", trace)
+        assert not store_mod.patch_trace(
+            "pd_missing",
+            {"delivery": {"pushed": True}},
+            lifecycle_stage="dispatch_done",
+        )
+        assert store_mod.tail_jsonl("trace_patches.jsonl") == []
+        assert store_mod.tail_jsonl("traces.jsonl")[0] == trace
+    finally:
+        store_mod.HARNESS_DIR = old_dir
+        store_mod.PATCH_TRACE_REWRITE_MAX_BYTES = old_limit
+
+
 def test_pending_claim_lease_and_completion(tmp_path):
     old_dir = store_mod.HARNESS_DIR
     store_mod.HARNESS_DIR = tmp_path
@@ -1662,6 +1819,14 @@ def test_pending_display_ack_writes_claimed_capture_metric(tmp_path):
         assert json.loads(ack_resp.text)["ok"] is True
         deliveries = store_mod.tail_jsonl("deliveries.jsonl")
         assert deliveries[-1]["delivery_action"] == "displayed_ack"
+        p = tmp_path / "pending" / "pd_claimed.json"
+        with open(p) as f:
+            pending = json.load(f)
+        assert pending["claimable_by_notch"] is False
+        pending["pending_lease_until_unix"] = time.time() - 1
+        with open(p, "w") as f:
+            json.dump(pending, f)
+        assert store_mod.claim_pending(lease_sec=60) is None
 
         report = metrics_mod.compute(window="365d")
         assert report["n_claimed_pings"] == 1

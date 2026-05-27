@@ -81,8 +81,14 @@ def patch_trace(
                     },
                 )
                 return True
+            # On long-running dogfood stores, falling back to a full JSONL scan
+            # for an unknown/manual decision can stall the local API. Large
+            # trace files use SQLite as the live patch plane; a miss is a miss.
+            return False
     except Exception as e:
         log.warning("sql_trace_fast_patch_failed decision_id=%s error=%s", decision_id, e)
+        if p.stat().st_size > PATCH_TRACE_REWRITE_MAX_BYTES:
+            return False
 
     rows: list[dict] = []
     found_row: dict | None = None
@@ -236,15 +242,31 @@ def claim_pending(lease_sec: float = 15.0) -> Optional[dict]:
                 continue
             if payload.get("claimable_by_notch") is False:
                 continue
+            if _pending_already_displayed(payload):
+                payload["claimable_by_notch"] = False
+                _atomic_write_json(p, payload)
+                continue
             payload["pending_attempts"] = int(payload.get("pending_attempts") or 0) + 1
             payload["pending_claimed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
             payload["pending_lease_until_unix"] = now + float(lease_sec)
-            tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-            with open(tmp, "w") as f:
-                json.dump(payload, f)
-            os.replace(tmp, p)
+            _atomic_write_json(p, payload)
             return payload
     return None
+
+
+def _atomic_write_json(p: Path, payload: dict) -> None:
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with open(tmp, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp, p)
+
+
+def _pending_already_displayed(payload: dict) -> bool:
+    decision_id = str(payload.get("decision_id") or "")
+    if not decision_id:
+        return False
+    actions = set(delivery_actions_for_decision(decision_id))
+    return bool(actions & {"displayed_ack", "displayed_inferred", "claimed"})
 
 
 def _pending_expired(payload: dict, now: float) -> bool:
@@ -323,6 +345,27 @@ def complete_pending(decision_id: str) -> bool:
             return False
         p.unlink(missing_ok=True)
         return True
+
+
+def mark_pending_displayed(decision_id: str) -> bool:
+    """Keep a displayed pending payload awaiting outcome without re-delivery."""
+    ensure_dirs()
+    with _PENDING_LOCK:
+        p = HARNESS_DIR / "pending" / f"{decision_id}.json"
+        if not p.exists():
+            return False
+        try:
+            with open(p) as f:
+                payload = json.load(f)
+            if not isinstance(payload, dict):
+                return False
+            payload["claimable_by_notch"] = False
+            payload["displayed_pending_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            payload.pop("pending_lease_until_unix", None)
+            _atomic_write_json(p, payload)
+            return True
+        except Exception:
+            return False
 
 
 def pending_payload(decision_id: str) -> dict | None:

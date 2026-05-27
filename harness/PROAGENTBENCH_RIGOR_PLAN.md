@@ -493,25 +493,28 @@ Acceptance criteria:
 
 The first paper-style rigor pass is now implemented in code:
 
-- The daemon appends a trace immediately after each decision and patches it through lifecycle stages: `decision_recorded`, `realizer_started`, `realizer_done`/`realizer_failed`, `critic_started`, `critic_done`, `dispatch_started`, `dispatch_done`, `claimed`, `outcome`, and terminal skipped/blocked/no-ping states.
+- The daemon appends a trace immediately after each decision and patches it through lifecycle stages: `decision_recorded`, `realizer_started`, `realizer_done`/`realizer_failed`, `realizer_fallback`, `critic_started`, `critic_done`, `dispatch_started`, `dispatch_done`, `claimed`, `outcome`, and terminal skipped/blocked/no-ping states.
 - Candidates, decisions, and traces now carry `workflow_event_id`, and workflow events include basic quality flags plus periodic open snapshots.
 - `EventContextPacket` is now a first-class stored object. The live `llm_icl_v0` policy persists the frozen model-facing packet to `context_packets.jsonl`/SQLite before calling the model, and decisions include `evidence.context_packet_id` for audit/replay.
 - The policy-facing path now preserves raw Fisherman `frontmost_app` metadata but also computes `effective_app` from conservative OCR menu-bar evidence. Workflow grouping, short memory, KG priors, datasets, and shadow eval use `effective_app` when raw app metadata looks stale, and packets mark `app_metadata_mismatch`.
 - `metrics` and `eval-report` now expose ping trace-completeness plus explicit-label precision, recall, and F1.
 - SQLite sidecar schema now includes typed `deliveries` and `curation` tables in addition to candidates/decisions/traces/outcomes/model calls/labels/workflow events.
 - `curation.jsonl` exists and is respected by KG-prior and dataset builders.
-- `kg_priors.py` builds local app/scene/app+scene/window-keyword priors from explicit labels and usable implicit outcomes, and `llm_icl_v0` includes matching priors in the live policy prompt.
+- `kg_priors.py` builds local app/scene/app+scene/window-keyword priors from explicit labels and usable implicit outcomes. `llm_icl_v0` can include matching priors in the policy prompt, but live defaults keep this off with `[policy_learner].use_kg_priors = false` until frozen ablations justify it.
 - `dataset.py` mines useful pings, behavioral negatives, context-matched hard negatives, and missed-help candidates. It now also mines workflow-event review rows, and `harness freeze-eval` writes sanitized candidate and event eval files with time-ordered split bounds.
 - `/label/events` adds a browser event-level labeling UI for whole workflow runs. Event labels are stored separately from decision labels via `label_scope="workflow_event"` and feed event-level precision/recall/F1 metrics.
 - Replay/shadow evaluation now preserves `workflow_event_id` and reconstructs a no-future-leak recent workflow context for offline memory snapshots.
 - `harness freeze-eval` now exports sanitized source candidates, source workflow events, source outcomes, split assignments, and candidate/event examples, so frozen datasets are replayable without reading live JSONL state.
 - `harness eval-manifest` replays a policy chronologically over a frozen manifest and reports candidate/event precision, recall, F1, missed-help rate, false-interruption rate, bootstrap confidence intervals, train/validation/test splits, source/confidence-weighted metrics, and slices by app/scene/example type.
 - Frozen manifest replay validates split assignment consistency, fails closed on missing required artifacts, counts missing predictions as coverage failures instead of silent no-ping wins, and supports `--require-live-model` for live-model attestation.
-- Live delivery handling now requires displayed acknowledgements, expires terminal delivery states, and avoids treating a dequeued-but-never-displayed payload as a clean outcome.
+- Live delivery handling now requires displayed acknowledgements, expires terminal delivery states, marks displayed pings non-claimable while awaiting outcome, and avoids treating a dequeued-but-never-displayed payload as a clean outcome.
+- The local API now runs as a supervised standalone process (`harness.api_server`) with heavy dashboard/eval handlers offloaded and dashboard/metrics backed by indexed SQLite reads. This keeps `/status` and `/pending` responsive under eval/dashboard load.
+- The realizer now has a local fallback path. If the model endpoint fails, the harness dispatches a redacted terse message from `why_now` or the daily goal and records both `realizer_failed` and `realizer_fallback`, instead of losing the ping between decision and delivery.
+- `goal_interview.py` adds an optional goal-draft loop: it turns a short user answer into a proposed daily steering goal, records turns in `goal_interviews.jsonl`, runs locally by default to keep Settings responsive, and audits model metadata with `purpose="goal_interview"` only when `[goal_interview].use_model = true`.
 - Shadow eval now uses the active store by default, uses time-ordered group holdout, and avoids ambient `~/.harness` fallback when an explicit store is provided.
 - Workflow events now carry first/last OCR previews, window-title samples, and event-level quality flags such as `too_short`, `too_long`, and `no_valid_frame`.
 - The per-candidate VLM scene tagger now has explicit error/rate-limit backoff, so a failing VLM endpoint cannot repeatedly spend calls on every eligible tick.
-- Smoke coverage is 72 tests, including trace patching, SQL delivery/curation mirroring, KG priors, hard-example curation exclusions, workflow-event review mining, frozen manifest replay, split assignment validation, live-model attestation, source weighting, delivery ack/expiry handling, VLM backoff, and precision/recall metrics.
+- Smoke coverage is 83 tests, including trace patching, SQL delivery/curation mirroring, optional KG priors, hard-example curation exclusions, workflow-event review mining, frozen manifest replay, split assignment validation, live-model attestation, source weighting, delivery ack/expiry/race handling, API startup, local realizer fallback, daily-goal draft fallback/model paths, VLM backoff, and precision/recall metrics.
 - `harness context-packets` and `/context-packets` expose recent frozen policy inputs for inspection; the dashboard Activity tab also surfaces recent packets.
 - `long_term_memory.py` adds a disabled-by-default text-only policy retrieval bridge. Static `policy_blocks` support tests/manual ablations; provider-chat retrieval is allowlist-checked and writes exact returned snippets into `EventContextPacket.retrieved_wiki_memory`.
 
@@ -519,7 +522,7 @@ Still not done:
 
 - The event-level labeling UI is browser-backed, not yet surfaced inside the native capsule.
 - The frozen eval protocol now has a manifest replay command with leakage checks. The provider-chat memory bridge has smoke coverage, but policy-specific RAG retrievers still need ablation fixtures before they are allowed into offline comparison.
-- KG priors are simple count priors; RAG similar-event retrieval and ablation reports are still future work.
+- KG priors are simple count priors and disabled in live policy by default; RAG similar-event retrieval and ablation reports are still future work.
 - Hermes/mind long-term memory already exists through `skills/mind-rolling-summary`. The harness has a disabled provider-chat bridge, but a dedicated non-generative `/home/ubuntu/mind` retrieval API with source paths, timestamps, privacy state, retrieval scores, and frozen ablations is still the serious target.
 - The curation ledger is CLI-backed and event-review-backed for workflow events; there is still no full capsule review panel for arbitrary candidate/trace deletion.
 - Harness storage is append-mostly. There is SQLite backfill, but no automatic retention/compaction policy for long-running dogfood state yet.

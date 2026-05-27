@@ -222,6 +222,72 @@ def _privacy_provenance(
     }
 
 
+def fallback_realization(
+    *,
+    event: CandidateEvent,
+    daily_goal: str = "",
+    why_now: str = "",
+    error: str = "",
+) -> Realization:
+    """Local no-network realization used when the configured model fails.
+
+    A would-ping decision should not disappear just because the message model is
+    down. Keep the fallback terse, redacted, and trace-visible.
+    """
+    message = _fallback_message(event=event, daily_goal=daily_goal, why_now=why_now)
+    return Realization(
+        model="local_fallback",
+        base_url="local",
+        prompt_version="local_fallback_v1",
+        message=message,
+        tokens_in=0,
+        tokens_out=0,
+        latency_ms=0,
+        vision_used=False,
+        image_bytes=0,
+        privacy_flags=["realizer_model_failed"],
+        privacy_provenance={
+            "version": "privacy_provenance_v1",
+            "include_vision_requested": False,
+            "vision_attached": False,
+            "screenshot_action": "not_requested",
+            "fallback_reason": "realizer_model_failed",
+        },
+        error=error[:240] or "realizer_model_failed",
+    )
+
+
+def _fallback_message(*, event: CandidateEvent, daily_goal: str = "", why_now: str = "") -> str:
+    why = privacy.redact_text((why_now or "").strip().replace("\n", " "))
+    why_is_reason_codes = _looks_like_reason_codes(why)
+    if why and not why_is_reason_codes:
+        return _clip_sentence(why, 150)
+
+    goal = privacy.redact_text((daily_goal or "").strip().replace("\n", " "))
+    if goal:
+        return _clip_sentence(f"Return to today's goal: {goal}", 150)
+
+    app = privacy.redact_text(str(event.screen.frontmost_app or "this screen"))
+    scene = privacy.redact_text(str(event.scene.label or "current work"))
+    return _clip_sentence(f"Pick the next concrete step in {app} ({scene}).", 150)
+
+
+def _clip_sentence(text: str, limit: int) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip(" ,;:") + "…"
+
+
+def _looks_like_reason_codes(text: str) -> bool:
+    if not text:
+        return False
+    parts = [part.strip() for part in text.replace(";", ",").split(",") if part.strip()]
+    if not parts:
+        return False
+    return all(part.replace("_", "").replace("-", "").isalnum() and "_" in part for part in parts)
+
+
 async def _fetch_latest_frame_b64(
     fc: FishermanClient,
     event: CandidateEvent,

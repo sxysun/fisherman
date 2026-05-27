@@ -9,7 +9,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import app_identity
 from . import metrics as metrics_mod
-from .store import iter_jsonl
 
 
 REPORT_VERSION = "information_diet_v1"
@@ -38,10 +37,7 @@ COMMON_TLDS = {
 
 def build_report(*, window: str = "7d", max_episodes: int = 20) -> dict[str, Any]:
     since = metrics_mod.since_iso(window)
-    candidates = [
-        row for row in iter_jsonl("candidates.jsonl")
-        if row.get("ts", "") >= since
-    ]
+    candidates = metrics_mod._read_payloads("candidates", "candidates.jsonl", since_iso=since)
     candidates.sort(key=lambda row: row.get("ts") or "")
     events = [_research_event(row) for row in candidates]
     episodes = _segment([event for event in events if event is not None])

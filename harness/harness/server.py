@@ -6,6 +6,8 @@ from typing import Optional
 
 from aiohttp import web
 
+from . import config as config_mod
+from . import goal_interview
 from . import reward as reward_mod
 from .store import (
     attach_outcome_to_trace,
@@ -17,6 +19,7 @@ from .store import (
     outcome_for_decision,
     pending_payload,
     list_pending,
+    mark_pending_displayed,
     patch_trace,
     read_policy_state,
     tail_jsonl,
@@ -115,6 +118,7 @@ async def post_delivery_ack(request: web.Request) -> web.Response:
         pending_claimed_at=payload.get("pending_claimed_at"),
         patch_trace_row=False,
     )
+    await asyncio.to_thread(mark_pending_displayed, decision_id)
     asyncio.create_task(asyncio.to_thread(
         _patch_display_ack_trace,
         decision_id=decision_id,
@@ -381,7 +385,7 @@ async def get_history(request: web.Request) -> web.Response:
 
 
 async def get_status(request: web.Request) -> web.Response:
-    state = await asyncio.to_thread(read_policy_state)
+    state = read_policy_state()
     canary = state.get("canary_policy") or {}
     canary_compact = {
         key: canary.get(key)
@@ -399,7 +403,7 @@ async def get_status(request: web.Request) -> web.Response:
             "daily_goal": state.get("daily_goal", ""),
             "sensitivity": state.get("sensitivity", "balanced"),
             "goal_set_at": state.get("goal_set_at"),
-            "pending_count": await asyncio.to_thread(lambda: len(list_pending())),
+            "pending_count": len(list_pending()),
             "ts": _now_iso(),
         }
     )
@@ -661,6 +665,29 @@ async def post_goal(request: web.Request) -> web.Response:
     })
 
 
+async def post_goal_interview(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "bad json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "expected object"}, status=400)
+    turns = body.get("turns") or []
+    if not isinstance(turns, list):
+        return web.json_response({"error": "turns must be a list"}, status=400)
+    try:
+        cfg = await asyncio.to_thread(config_mod.load)
+    except Exception as e:
+        return web.json_response({"error": "config_load_failed", "detail": str(e)[:160]}, status=500)
+    result = await asyncio.to_thread(
+        goal_interview.run,
+        turns=turns,
+        config=cfg,
+        apply_goal=bool(body.get("apply") or False),
+    )
+    return web.json_response(result)
+
+
 async def post_clear_goal(request: web.Request) -> web.Response:
     state = read_policy_state()
     state["daily_goal"] = ""
@@ -753,6 +780,7 @@ def build_app(fisherman_url: str = "http://localhost:7892") -> web.Application:
     app.router.add_post("/snooze", post_snooze)
     app.router.add_post("/unsnooze", post_unsnooze)
     app.router.add_post("/goal", post_goal)
+    app.router.add_post("/goal/interview", post_goal_interview)
     app.router.add_post("/goal/clear", post_clear_goal)
     app.router.add_post("/mute", post_mute)
     app.router.add_post("/unmute", post_unmute)
