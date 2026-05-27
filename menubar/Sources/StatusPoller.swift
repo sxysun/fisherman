@@ -153,10 +153,19 @@ final class StatusPoller: @unchecked Sendable {
                       let digest = newest["digest"] as? [String: Any]
                 else { continue }
 
-                let category = digest["category"] as? String ?? "idle"
-                let emoji = Self.displayEmoji(digest["emoji"] as? String, category: category)
-                let status = digest["status"] as? String ?? ""
+                let rawCategory = digest["category"] as? String ?? "idle"
                 let stale = now - ts > 15 * 60
+                // A friend who's gone quiet reads as asleep/away rather than frozen
+                // on their last activity. Mirrors how our own server marks us idle
+                // (😴) after a few quiet minutes, and keeps them present in the
+                // compact pill instead of silently dropping out — which felt lonely.
+                let category = stale ? "idle" : rawCategory
+                let emoji = stale
+                    ? "😴"
+                    : Self.displayEmoji(digest["emoji"] as? String, category: rawCategory)
+                let status = stale
+                    ? Self.awayStatus(sinceSeconds: now - ts)
+                    : (digest["status"] as? String ?? "")
                 let eventHistory: [ActivityEntry] = sorted.compactMap { event in
                     guard let eventTs = event["ts"] as? Double,
                           let eventDigest = event["digest"] as? [String: Any]
@@ -184,7 +193,7 @@ final class StatusPoller: @unchecked Sendable {
                         history: history
                     )
                 )
-                activity.inFlow = digest["flow"] as? Bool ?? false
+                activity.inFlow = stale ? false : (digest["flow"] as? Bool ?? false)
                 activeByPubkey[pubkey] = activity
             }
 
@@ -562,6 +571,19 @@ final class StatusPoller: @unchecked Sendable {
             }
         }
         return sessionStart
+    }
+
+    /// Human-readable "asleep/away" line for a friend whose status has gone
+    /// stale, e.g. "away · last seen 44m ago". Matches the tone of the server's
+    /// own idle status for "me".
+    private static func awayStatus(sinceSeconds: Double) -> String {
+        let mins = max(0, Int(sinceSeconds / 60))
+        if mins < 60 { return "away · last seen \(mins)m ago" }
+        let h = mins / 60
+        let m = mins % 60
+        return m == 0
+            ? "away · last seen \(h)h ago"
+            : "away · last seen \(h)h\(m)m ago"
     }
 
     private static func embeddedActivityHistory(from digest: [String: Any]) -> [ActivityEntry] {

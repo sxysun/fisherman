@@ -19,8 +19,11 @@ struct CompactTrailing: View {
 
     var body: some View {
         HStack(spacing: 3) {
+            // Keep sleeping friends in the pill (they now show 😴) instead of
+            // dropping them when they go quiet — that vanishing felt lonely.
+            // Only friends we've never seen a status from ("waiting") stay hidden.
             let compactActivities = state.allActivity.filter { user in
-                user.id == "me" || !user.stale
+                user.id == "me" || user.category != "waiting"
             }
             // Emoji + flow badge only — duration/timeline live in expanded view
             // to keep the compact strip narrow and the menu bar visible.
