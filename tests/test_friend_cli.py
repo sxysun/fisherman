@@ -200,6 +200,17 @@ class FriendCliTests(unittest.TestCase):
                             "recipient_pubkey": alice_pub,
                             "event_id": 2,
                         }),
+                        json.dumps({
+                            "ts": 30,
+                            "digest": {
+                                "type": "poke",
+                                "emoji": "👋",
+                                "category": "poke",
+                                "status": "poked you",
+                            },
+                            "recipient_pubkey": alice_pub,
+                            "event_id": 3,
+                        }),
                     ]),
                     encoding="utf-8",
                 )
@@ -215,6 +226,103 @@ class FriendCliTests(unittest.TestCase):
             self.assertEqual(rows[0]["event_id"], 2)
             self.assertEqual(rows[1]["friend"], "bob")
             self.assertFalse(rows[1]["published"])
+
+    def test_friend_poke_publishes_encrypted_relay_event(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            os.environ["FISH_PRIVATE_KEY"] = "11" * 32
+            fish_dir = home / ".fisherman"
+            fish_dir.mkdir()
+            friends_path = fish_dir / "friends.json"
+
+            with mock.patch("fisherman.friends._DEFAULT_PATH", str(friends_path)):
+                friends.add_friend(
+                    name="alice",
+                    pubkey_hex="aa" * 32,
+                    encryption_pubkey_hex="bb" * 32,
+                    relay_url="https://relay.example",
+                )
+
+                with mock.patch("fisherman.ledger.publish_status", return_value=7) as publish:
+                    result = CliRunner().invoke(cli.main, ["friend", "poke", "alice"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("poked alice event_id=7", result.output)
+            _, kwargs = publish.call_args
+            self.assertEqual(kwargs["relay_url"], "https://relay.example")
+            self.assertEqual(kwargs["recipient_pubkey_hex"], "aa" * 32)
+            self.assertEqual(kwargs["recipient_x25519_pubkey_hex"], "bb" * 32)
+            self.assertEqual(kwargs["digest"]["type"], "poke")
+            self.assertEqual(kwargs["digest"]["emoji"], "👋")
+
+    def test_timeline_filters_poke_events_from_status_events(self) -> None:
+        from fisherman import timeline
+
+        rows = [
+            {
+                "ts": 10,
+                "digest": {
+                    "type": "poke",
+                    "emoji": "👋",
+                    "category": "poke",
+                    "status": "poked you",
+                },
+                "recipient_pubkey": "aa" * 32,
+            },
+            {
+                "ts": 20,
+                "digest": {
+                    "emoji": "💻",
+                    "category": "coding",
+                    "status": "shipping",
+                },
+                "recipient_pubkey": "aa" * 32,
+            },
+        ]
+
+        grouped = timeline.group_my_events(rows)
+
+        self.assertEqual(len(grouped), 1)
+        self.assertEqual(grouped[0]["digest"]["status"], "shipping")
+
+    def test_timeline_filters_poke_events_from_friend_events(self) -> None:
+        from fisherman import timeline
+
+        friend = {
+            "name": "alice",
+            "pubkey_hex": "aa" * 32,
+            "encryption_pubkey": "bb" * 32,
+            "relay_url": "https://relay.example",
+        }
+        events = [
+            {
+                "ts": 10,
+                "digest": {
+                    "type": "poke",
+                    "emoji": "👋",
+                    "category": "poke",
+                    "status": "poked you",
+                },
+            },
+            {
+                "ts": 20,
+                "digest": {
+                    "emoji": "💬",
+                    "category": "chat",
+                    "status": "checking in",
+                },
+            },
+        ]
+
+        with mock.patch("fisherman.friends.list_friends", return_value=[friend]), \
+             mock.patch("fisherman.cli._load_keys", return_value=(None, bytes.fromhex("cc" * 32), object(), None)), \
+             mock.patch("fisherman.cli._ledger_url", return_value="https://relay.example"), \
+             mock.patch("fisherman.ledger.fetch_friend_status", return_value=events):
+            rows = timeline.load_friend_events(since_ts=0, until_ts=30)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["digest"]["status"], "checking in")
 
     def test_pairwise_status_decrypts_only_for_recipient(self) -> None:
         author_seed = bytes.fromhex("11" * 32)

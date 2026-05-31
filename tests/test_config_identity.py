@@ -611,6 +611,24 @@ class ConfigIdentityTests(unittest.TestCase):
         self.assertEqual(json.loads(result.output), remote_rows)
         remote.assert_called_once()
 
+    def test_friend_poke_forced_source_uses_remote_publish_status(self) -> None:
+        remote_result = {"published": [{"name": "Seven", "pubkey": "aa" * 32, "event_id": 9}]}
+        with mock.patch.object(cli, "_is_remote_mode", return_value=True), \
+             mock.patch.object(cli, "_has_local_owner_state", return_value=True), \
+             mock.patch.object(cli, "_remote_call", return_value=remote_result) as remote:
+            result = CliRunner().invoke(
+                cli.main,
+                ["friend", "poke", "--source", "primary", "Seven"],
+            )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("poked Seven event_id=9", result.output)
+        remote.assert_called_once()
+        command, args = remote.call_args.args[:2]
+        self.assertEqual(command, "publish-status")
+        self.assertEqual(args["recipients"], ["Seven"])
+        self.assertEqual(args["digest"]["type"], "poke")
+
     def test_remote_secondary_with_backend_url_rejects_unsupported_command_locally(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             cfg_path = Path(home_dir) / "deputy.json"

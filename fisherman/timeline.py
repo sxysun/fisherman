@@ -84,12 +84,18 @@ def load_my_events(*, since_ts: float, until_ts: float) -> list[dict[str, Any]]:
     return rows
 
 
+def is_poke_digest(digest: dict[str, Any]) -> bool:
+    return digest.get("type") == "poke" or digest.get("category") == "poke"
+
+
 def group_my_events(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse same-digest publishes within 5s into one event with a recipients list."""
     rows = sorted(rows, key=lambda r: r.get("ts") or 0)
     out: list[dict[str, Any]] = []
     for row in rows:
         digest = row.get("digest") or {}
+        if is_poke_digest(digest):
+            continue
         ts = float(row.get("ts") or 0)
         recipient = row.get("recipient_pubkey")
         if out:
@@ -240,11 +246,14 @@ def load_friend_events(*, since_ts: float, until_ts: float,
             ts = float(ev.get("ts") or 0)
             if not (since_ts <= ts <= until_ts):
                 continue
+            digest = ev.get("digest") or {}
+            if is_poke_digest(digest):
+                continue
             rows.append({
                 "ts": ts,
                 "friend_pubkey_hex": friend_pubkey,
                 "friend_name": friend.get("name") or friend_pubkey[:8],
-                "digest": ev.get("digest") or {},
+                "digest": digest,
             })
     rows.sort(key=lambda r: r["ts"])
     return rows

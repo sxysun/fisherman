@@ -19,6 +19,12 @@ struct CompactTrailing: View {
 
     var body: some View {
         HStack(spacing: 3) {
+            if !state.incomingPokes.isEmpty {
+                Text("👋")
+                    .font(.system(size: 11))
+                    .opacity(0.9)
+            }
+
             // Keep sleeping friends in the pill (they now show 😴) instead of
             // dropping them when they go quiet — that vanishing felt lonely.
             // Only friends we've never seen a status from ("waiting") stay hidden.
@@ -88,11 +94,14 @@ struct ExpandedContent: View {
     let onSettings: () -> Void
     let onOpenCard: () -> Void
     let onOpenFriendCard: (UserActivity) -> Void
+    let onPoke: (UserActivity) -> Void
+    let onClearPokes: () -> Void
     let onQuit: () -> Void
 
     @State private var hoveredUserId: String?
     @State private var repairingCapture = false
     @State private var friendPreviewExpanded = false
+    @State private var pokedUsers: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -167,6 +176,30 @@ struct ExpandedContent: View {
 
             Divider()
 
+            if !state.incomingPokes.isEmpty {
+                HStack(spacing: 6) {
+                    Text("👋")
+                        .font(.system(size: 14))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(state.incomingPokes.count) poke\(state.incomingPokes.count == 1 ? "" : "s")")
+                            .font(.system(size: 12, weight: .medium))
+                        Text(pokeSummary(state.incomingPokes))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button("Clear") {
+                        onClearPokes()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
+                .padding(6)
+                .background(Color(nsColor: .systemYellow).opacity(0.15))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+
             // Hangout suggestion
             if let suggestion = state.hangoutSuggestion {
                 HStack(spacing: 6) {
@@ -212,6 +245,21 @@ struct ExpandedContent: View {
                             Spacer()
 
                             if user.id != "me" {
+                                Button {
+                                    pokedUsers.insert(user.id)
+                                    onPoke(user)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                        pokedUsers.remove(user.id)
+                                    }
+                                } label: {
+                                    Text(pokedUsers.contains(user.id) ? "✓" : "👋")
+                                        .font(.system(size: 10))
+                                        .frame(width: 12, height: 12)
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(pokedUsers.contains(user.id))
+                                .help("Poke \(user.name)")
+
                                 Button {
                                     onOpenFriendCard(user)
                                 } label: {
@@ -487,5 +535,14 @@ struct ExpandedContent: View {
         if minutes < 60 { return "\(minutes)m ago" }
         let hours = minutes / 60
         return "\(hours)h ago"
+    }
+
+    private func pokeSummary(_ pokes: [Poke]) -> String {
+        let names = Array(Set(pokes.map(\.fromName))).sorted()
+        let display = names.prefix(3).joined(separator: ", ")
+        if names.count > 3 {
+            return "\(display) +\(names.count - 3) more"
+        }
+        return display
     }
 }

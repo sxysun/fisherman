@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added encrypted relay-native friend pokes in the CLI and macOS menu bar.
 - Added context-home export, import, and delete commands for Local Only,
   Fisherman Cloud, and Self-hosted migration.
 - Added backend context archive APIs.

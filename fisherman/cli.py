@@ -2929,6 +2929,66 @@ def friend_policy(
     click.echo(f"prompt:    {prompt or '(none)'}")
 
 
+@friend_group.command(name="poke")
+@click.argument("name_or_pubkey")
+@click.option("--source", "source_pref", type=click.Choice(["auto", "primary", "secondary"]),
+              default=None, help="Force routing through laptop (primary) or backend direct path (secondary)")
+def friend_poke(name_or_pubkey: str, source_pref: str | None):
+    """Send a lightweight encrypted nudge to a friend."""
+    from fisherman.ledger import publish_status as _publish, LedgerError
+    from fisherman.friends import find_friend
+
+    digest = {
+        "type": "poke",
+        "emoji": "👋",
+        "category": "poke",
+        "status": "poked you",
+    }
+
+    if _should_use_remote_mode(source_pref):
+        result = _remote_call(
+            "publish-status",
+            {"digest": digest, "recipients": [name_or_pubkey]},
+            source_pref=source_pref,
+        )
+        published = (result if isinstance(result, dict) else {}).get("published") or []
+        if published:
+            row = published[0]
+            click.echo(f"poked {row.get('name') or row.get('pubkey', 'friend')} event_id={row.get('event_id')}")
+        else:
+            _echo_publish_result(result if isinstance(result, dict) else {})
+        return
+
+    friend = find_friend(name_or_pubkey)
+    if not friend:
+        click.echo(f"not found: {name_or_pubkey}", err=True)
+        sys.exit(1)
+    friend_x = friend.get("encryption_pubkey")
+    if not friend_x:
+        click.echo(
+            f"error: {friend.get('name', friend.get('pubkey_hex', 'friend'))} is missing encryption_pubkey",
+            err=True,
+        )
+        sys.exit(1)
+
+    priv, pub, x_priv, _x_pub = _load_keys()
+    relay = friend.get("relay_url") or _ledger_url()
+    try:
+        event_id = _publish(
+            relay_url=relay,
+            priv=priv,
+            pubkey_bytes=pub,
+            author_x25519_priv=x_priv,
+            recipient_pubkey_hex=friend["pubkey_hex"],
+            recipient_x25519_pubkey_hex=friend_x,
+            digest=digest,
+        )
+    except LedgerError as e:
+        click.echo(f"error: {friend.get('name', friend['pubkey_hex'][:12])}: {e}", err=True)
+        sys.exit(1)
+    click.echo(f"poked {friend.get('name') or friend['pubkey_hex'][:12]} event_id={event_id}")
+
+
 @friend_group.command(name="status")
 @click.argument("name_or_pubkey", required=False)
 @click.option("--since", default=None, help="Time window start, e.g. '5m', '2h', '1d'")
@@ -3082,6 +3142,8 @@ def _friend_preview_rows(limit: int = 20) -> list[dict]:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if _is_poke_digest(row.get("digest") or {}):
+                continue
             recipient = row.get("recipient_pubkey")
             if not recipient:
                 continue
@@ -3113,6 +3175,10 @@ def _friend_preview_rows(limit: int = 20) -> list[dict]:
 
     out.sort(key=lambda r: (not bool(r.get("published")), -(float(r.get("ts") or 0))))
     return out
+
+
+def _is_poke_digest(digest: dict) -> bool:
+    return digest.get("type") == "poke" or digest.get("category") == "poke"
 
 
 def _fmt_age(seconds: float) -> str:

@@ -17,6 +17,13 @@ struct ActivityEntry: Identifiable {
     let timestamp: Date
 }
 
+struct Poke: Identifiable {
+    let id = UUID()
+    let fromName: String
+    let fromPubkey: String
+    let at: Date
+}
+
 enum ActivityCategory: String {
     case coding, debugging, codeReview = "code review", readingDocs = "reading docs"
     case design, writing, chat, email, meeting, planning, settings
@@ -139,6 +146,7 @@ final class AppState {
     // Multi-user activity
     var allActivity: [UserActivity] = []
     var publishedFriendPreviews: [PublishedFriendStatus] = []
+    var incomingPokes: [Poke] = []
 
     // Hangout suggestion
     var hangoutSuggestion: String?   // e.g. "You and 2 friends are winding down"

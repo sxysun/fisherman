@@ -97,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
                         self?.openFriendCard(user)
                     }
                 },
+                onPoke: { [weak self] user in
+                    self?.statusPoller?.sendPoke(to: user)
+                },
+                onClearPokes: { [weak self] in
+                    self?.statusPoller?.clearIncomingPokes()
+                },
                 onQuit: {
                     pm.stopAll()
                     NSApp.terminate(nil)

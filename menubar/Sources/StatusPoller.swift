@@ -8,6 +8,10 @@ final class StatusPoller: @unchecked Sendable {
     private let interval: TimeInterval = 3.0
     private let session: URLSession
     private var pollCycleCount: Int = 0
+    private let pokeClearDefaultsKey = "fisherman.pokesClearedThrough"
+    private var pokesClearedThrough: TimeInterval = UserDefaults.standard.double(
+        forKey: "fisherman.pokesClearedThrough"
+    )
 
     init(state: AppState, controlPort: String, config: ConfigManager) {
         self.state = state
@@ -129,7 +133,7 @@ final class StatusPoller: @unchecked Sendable {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let friends = self.config.relayFriends
-            let result = CliBridge.run(["friend", "status", "--limit", "8"], timeout: 8)
+            let result = CliBridge.run(["friend", "status", "--limit", "50"], timeout: 8)
             guard result.exitCode == 0,
                   let data = result.stdout.data(using: .utf8),
                   let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
@@ -143,11 +147,30 @@ final class StatusPoller: @unchecked Sendable {
             }
 
             var activeByPubkey: [String: UserActivity] = [:]
+            var incomingPokes: [Poke] = []
             for (pubkey, events) in eventsByPubkey {
                 let sorted = events.sorted {
                     ($0["ts"] as? Double ?? 0) > ($1["ts"] as? Double ?? 0)
                 }
-                guard let newest = sorted.first,
+
+                for event in sorted {
+                    guard let eventTs = event["ts"] as? Double,
+                          eventTs > self.pokesClearedThrough,
+                          let friend = event["friend"] as? String,
+                          let eventDigest = event["digest"] as? [String: Any],
+                          Self.isPokeDigest(eventDigest)
+                    else { continue }
+                    incomingPokes.append(Poke(
+                        fromName: friend,
+                        fromPubkey: pubkey,
+                        at: Date(timeIntervalSince1970: eventTs)
+                    ))
+                }
+
+                guard let newest = sorted.first(where: { event in
+                    let eventDigest = event["digest"] as? [String: Any] ?? [:]
+                    return !Self.isPokeDigest(eventDigest)
+                }),
                       let friend = newest["friend"] as? String,
                       let ts = newest["ts"] as? Double,
                       let digest = newest["digest"] as? [String: Any]
@@ -170,6 +193,7 @@ final class StatusPoller: @unchecked Sendable {
                     guard let eventTs = event["ts"] as? Double,
                           let eventDigest = event["digest"] as? [String: Any]
                     else { return nil }
+                    if Self.isPokeDigest(eventDigest) { return nil }
                     let eventCategory = eventDigest["category"] as? String ?? "idle"
                     return ActivityEntry(
                         emoji: Self.displayEmoji(eventDigest["emoji"] as? String, category: eventCategory),
@@ -217,7 +241,11 @@ final class StatusPoller: @unchecked Sendable {
             }
 
             DispatchQueue.main.async { [weak self] in
-                self?.commitActivities(activities, preservingRelay: false)
+                guard let self else { return }
+                self.state.incomingPokes = incomingPokes
+                    .filter { $0.at.timeIntervalSince1970 > self.pokesClearedThrough }
+                    .sorted { $0.at > $1.at }
+                self.commitActivities(activities, preservingRelay: false)
             }
         }
     }
@@ -257,6 +285,26 @@ final class StatusPoller: @unchecked Sendable {
             DispatchQueue.main.async { [weak self] in
                 self?.state.publishedFriendPreviews = previews
             }
+        }
+    }
+
+    func sendPoke(to user: UserActivity) {
+        guard user.id.hasPrefix("relay:") else { return }
+        let pubkey = String(user.id.dropFirst("relay:".count))
+        DispatchQueue.global(qos: .utility).async {
+            let result = CliBridge.run(["friend", "poke", pubkey], timeout: 8)
+            if result.exitCode != 0 {
+                NSLog("poke_failed to \(user.name): \(result.stderr)")
+            }
+        }
+    }
+
+    func clearIncomingPokes() {
+        let now = Date().timeIntervalSince1970
+        pokesClearedThrough = now
+        UserDefaults.standard.set(now, forKey: pokeClearDefaultsKey)
+        DispatchQueue.main.async { [weak self] in
+            self?.state.incomingPokes = []
         }
     }
 
@@ -617,6 +665,13 @@ final class StatusPoller: @unchecked Sendable {
                 timestamp: timestamp
             )
         }
+    }
+
+    private static func isPokeDigest(_ digest: [String: Any]) -> Bool {
+        if let type = digest["type"] as? String {
+            return type == "poke"
+        }
+        return (digest["category"] as? String) == "poke"
     }
 
     private static func displayEmoji(_ raw: String?, category: String) -> String {
