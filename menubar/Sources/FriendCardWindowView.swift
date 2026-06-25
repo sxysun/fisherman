@@ -25,9 +25,24 @@ struct FriendCardWindowView: View {
     }
 
     private var displayedHistory: [ActivityEntry] {
+        if isToday {
+            // The day-scoped relay fetch can come back empty (transient relay
+            // hiccup, or it just finished after we'd already seen the friend
+            // active). Fall back to the live in-memory history we already hold
+            // for them — filtered to today — so the card shows what they're
+            // doing instead of "No relay activity on this day".
+            if let cached = cache[selectedDate], !cached.isEmpty { return cached }
+            return friend.history.filter { entry in
+                entry.timestamp >= selectedDate && entry.timestamp < dayAfterSelected
+            }
+        }
         if let cached = cache[selectedDate] { return cached }
-        if isToday { return friend.history }
         return []
+    }
+
+    private var dayAfterSelected: Date {
+        Calendar.current.date(byAdding: .day, value: 1, to: selectedDate)
+            ?? selectedDate.addingTimeInterval(24 * 3600)
     }
 
     private var dateLabel: String {

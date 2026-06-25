@@ -12,6 +12,7 @@ final class StatusPoller: @unchecked Sendable {
     private var pokesClearedThrough: TimeInterval = UserDefaults.standard.double(
         forKey: "fisherman.pokesClearedThrough"
     )
+    private let friendsDefaultsKey = "fisherman.lastKnownFriends"
 
     init(state: AppState, controlPort: String, config: ConfigManager) {
         self.state = state
@@ -25,6 +26,10 @@ final class StatusPoller: @unchecked Sendable {
     }
 
     func start() {
+        // Seed friends from the last-known statuses we persisted, shown as
+        // gone-quiet (😴 idle), so a fresh launch shows their last status
+        // immediately instead of "no recent status" until the first relay poll.
+        restorePersistedFriends()
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.poll()
         }
@@ -246,6 +251,7 @@ final class StatusPoller: @unchecked Sendable {
                     .filter { $0.at.timeIntervalSince1970 > self.pokesClearedThrough }
                     .sorted { $0.at > $1.at }
                 self.commitActivities(activities, preservingRelay: false)
+                self.persistRelayFriends()
             }
         }
     }
@@ -309,6 +315,14 @@ final class StatusPoller: @unchecked Sendable {
     }
 
     private func commitActivities(_ incoming: [UserActivity], preservingRelay: Bool) {
+        // Snapshot the prior state before we rebuild it. Relay friends are not
+        // seeded into `byId` when `preservingRelay` is false, so we keep a
+        // separate lookup to recover a friend's last-known status if this poll
+        // came back empty for them.
+        let previousById = Dictionary(
+            state.allActivity.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
         var byId: [String: UserActivity] = [:]
 
         for existing in state.allActivity {
@@ -323,6 +337,17 @@ final class StatusPoller: @unchecked Sendable {
                 updated.history = existing.history
                 updated.sessionStart = existing.sessionStart
             }
+            // A relay friend whose newest fetch came back empty arrives here as
+            // the "no recent status" placeholder (category "waiting"). Don't let
+            // a transient empty poll erase a status we've already seen — keep
+            // their last-known status but render it as gone-quiet (😴 idle) so
+            // they read as asleep/away rather than vanishing into "waiting".
+            if updated.id.hasPrefix("relay:"),
+               Self.isWaitingPlaceholder(updated),
+               let prior = previousById[activity.id],
+               !Self.isWaitingPlaceholder(prior) {
+                updated = Self.goneQuietSnapshot(from: prior)
+            }
             byId[activity.id] = updated
         }
 
@@ -335,20 +360,36 @@ final class StatusPoller: @unchecked Sendable {
     }
 
     private func updateHangoutSuggestion() {
-        // "idle" counts as low-key for me (I'm free), but idle friends are AFK — not free.
-        let myFreeCategories: Set<String> = ["browsing", "news", "reading", "idle"]
-        let friendFreeCategories: Set<String> = ["browsing", "news", "reading"]
+        // Use the same derived activity categories that power activity status.
+        // "idle" counts as free for me, but relay friends become idle when
+        // stale/away, so friend idle must not imply availability.
         let freeFriends = state.allActivity.filter {
-            $0.id != "me" && friendFreeCategories.contains($0.category) && !$0.stale
+            $0.id != "me" && Self.isFreeForHangout($0, isMe: false)
         }
         let meIsLowKey = state.allActivity.first(where: { $0.id == "me" })
-            .map { myFreeCategories.contains($0.category) } ?? false
+            .map { Self.isFreeForHangout($0, isMe: true) } ?? false
         if meIsLowKey && freeFriends.count >= 1 {
             let names = freeFriends.map { $0.name }.joined(separator: " & ")
             state.hangoutSuggestion = "\(names) also free"
         } else {
             state.hangoutSuggestion = nil
         }
+    }
+
+    private static func isFreeForHangout(_ activity: UserActivity, isMe: Bool) -> Bool {
+        if activity.stale { return false }
+        switch normalizedActivityCategory(activity.category) {
+        case "browsing", "news", "reading", "gaming":
+            return true
+        case "idle":
+            return isMe
+        default:
+            return false
+        }
+    }
+
+    private static func normalizedActivityCategory(_ category: String) -> String {
+        category.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func pollSingleActivity(
@@ -619,6 +660,125 @@ final class StatusPoller: @unchecked Sendable {
             }
         }
         return sessionStart
+    }
+
+    /// True for the "no recent status" placeholder we emit for a friend with
+    /// no relay events this poll. Real statuses carry a concrete category
+    /// (coding, idle, …); only the never-seen placeholder uses "waiting".
+    private static func isWaitingPlaceholder(_ activity: UserActivity) -> Bool {
+        activity.category == "waiting"
+    }
+
+    // MARK: - Last-known friend persistence
+
+    /// Codable mirror of `ActivityEntry` (whose auto `id` is not Codable).
+    private struct PersistedEntry: Codable {
+        let emoji: String
+        let category: String
+        let status: String
+        let timestamp: Date
+    }
+
+    private struct PersistedFriend: Codable {
+        let id: String
+        let name: String
+        let emoji: String
+        let category: String
+        let status: String
+        let sessionStart: Date?
+        let history: [PersistedEntry]
+    }
+
+    /// Save each relay friend's last real status so a relaunch can show it
+    /// (as gone-quiet) instead of "no recent status". Placeholders are skipped.
+    private func persistRelayFriends() {
+        let payload: [PersistedFriend] = state.allActivity
+            .filter { $0.id.hasPrefix("relay:") && !Self.isWaitingPlaceholder($0) }
+            .map { activity in
+                PersistedFriend(
+                    id: activity.id,
+                    name: activity.name,
+                    emoji: activity.emoji,
+                    category: activity.category,
+                    status: activity.status,
+                    sessionStart: activity.sessionStart,
+                    history: activity.history.map {
+                        PersistedEntry(
+                            emoji: $0.emoji,
+                            category: $0.category,
+                            status: $0.status,
+                            timestamp: $0.timestamp
+                        )
+                    }
+                )
+            }
+        guard let data = try? JSONEncoder().encode(payload) else { return }
+        UserDefaults.standard.set(data, forKey: friendsDefaultsKey)
+    }
+
+    /// Restore persisted friends into `state.allActivity` as gone-quiet
+    /// snapshots. Called on `start()` (main thread) before the first poll.
+    private func restorePersistedFriends() {
+        guard let data = UserDefaults.standard.data(forKey: friendsDefaultsKey),
+              let payload = try? JSONDecoder().decode([PersistedFriend].self, from: data),
+              !payload.isEmpty
+        else { return }
+
+        // Drop anyone no longer in the friend list (removed since last launch).
+        let knownIds = Set(config.relayFriends.map { "relay:\($0.pubkeyHex)" })
+        let restored: [UserActivity] = payload.compactMap { p in
+            if !knownIds.isEmpty && !knownIds.contains(p.id) { return nil }
+            let prior = UserActivity(
+                id: p.id,
+                name: p.name,
+                emoji: p.emoji,
+                category: p.category,
+                status: p.status,
+                stale: true,
+                history: p.history.map {
+                    ActivityEntry(
+                        emoji: $0.emoji,
+                        category: $0.category,
+                        status: $0.status,
+                        timestamp: $0.timestamp
+                    )
+                },
+                sessionStart: p.sessionStart
+            )
+            return Self.goneQuietSnapshot(from: prior)
+        }
+        guard !restored.isEmpty else { return }
+        commitActivities(restored, preservingRelay: true)
+    }
+
+    /// Build a gone-quiet snapshot from a friend's last-known status. Keeps
+    /// their history but presents them as asleep/away (😴 idle) with a fresh
+    /// "last seen" line, so an empty poll degrades gracefully instead of
+    /// regressing to "no recent status".
+    private static func goneQuietSnapshot(from prior: UserActivity) -> UserActivity {
+        // `history` is newest-first; its first entry is the most recent point
+        // we have for them. Fall back to the session start, then the prior text.
+        let lastSeen = prior.history.first?.timestamp ?? prior.sessionStart
+        let status: String
+        if let lastSeen {
+            status = awayStatus(sinceSeconds: Date().timeIntervalSince(lastSeen))
+        } else if !prior.status.isEmpty {
+            status = prior.status
+        } else {
+            status = "away"
+        }
+        var snapshot = UserActivity(
+            id: prior.id,
+            name: prior.name,
+            emoji: "😴",
+            category: "idle",
+            status: status,
+            stale: true,
+            history: prior.history,
+            sessionStart: prior.sessionStart
+        )
+        snapshot.inFlow = false
+        return snapshot
     }
 
     /// Human-readable "asleep/away" line for a friend whose status has gone
