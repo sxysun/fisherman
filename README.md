@@ -93,6 +93,21 @@ fisherman upgrade
 Upgrades preserve `~/.fisherman/.env`, identity keys, captures, friends, and
 agent access tokens.
 
+## Privacy
+
+Who can read what depends on the data type and backend mode:
+
+- **Friend status** is end-to-end encrypted to each recipient — the relay only ever
+  sees signed ciphertext.
+- **Mirror / bring-your-own storage** blobs are AES-256-GCM encrypted on your Mac before
+  upload, so the storage provider only sees ciphertext.
+- **Captures** stay on your Mac in **Local Only**; in **Cloud (strict)** they are readable
+  only inside the attested TEE while you're connected, under a tenant key that is never
+  persisted server-side; in **Self-hosted** the operator you run holds the key.
+
+See [SECURITY.md](SECURITY.md) for the at-a-glance guarantees table and
+[docs/privacy-threat-model.md](docs/privacy-threat-model.md) for the full threat model.
+
 ## Backend Modes
 
 ### Local Only
