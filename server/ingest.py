@@ -95,7 +95,41 @@ _DEFAULT_STATUS_LLM_MODEL = "mistralai/mistral-nemo"
 _STATUS_LLM_MODES = {"managed", "byo", "none"}
 _KEY_SOURCE_CLIENT = "client_provided"
 _KEY_SOURCE_SERVER = "server_wrapped"
+# In Cloud strict mode the tenant data key is intentionally never persisted —
+# it lives only here, in process memory, supplied by an approved client. So it
+# must not linger forever after a client goes away: track last-use and evict
+# idle entries (FISH_SESSION_KEY_TTL_SECONDS, default 1h; 0 disables eviction).
 _SESSION_DATA_KEYS: dict[str, str] = {}
+_SESSION_DATA_KEY_SEEN: dict[str, float] = {}
+_DEFAULT_SESSION_KEY_TTL_SECONDS = 3600
+
+
+def _session_key_ttl_seconds() -> int:
+    return _env_int(
+        "FISH_SESSION_KEY_TTL_SECONDS", _DEFAULT_SESSION_KEY_TTL_SECONDS
+    ) or 0
+
+
+def _evict_stale_session_keys(now: float | None = None) -> None:
+    """Drop in-memory tenant data keys idle past the TTL (no-op when TTL <= 0)."""
+    ttl = _session_key_ttl_seconds()
+    if ttl <= 0:
+        return
+    cutoff = (time.time() if now is None else now) - ttl
+    stale = [u for u, seen in _SESSION_DATA_KEY_SEEN.items() if seen < cutoff]
+    for user_hex in stale:
+        _SESSION_DATA_KEYS.pop(user_hex, None)
+        _SESSION_DATA_KEY_SEEN.pop(user_hex, None)
+    if stale:
+        log.info("session_data_keys_evicted", count=len(stale))
+
+
+def _get_session_data_key(user_hex: str, now: float | None = None) -> str | None:
+    """Return the cached tenant data key, refreshing its idle timer on use."""
+    key = _SESSION_DATA_KEYS.get(user_hex)
+    if key is not None:
+        _SESSION_DATA_KEY_SEEN[user_hex] = time.time() if now is None else now
+    return key
 
 
 def serve(*args, **kwargs):
@@ -323,7 +357,7 @@ def _public_account_payload(user_hex: str, row) -> dict:
         "multi_tenant": is_multi_tenant_enabled(),
         "enrollment_mode": _cloud_enrollment_mode() if is_multi_tenant_enabled() else "single-tenant",
         "tenant_key_mode": _cloud_key_mode() if is_multi_tenant_enabled() else _KEY_SOURCE_SERVER,
-        "client_key_available": bool(_SESSION_DATA_KEYS.get(user_hex)),
+        "client_key_available": bool(_get_session_data_key(user_hex)),
     }
     if row:
         for field in (
@@ -435,11 +469,14 @@ def _validate_client_data_key(value: str | None) -> str | None:
 
 
 def _remember_client_data_key(ctx: AuthContext, value: str | None) -> str | None:
+    # Called per client connection — a bounded, natural place to reap idle keys.
+    _evict_stale_session_keys()
     key = _validate_client_data_key(value)
     if key:
         _SESSION_DATA_KEYS[ctx.user_hex] = key
+        _SESSION_DATA_KEY_SEEN[ctx.user_hex] = time.time()
         return key
-    return _SESSION_DATA_KEYS.get(ctx.user_hex)
+    return _get_session_data_key(ctx.user_hex)
 
 
 async def _ensure_tenant(
@@ -593,7 +630,7 @@ async def _tenant_data_key(
         return None
     source = key_source or _KEY_SOURCE_SERVER
     if source == _KEY_SOURCE_CLIENT:
-        key = _SESSION_DATA_KEYS.get(user_hex)
+        key = _get_session_data_key(user_hex)
         if key:
             return key
         raise TenantKeyUnavailableError(
@@ -1885,7 +1922,7 @@ async def _http_migrate_client_key(request: "web.Request") -> "web.Response":
     if ctx.role not in {"owner", "tenant"}:
         return web.json_response({"error": "owner credentials required"}, status=403)
 
-    client_key = _SESSION_DATA_KEYS.get(ctx.user_hex)
+    client_key = _get_session_data_key(ctx.user_hex)
     if not client_key:
         return _tenant_key_error_response(
             TenantKeyUnavailableError("approved client tenant key is not available")

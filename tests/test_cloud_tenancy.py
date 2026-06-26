@@ -876,6 +876,52 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(fetchrow_args, [pub_a, pub_a, pub_b, pub_b])
 
+    def test_session_data_keys_evict_when_idle(self):
+        ingest = _load_ingest_module()
+        ingest._SESSION_DATA_KEYS.clear()
+        ingest._SESSION_DATA_KEY_SEEN.clear()
+        os.environ["FISH_SESSION_KEY_TTL_SECONDS"] = "100"
+        try:
+            now = 1_000_000.0
+            # idle past the TTL
+            ingest._SESSION_DATA_KEYS["stale"] = "k1"
+            ingest._SESSION_DATA_KEY_SEEN["stale"] = now - 200
+            # used recently
+            ingest._SESSION_DATA_KEYS["fresh"] = "k2"
+            ingest._SESSION_DATA_KEY_SEEN["fresh"] = now - 10
+
+            ingest._evict_stale_session_keys(now=now)
+
+            self.assertNotIn("stale", ingest._SESSION_DATA_KEYS)
+            self.assertNotIn("stale", ingest._SESSION_DATA_KEY_SEEN)
+            self.assertEqual(ingest._SESSION_DATA_KEYS.get("fresh"), "k2")
+
+            # Accessing a key refreshes its idle timer so an active session
+            # is never evicted out from under itself.
+            ingest._get_session_data_key("fresh", now=now)
+            self.assertEqual(ingest._SESSION_DATA_KEY_SEEN["fresh"], now)
+            ingest._evict_stale_session_keys(now=now + 50)
+            self.assertEqual(ingest._SESSION_DATA_KEYS.get("fresh"), "k2")
+        finally:
+            os.environ.pop("FISH_SESSION_KEY_TTL_SECONDS", None)
+            ingest._SESSION_DATA_KEYS.clear()
+            ingest._SESSION_DATA_KEY_SEEN.clear()
+
+    def test_session_data_keys_eviction_disabled_when_ttl_zero(self):
+        ingest = _load_ingest_module()
+        ingest._SESSION_DATA_KEYS.clear()
+        ingest._SESSION_DATA_KEY_SEEN.clear()
+        os.environ["FISH_SESSION_KEY_TTL_SECONDS"] = "0"
+        try:
+            ingest._SESSION_DATA_KEYS["u"] = "k"
+            ingest._SESSION_DATA_KEY_SEEN["u"] = 0.0
+            ingest._evict_stale_session_keys(now=1_000_000.0)
+            self.assertEqual(ingest._SESSION_DATA_KEYS.get("u"), "k")
+        finally:
+            os.environ.pop("FISH_SESSION_KEY_TTL_SECONDS", None)
+            ingest._SESSION_DATA_KEYS.clear()
+            ingest._SESSION_DATA_KEY_SEEN.clear()
+
     async def test_current_activity_uses_fresh_frame_when_activity_is_stale(self):
         ingest = _load_ingest_module()
         db = RecordingPool()
