@@ -94,6 +94,11 @@ class FishermanDaemon:
         self._capture_backend = "swift" if raw_capture_backend == "swift" else "native"
         self._running = False
         self._capture_ok = False
+        # Latches True after the first successful capture this process. Unlike
+        # _capture_ok (which resets on any failure) this stays True for the
+        # process lifetime, proving the Screen Recording grant is in effect —
+        # so a later capture error must be a transient display blip, not denial.
+        self._has_captured_once = False
         self._backend_block_code: str | None = None
         self._backend_block_detail: str | None = None
         self._backend_block_action: str | None = None
@@ -423,27 +428,44 @@ class FishermanDaemon:
                 if not self._capture_ok:
                     self._capture_ok = True
                     log.info("screen_capture_working")
+                self._has_captured_once = True
                 self._consecutive_capture_failures = 0
             except RuntimeError as e:
                 # capture_screen raises RuntimeError when screen recording access
                 # is missing or the capture API returns no image.
                 self._consecutive_capture_failures += 1
+                message = str(e).lower()
+                # `screencapture` returns the SAME "could not create image from
+                # display" error when the display is asleep/locked as it does on
+                # a real Screen Recording denial. Disambiguate using whether we
+                # have ever captured successfully this process: if we have, the
+                # grant is proven and this is just the screen being unavailable.
+                explicit_denial = "permission" in message or "screen recording" in message
+                display_unavailable = "could not create image" in message or "display" in message
+                permission_denied = explicit_denial or (
+                    not self._has_captured_once
+                    and ("screencapture exited" in message or display_unavailable)
+                )
+
                 if self._consecutive_capture_failures == 1:
                     self._capture_ok = False
-                    log.warning("screen_recording_not_granted", error=str(e))
-                # Permission-denied capture attempts can trigger macOS's
-                # Screen Recording prompt. Once denied, avoid repeatedly
-                # poking TCC in the background; the menubar's Repair Capture
-                # action or an app restart is the explicit retry after the
-                # user grants permission.
-                message = str(e).lower()
-                permission_denied = (
-                    "permission" in message
-                    or "screen recording" in message
-                    or "screencapture exited" in message
-                )
+                    if permission_denied:
+                        log.warning("screen_recording_not_granted", error=str(e))
+                    else:
+                        # Benign: display asleep/locked while granted. Don't log
+                        # it as a permission problem or it reads like a regression.
+                        log.info("screen_capture_paused_display_unavailable", error=str(e))
+
                 if permission_denied:
+                    # A genuine denial can trigger macOS's Screen Recording
+                    # prompt. Back off hard so we stop poking TCC in the
+                    # background; "Repair Capture" or an app restart is the
+                    # explicit retry once the user grants permission.
                     backoff = 300.0
+                elif display_unavailable:
+                    # Display likely asleep/locked. Poll back quickly so capture
+                    # resumes promptly when the screen wakes.
+                    backoff = min(5.0 * self._consecutive_capture_failures, 30.0)
                 else:
                     # Exponential backoff: 3s, 6s, 12s, ... up to 60s
                     backoff = min(3.0 * (2 ** (self._consecutive_capture_failures - 1)), 60.0)
