@@ -40,19 +40,21 @@ _MAGIC = b"FISHST2\0"
 _NONCE_LEN = 12
 _TIMEOUT = 10.0
 _FETCH_RETRIES = 4
+_FETCH_RETRIES_LARGE = 8
 _FETCH_RETRY_BACKOFF = 0.25
 
 
-def _fetch_events_json(url: str, timeout: float) -> Any:
+def _fetch_events_json(url: str, timeout: float, retries: int = _FETCH_RETRIES) -> Any:
     """GET the relay /events endpoint with retries.
 
     Large responses over a flaky proxy/VPN intermittently truncate mid-body
     (urllib raises IncompleteRead, or json sees a partial body). The truncation
-    point is random, so a retry almost always succeeds. Permanent 4xx errors
-    (bad pubkey/recipient_tag) are not retried.
+    point is random and more likely the bigger the body, so a retry almost
+    always succeeds — callers fetching more events pass a higher `retries`.
+    Permanent 4xx errors (bad pubkey/recipient_tag) are not retried.
     """
     last_err: Exception | None = None
-    for attempt in range(_FETCH_RETRIES):
+    for attempt in range(retries):
         try:
             with urllib.request.urlopen(url, timeout=timeout) as resp:
                 raw = resp.read()
@@ -63,7 +65,7 @@ def _fetch_events_json(url: str, timeout: float) -> Any:
             last_err = e
         except Exception as e:  # IncompleteRead, URLError, timeout, partial JSON
             last_err = e
-        if attempt < _FETCH_RETRIES - 1:
+        if attempt < retries - 1:
             time.sleep(_FETCH_RETRY_BACKOFF)
     raise LedgerError(f"relay unreachable: {last_err}") from last_err
 _INFO_PAIRWISE_STATUS = b"fisherman/status-pairwise/v2"
@@ -339,7 +341,11 @@ def fetch_friend_status(
     if since_ts is not None:
         params["since"] = str(since_ts)
     url = relay_url.rstrip("/") + "/events?" + urllib.parse.urlencode(params)
-    events = _fetch_events_json(url, timeout)
+    # Bigger pages (e.g. the friend card's day view) produce larger bodies that
+    # truncate more often, and their callers allow a longer timeout — so give
+    # them more retries.
+    retries = _FETCH_RETRIES_LARGE if limit > 60 else _FETCH_RETRIES
+    events = _fetch_events_json(url, timeout, retries=retries)
 
     if not isinstance(events, list):
         return []
