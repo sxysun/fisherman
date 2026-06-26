@@ -227,6 +227,17 @@ def query_base_url_from_backend_url(url: str, activity_port: int = 9998) -> str:
     return urlunparse((scheme, netloc, "", "", "", "")).rstrip("/")
 
 
+def query_base_url_is_stale_for_backend(query_base_url: str, backend_url: str) -> bool:
+    """Return true when a persisted query base clearly belongs to an old backend."""
+    query = (query_base_url or "").strip().rstrip("/")
+    backend = (backend_url or "").strip().rstrip("/")
+    if not query or not backend:
+        return False
+    if backend == DEFAULT_CLOUD_BACKEND_URL:
+        return False
+    return query == DEFAULT_CLOUD_BACKEND_URL
+
+
 class FishermanConfig(BaseSettings):
     model_config = {
         "env_prefix": "FISH_",
@@ -280,7 +291,10 @@ class FishermanConfig(BaseSettings):
         elif mode == "self_hosted":
             if not self.backend_url:
                 self.backend_url = self.server_url
-            if not self.query_base_url:
+            if (
+                not self.query_base_url
+                or query_base_url_is_stale_for_backend(self.query_base_url, self.backend_url)
+            ):
                 self.query_base_url = query_base_url_from_backend_url(
                     self.backend_url,
                     self.activity_port,

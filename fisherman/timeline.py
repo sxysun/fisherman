@@ -128,7 +128,10 @@ def _fishkey_header(private_key_hex: str) -> str | None:
 
 
 def _activity_api_url(cfg, path: str) -> str | None:
-    """Derive http(s)://host:activity_port/path from cfg.backend_url + cfg.activity_port."""
+    """Return the active backend HTTP API URL for an activity endpoint."""
+    query_base = str(getattr(cfg, "query_base_url", "") or "").strip().rstrip("/")
+    if query_base:
+        return f"{query_base}{path}"
     if not cfg.backend_url:
         return None
     parsed = urllib.parse.urlparse(cfg.backend_url)

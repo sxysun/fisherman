@@ -165,6 +165,25 @@ class ConfigIdentityTests(unittest.TestCase):
             "https://fish.example",
         )
 
+    def test_self_hosted_mode_ignores_stale_cloud_query_base(self) -> None:
+        with tempfile.TemporaryDirectory() as home_dir:
+            home = Path(home_dir)
+            os.environ["HOME"] = str(home)
+            self._home_env(home).write_text(
+                "FISH_BACKEND_MODE=self_hosted\n"
+                "FISH_BACKEND_URL=ws://fish.example:9999/ingest\n"
+                "FISH_QUERY_BASE_URL=https://fisherman.teleport.computer\n",
+                encoding="utf-8",
+            )
+            missing_project = home / "missing" / ".env"
+
+            with mock.patch.object(
+                config_mod, "project_env_path", return_value=missing_project
+            ):
+                cfg = config_mod.FishermanConfig()
+
+            self.assertEqual(cfg.query_base_url, "http://fish.example:9998")
+
     def test_backend_api_url_keeps_reverse_proxy_origin_for_cloud_ingest(self) -> None:
         url = cli._backend_api_url(
             "wss://fisherman.teleport.computer/ingest",

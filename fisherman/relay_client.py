@@ -133,6 +133,7 @@ class RelayClient:
             ping_timeout=30,
             open_timeout=10,
             max_size=4 * 1024 * 1024,
+            proxy=None,
         ) as ws:
             await ws.send(json.dumps(self._build_hello()))
             welcome_raw = await asyncio.wait_for(ws.recv(), timeout=10)
