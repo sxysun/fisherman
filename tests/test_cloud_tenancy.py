@@ -232,6 +232,15 @@ class RecordingConn:
             return None
         if "FROM frames" in normalized and "image_key IS NOT NULL" in normalized:
             return self._pool.query_rows[0] if self._pool.query_rows else None
+        if "FROM frames" in normalized and "activity IS NOT NULL" in normalized:
+            return self._pool.activity_rows.get(user_pubkey)
+        if "FROM frames" in normalized:
+            rows = [
+                row for row in self._pool.frames
+                if row.get("user_pubkey") == user_pubkey
+            ]
+            rows.sort(key=lambda row: row.get("ts"), reverse=True)
+            return rows[0] if rows else None
         return self._pool.activity_rows.get(user_pubkey)
 
     async def fetchval(self, sql: str, *args):
@@ -865,7 +874,48 @@ class CloudTenancyTests(unittest.IsolatedAsyncioTestCase):
             for entry in db.fetches
             if entry[0] == "fetchrow" and "FROM frames" in entry[1]
         ]
-        self.assertEqual(fetchrow_args, [pub_a, pub_b])
+        self.assertEqual(fetchrow_args, [pub_a, pub_a, pub_b, pub_b])
+
+    async def test_current_activity_uses_fresh_frame_when_activity_is_stale(self):
+        ingest = _load_ingest_module()
+        db = RecordingPool()
+        crypto = sys.modules["crypto"]
+        pub_a = _pub_hex(SEED_A)
+        db.users[pub_a] = {
+            "disabled_at": None,
+            "enrollment_state": "active",
+            "max_frames_per_hour": None,
+            "wrapped_data_key": None,
+        }
+        db.activity_rows = {
+            pub_a: {
+                "ts": type("Ts", (), {
+                    "timestamp": lambda self: time.time() - 3600,
+                    "isoformat": lambda self: "old",
+                })(),
+                "activity": crypto.encrypt_json({
+                    "emoji": "😴",
+                    "category": "idle",
+                    "status": "old idle",
+                }),
+            },
+        }
+        db.frames.append({
+            "user_pubkey": pub_a,
+            "ts": datetime.datetime.now(datetime.timezone.utc),
+            "app": "Code",
+            "window": crypto.encrypt_text("fisherman config.py"),
+            "ocr_text": crypto.encrypt_text("query_base_url current_activity"),
+            "data_key_source": "server_wrapped",
+        })
+
+        resp = await ingest._http_current_activity(FakeRequest(_fishkey(SEED_A), db))
+        body = json.loads(resp.text)
+
+        self.assertEqual(resp.status, 200)
+        self.assertFalse(body["stale"])
+        self.assertEqual(body["source"], "fresh_frame_fallback")
+        self.assertEqual(body["category"], "coding")
 
     async def test_activity_categorizer_uses_private_heuristic_only_when_no_llm_mode(self):
         ingest = _load_ingest_module()

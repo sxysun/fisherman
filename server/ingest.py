@@ -1284,7 +1284,7 @@ def _heuristic_activity(app: str | None, window: str, ocr_text: str) -> dict:
             ("💻", "terminal", "using terminal"),
         ),
         (
-            ("cursor", "visual studio code", "vscode", "xcode", "pycharm", "zed"),
+            ("cursor", "visual studio code", "vscode", "code", "xcode", "pycharm", "zed"),
             ("💻", "coding", "writing code"),
         ),
         (
@@ -1325,7 +1325,7 @@ def _heuristic_activity(app: str | None, window: str, ocr_text: str) -> dict:
             emoji, category, status = activity
             return {"emoji": emoji, "category": category, "status": status}
 
-    return {"emoji": "🟢", "category": "active", "status": "active"}
+    return {"emoji": "🟢", "category": "browsing", "status": "active now"}
 
 
 async def _categorize_activity(
@@ -1477,11 +1477,69 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
                 """,
                 user_hex,
             )
+            latest_frame = await conn.fetchrow(
+                f"""
+                SELECT ts, app, "window", ocr_text, data_key_source
+                FROM frames
+                WHERE {_tenant_predicate()}
+                ORDER BY ts DESC
+                LIMIT 1
+                """,
+                user_hex,
+            )
 
-        if not row:
+        if not row and not latest_frame:
             return web.json_response({
                 "activity": None,
                 "message": "No activity yet",
+            })
+
+        def latest_frame_age() -> float | None:
+            if not latest_frame:
+                return None
+            return time.time() - latest_frame["ts"].timestamp()
+
+        async def fresh_frame_activity() -> dict | None:
+            if not latest_frame:
+                return None
+            frame_age = latest_frame_age()
+            if frame_age is None or frame_age > 300:
+                return None
+            data_key = await _tenant_data_key(
+                db,
+                user_hex,
+                _row_get(latest_frame, "data_key_source"),
+            )
+            window = await loop.run_in_executor(
+                _pool,
+                partial(_decrypt_text_for_user, latest_frame["window"], data_key),
+            ) if latest_frame["window"] else ""
+            ocr_text = await loop.run_in_executor(
+                _pool,
+                partial(_decrypt_text_for_user, latest_frame["ocr_text"], data_key),
+            ) if latest_frame["ocr_text"] else ""
+            activity = _heuristic_activity(latest_frame["app"], window, ocr_text)
+            return {
+                "emoji": activity.get("emoji", "🟢"),
+                "category": activity.get("category", "browsing"),
+                "status": activity.get("status", "active now"),
+                "updated_at": latest_frame["ts"].isoformat(),
+                "stale": False,
+                "flow": False,
+                "source": "fresh_frame_fallback",
+            }
+
+        if not row:
+            fallback = await fresh_frame_activity()
+            if fallback:
+                return web.json_response(fallback)
+            return web.json_response({
+                "emoji": "😴",
+                "category": "idle",
+                "status": "away (no recent activity)",
+                "updated_at": latest_frame["ts"].isoformat() if latest_frame else None,
+                "stale": True,
+                "flow": False,
             })
 
         ts = row["ts"]
@@ -1492,6 +1550,9 @@ async def _http_current_activity(request: "web.Request") -> "web.Response":
         )
         age_seconds = time.time() - ts.timestamp()
         if age_seconds > 300:
+            fallback = await fresh_frame_activity()
+            if fallback:
+                return web.json_response(fallback)
             return web.json_response({
                 "emoji": "😴",
                 "category": "idle",

@@ -431,8 +431,22 @@ class FishermanDaemon:
                 if self._consecutive_capture_failures == 1:
                     self._capture_ok = False
                     log.warning("screen_recording_not_granted", error=str(e))
-                # Exponential backoff: 3s, 6s, 12s, ... up to 60s
-                backoff = min(3.0 * (2 ** (self._consecutive_capture_failures - 1)), 60.0)
+                # Permission-denied capture attempts can trigger macOS's
+                # Screen Recording prompt. Once denied, avoid repeatedly
+                # poking TCC in the background; the menubar's Repair Capture
+                # action or an app restart is the explicit retry after the
+                # user grants permission.
+                message = str(e).lower()
+                permission_denied = (
+                    "permission" in message
+                    or "screen recording" in message
+                    or "screencapture exited" in message
+                )
+                if permission_denied:
+                    backoff = 300.0
+                else:
+                    # Exponential backoff: 3s, 6s, 12s, ... up to 60s
+                    backoff = min(3.0 * (2 ** (self._consecutive_capture_failures - 1)), 60.0)
                 await asyncio.sleep(backoff)
                 continue
             except Exception:
