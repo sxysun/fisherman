@@ -145,6 +145,64 @@ struct ThumbnailRef: Identifiable {
     let image: NSImage
 }
 
+struct TranscriptRef: Identifiable, Equatable {
+    let id: String
+    let timestamp: Date
+    let transcript: String
+    let title: String?
+    let durationSeconds: Double?
+    let sourceAudioPath: String?
+    let sourceTranscriptPath: String?
+
+    var durationText: String {
+        guard let durationSeconds else { return "" }
+        let seconds = max(0, Int(durationSeconds.rounded()))
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
+    }
+}
+
+private enum TranscriptScope: String, CaseIterable, Identifiable {
+    case day = "Day"
+    case all = "All"
+
+    var id: String { rawValue }
+}
+
+private struct TranscriptHealth {
+    var inboxAudio: Int = 0
+    var transcripts: Int = 0
+    var failed: Int = 0
+    var pending: Int = 0
+    var partials: Int = 0
+    var lockAgeSeconds: Double?
+    var lockPID: Int?
+    var latestTranscript: Date?
+
+    var active: Bool {
+        if partials > 0 { return true }
+        if let lockAgeSeconds { return lockAgeSeconds < 30 * 60 }
+        return false
+    }
+
+    var statusText: String {
+        if active { return "active" }
+        if pending > 0 { return "waiting" }
+        return "caught up"
+    }
+
+    var statusColor: Color {
+        if failed > 0 && pending == 0 { return .orange }
+        if active { return .green }
+        if pending > 0 { return .yellow }
+        return .secondary
+    }
+}
+
 /// Bulk-fetch all thumbnails for a day so the scrubber renders instantly
 /// regardless of network. Server returns up to 5000 entries in one shot;
 /// payload is typically 5–15MB for a full day of capture.
@@ -222,6 +280,131 @@ func fetchThumbnails(
         }
     }
     return .failure(lastError)
+}
+
+@MainActor
+func fetchVoiceMemoTranscripts(
+    config: ConfigManager,
+    since: Date? = nil,
+    until: Date? = nil,
+    search: String? = nil
+) async -> Result<[TranscriptRef], RewindFetchError> {
+    let session = RewindNetworking.indexSession
+    let controlPort = config.controlPort.trimmingCharacters(in: .whitespacesAndNewlines)
+    let port = controlPort.isEmpty ? "7892" : controlPort
+    let encodedApp = "voice_memo_life"
+    var localURLString = "http://127.0.0.1:\(port)/transcripts"
+        + "?meeting_app=\(encodedApp)&limit=2000"
+    if let since {
+        localURLString += "&since=\(since.timeIntervalSince1970)"
+    }
+    if let until {
+        localURLString += "&until=\(until.timeIntervalSince1970)"
+    }
+    if let search, !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+       let escaped = search.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+        localURLString += "&search=\(escaped)"
+    }
+
+    if let url = URL(string: localURLString) {
+        do {
+            let (data, response) = try await session.data(from: url)
+            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                return decodeTranscripts(data)
+            }
+        } catch {
+            // Fall through to backend /api/transcripts below. The local
+            // control server can be briefly unavailable during daemon restarts.
+        }
+    }
+
+    let serverURL = config.effectiveOwnServerURL
+    let candidates = config.ownActivityPortCandidates()
+    guard !serverURL.isEmpty,
+          let wsURL = URL(string: serverURL),
+          let host = wsURL.host
+    else { return .failure(.noServerConfigured) }
+
+    let scheme = serverURL.hasPrefix("wss://") ? "https" : "http"
+    let iso = ISO8601DateFormatter()
+    iso.formatOptions = [.withInternetDateTime]
+
+    var lastError: RewindFetchError = .requestFailed("No reachable transcript source.")
+    for port in candidates {
+        let portSegment = port.isEmpty ? "" : ":\(port)"
+        var urlString = "\(scheme)://\(host)\(portSegment)/api/transcripts"
+            + "?meeting_app=\(encodedApp)&limit=2000"
+        if let since {
+            urlString += "&since=\(iso.string(from: since))"
+        }
+        if let until {
+            urlString += "&until=\(iso.string(from: until))"
+        }
+        if let search, !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let escaped = search.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
+            urlString += "&search=\(escaped)"
+        }
+        guard let url = URL(string: urlString) else { continue }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20.0
+        if let auth = config.signRequest() {
+            request.setValue(auth, forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                lastError = .requestFailed("No response from transcript source")
+                continue
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                return .failure(.unauthorized)
+            }
+            if http.statusCode != 200 {
+                lastError = .requestFailed("HTTP \(http.statusCode) from transcripts")
+                continue
+            }
+            return decodeTranscripts(data)
+        } catch {
+            lastError = .requestFailed(error.localizedDescription)
+            continue
+        }
+    }
+    return .failure(lastError)
+}
+
+private func decodeTranscripts(_ data: Data) -> Result<[TranscriptRef], RewindFetchError> {
+    guard let raw = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+        return .failure(.decodeFailed)
+    }
+    let rows: [TranscriptRef] = raw.compactMap { entry in
+        let tsSeconds: Double
+        if let ts = entry["ts"] as? Double {
+            tsSeconds = ts
+        } else if let ts = entry["ts"] as? Int {
+            tsSeconds = Double(ts)
+        } else if let tsMs = entry["ts_ms"] as? Int {
+            tsSeconds = Double(tsMs) / 1000.0
+        } else {
+            return nil
+        }
+        guard let text = entry["transcript"] as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        let source = entry["source_transcript_path"] as? String
+        let id = source ?? "\(Int(tsSeconds * 1000))-\(text.hashValue)"
+        return TranscriptRef(
+            id: id,
+            timestamp: Date(timeIntervalSince1970: tsSeconds),
+            transcript: text,
+            title: entry["title"] as? String,
+            durationSeconds: entry["duration_s"] as? Double,
+            sourceAudioPath: entry["source_audio_path"] as? String,
+            sourceTranscriptPath: source
+        )
+    }
+    return .success(rows.sorted(by: { $0.timestamp > $1.timestamp }))
 }
 
 @MainActor
@@ -323,6 +506,17 @@ struct RewindWindowView: View {
     @State private var loadingThumbsFor: Set<Date> = []
     @State private var thumbsError: String?
 
+    @State private var transcriptPanelOpen: Bool = false
+    @State private var transcriptScope: TranscriptScope = .day
+    @State private var transcriptsByDay: [Date: [TranscriptRef]] = [:]
+    @State private var loadingTranscriptsFor: Set<Date> = []
+    @State private var globalTranscripts: [TranscriptRef] = []
+    @State private var loadingGlobalTranscripts: Bool = false
+    @State private var transcriptsError: String?
+    @State private var globalTranscriptsError: String?
+    @State private var transcriptSearch: String = ""
+    @State private var transcriptHealth: TranscriptHealth = .init()
+
     @State private var playing = false
     @State private var playSpeed: Double = 5.0
     @State private var playTask: Task<Void, Never>?
@@ -346,6 +540,37 @@ struct RewindWindowView: View {
     private var currentThumb: NSImage? {
         guard let f = currentFrame else { return nil }
         return thumbsByDay[selectedDate]?[f.id]
+    }
+
+    private var transcripts: [TranscriptRef] {
+        transcriptsByDay[selectedDate] ?? []
+    }
+
+    private var filteredTranscripts: [TranscriptRef] {
+        let needle = transcriptSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return transcripts }
+        return transcripts.filter {
+            $0.transcript.localizedCaseInsensitiveContains(needle)
+            || ($0.title?.localizedCaseInsensitiveContains(needle) ?? false)
+        }
+    }
+
+    private var shownTranscripts: [TranscriptRef] {
+        transcriptScope == .all ? globalTranscripts : filteredTranscripts
+    }
+
+    private var sourceTranscriptCount: Int {
+        transcriptScope == .all ? globalTranscripts.count : transcripts.count
+    }
+
+    private var transcriptsLoading: Bool {
+        transcriptScope == .all
+            ? loadingGlobalTranscripts
+            : loadingTranscriptsFor.contains(selectedDate)
+    }
+
+    private var activeTranscriptsError: String? {
+        transcriptScope == .all ? globalTranscriptsError : transcriptsError
     }
 
     /// True when the currently displayed *full-res* bitmap matches the
@@ -374,12 +599,19 @@ struct RewindWindowView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            navHeader
-            Divider().opacity(0.4)
-            framePreview
-            scrubber
-            controls
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
+                navHeader
+                Divider().opacity(0.4)
+                framePreview
+                scrubber
+                controls
+            }
+            if transcriptPanelOpen {
+                Divider().opacity(0.45)
+                transcriptPanel
+                    .frame(width: 340)
+            }
         }
         .onAppear {
             // First display: honor whichever day the open-call requested.
@@ -397,10 +629,20 @@ struct RewindWindowView: View {
             stopPlay()
             fetchIndexIfNeeded(selectedDate)
             fetchThumbsIfNeeded(selectedDate)
+            if transcriptPanelOpen { fetchTranscriptsIfNeeded(selectedDate) }
             currentImage = nil
             currentMeta = nil
             currentLoadedFrameId = nil
             loadFrameIfNeeded()
+        }
+        .onChange(of: transcriptPanelOpen) { _, open in
+            if open {
+                refreshTranscriptHealth()
+                loadVisibleTranscripts(force: false)
+            }
+        }
+        .onChange(of: transcriptScope) { _, _ in
+            if transcriptPanelOpen { loadVisibleTranscripts(force: false) }
         }
         .onChange(of: currentIndex) { _, _ in
             loadFrameIfNeeded()
@@ -479,6 +721,19 @@ struct RewindWindowView: View {
             }
             .buttonStyle(.bordered).controlSize(.small)
             .help("Refresh this day's index + thumbs")
+
+            Button {
+                transcriptPanelOpen.toggle()
+                if transcriptPanelOpen { fetchTranscriptsIfNeeded(selectedDate, force: true) }
+            } label: {
+                Image(systemName: "quote.bubble")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 14, height: 14)
+            }
+            .buttonStyle(.bordered)
+            .tint(transcriptPanelOpen ? .accentColor : .clear)
+            .controlSize(.small)
+            .help("Show voice memo transcripts for this day")
         }
     }
 
@@ -712,7 +967,320 @@ struct RewindWindowView: View {
         return "\(frames.count) frames · \(fmtClock(frames.first!.timestamp)) → \(fmtClock(frames.last!.timestamp))\(suffix)"
     }
 
+    private var transcriptPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "quote.bubble")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Voice Transcripts")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                if transcriptsLoading {
+                    ProgressView().controlSize(.small)
+                }
+                Button {
+                    refreshTranscriptHealth()
+                    loadVisibleTranscripts(force: true)
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Refresh transcripts")
+            }
+
+            Picker("Transcript scope", selection: $transcriptScope) {
+                ForEach(TranscriptScope.allCases) { scope in
+                    Text(scope.rawValue).tag(scope)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            transcriptHealthView
+
+            HStack(spacing: 6) {
+                TextField(
+                    transcriptScope == .all ? "Search all transcripts" : "Search this day",
+                    text: $transcriptSearch
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .onSubmit {
+                    if transcriptScope == .all { fetchGlobalTranscripts(force: true) }
+                }
+
+                if transcriptScope == .all {
+                    Button {
+                        fetchGlobalTranscripts(force: true)
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(loadingGlobalTranscripts)
+                    .help("Search all voice memo transcripts")
+                }
+            }
+
+            HStack(spacing: 6) {
+                Text(transcriptCountLabel)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button(transcriptScope == .all ? "Copy Results" : "Copy Day") {
+                    copyToPasteboard(shownTranscripts.map { transcriptCopyBlock($0) }.joined(separator: "\n\n"))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(shownTranscripts.isEmpty)
+            }
+
+            if let err = activeTranscriptsError, shownTranscripts.isEmpty {
+                Text(err)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            } else if transcriptsLoading && shownTranscripts.isEmpty {
+                Spacer()
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity)
+                Spacer()
+            } else if shownTranscripts.isEmpty {
+                Text(emptyTranscriptMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+                Spacer()
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(shownTranscripts) { row in
+                            transcriptRow(row)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var transcriptHealthView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(transcriptHealth.statusColor)
+                    .frame(width: 7, height: 7)
+                Text("Transcription \(transcriptHealth.statusText)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if let latest = transcriptHealth.latestTranscript {
+                    Text("latest \(fmtDateTime(latest))")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+
+            HStack(spacing: 8) {
+                healthMetric("audio", transcriptHealth.inboxAudio)
+                healthMetric("done", transcriptHealth.transcripts)
+                healthMetric("pending", transcriptHealth.pending)
+                healthMetric("failed", transcriptHealth.failed)
+            }
+
+            if transcriptHealth.partials > 0 || transcriptHealth.lockAgeSeconds != nil {
+                HStack(spacing: 6) {
+                    if transcriptHealth.partials > 0 {
+                        Text("\(transcriptHealth.partials) checkpoint\(transcriptHealth.partials == 1 ? "" : "s")")
+                    }
+                    if let age = transcriptHealth.lockAgeSeconds {
+                        Text("lock \(formatAge(age))")
+                    }
+                    if let pid = transcriptHealth.lockPID {
+                        Text("pid \(pid)")
+                    }
+                    Spacer()
+                }
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func healthMetric(_ label: String, _ value: Int) -> some View {
+        HStack(spacing: 3) {
+            Text(label)
+                .foregroundStyle(.tertiary)
+            Text("\(value)")
+                .foregroundStyle(.secondary)
+        }
+        .font(.system(size: 9, design: .monospaced))
+        .lineLimit(1)
+    }
+
+    private func transcriptRow(_ row: TranscriptRef) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(transcriptScope == .all ? fmtDateTime(row.timestamp) : fmtClock(row.timestamp))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: transcriptScope == .all ? 76 : 58, alignment: .leading)
+                if let title = row.title, !title.isEmpty {
+                    Text(title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Spacer(minLength: 0)
+                if !row.durationText.isEmpty {
+                    Text(row.durationText)
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            Text(row.transcript)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(transcriptScope == .all ? 5 : 8)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .clipped()
+            HStack(spacing: 6) {
+                Button("Copy") { copyToPasteboard(transcriptCopyBlock(row)) }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                if let path = row.sourceTranscriptPath {
+                    Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
+                Spacer()
+            }
+        }
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.black.opacity(0.001))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(height: 1)
+        }
+    }
+
     // MARK: fetching
+
+    private var transcriptCountLabel: String {
+        if transcriptScope == .all {
+            let needle = transcriptSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+            return needle.isEmpty ? "\(globalTranscripts.count) latest" : "\(globalTranscripts.count) matches"
+        }
+        return "\(filteredTranscripts.count) of \(sourceTranscriptCount)"
+    }
+
+    private var emptyTranscriptMessage: String {
+        if transcriptScope == .all {
+            return transcriptSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "No voice memo transcripts indexed yet."
+                : "No matching transcripts across all days."
+        }
+        return transcriptSearch.isEmpty
+            ? "No voice memo transcripts for this day."
+            : "No matching transcripts for this day."
+    }
+
+    private func loadVisibleTranscripts(force: Bool) {
+        if transcriptScope == .all {
+            fetchGlobalTranscripts(force: force)
+        } else {
+            fetchTranscriptsIfNeeded(selectedDate, force: force)
+        }
+    }
+
+    private func refreshTranscriptHealth() {
+        transcriptHealth = Self.readTranscriptHealth()
+    }
+
+    private static func readTranscriptHealth() -> TranscriptHealth {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: "/Users/Shared/voice-transcripts", isDirectory: true)
+        let inbox = root.appendingPathComponent("inbox", isDirectory: true)
+        let transcripts = root.appendingPathComponent("transcripts", isDirectory: true)
+        let failed = root.appendingPathComponent("failed", isDirectory: true)
+        let partials = root.appendingPathComponent("partials", isDirectory: true)
+        let audioExts: Set<String> = ["m4a", "mp4", "qta", "mov", "wav", "mp3", "aac"]
+
+        let inboxAudio = countFiles(in: inbox) { audioExts.contains($0.pathExtension.lowercased()) }
+        let transcriptFiles = files(in: transcripts) { $0.pathExtension.lowercased() == "txt" }
+        let failedCount = countFiles(in: failed) { $0.pathExtension.lowercased() == "json" }
+        let partialCount = countFiles(in: partials) { $0.pathExtension.lowercased() == "json" }
+
+        var latestTranscript: Date?
+        for file in transcriptFiles {
+            if let attrs = try? fm.attributesOfItem(atPath: file.path),
+               let modified = attrs[.modificationDate] as? Date,
+               latestTranscript == nil || modified > latestTranscript! {
+                latestTranscript = modified
+            }
+        }
+
+        var lockAge: Double?
+        var lockPID: Int?
+        let lock = root.appendingPathComponent(".transcribe.lock")
+        if let data = try? Data(contentsOf: lock),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let pid = json["pid"] as? Int {
+                lockPID = pid
+            }
+            if let timestamp = json["time"] as? Double {
+                lockAge = max(0, Date().timeIntervalSince1970 - timestamp)
+            }
+        }
+
+        return TranscriptHealth(
+            inboxAudio: inboxAudio,
+            transcripts: transcriptFiles.count,
+            failed: failedCount,
+            pending: max(0, inboxAudio - transcriptFiles.count - failedCount),
+            partials: partialCount,
+            lockAgeSeconds: lockAge,
+            lockPID: lockPID,
+            latestTranscript: latestTranscript
+        )
+    }
+
+    private static func files(in directory: URL, matching predicate: (URL) -> Bool) -> [URL] {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return urls.filter { url in
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+                return false
+            }
+            return predicate(url)
+        }
+    }
+
+    private static func countFiles(in directory: URL, matching predicate: (URL) -> Bool) -> Int {
+        files(in: directory, matching: predicate).count
+    }
 
     private func fetchThumbsIfNeeded(_ day: Date) {
         let dayStart = Calendar.current.startOfDay(for: day)
@@ -761,6 +1329,58 @@ struct RewindWindowView: View {
                     }
                 case .failure(let err):
                     indexError = err.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func fetchTranscriptsIfNeeded(_ day: Date, force: Bool = false) {
+        let dayStart = Calendar.current.startOfDay(for: day)
+        guard force || transcriptsByDay[dayStart] == nil else { return }
+        guard !loadingTranscriptsFor.contains(dayStart),
+              let dayEnd = Calendar.current.date(byAdding: .day, value: 1, to: dayStart)
+        else { return }
+
+        loadingTranscriptsFor.insert(dayStart)
+        transcriptsError = nil
+        Task {
+            let result = await fetchVoiceMemoTranscripts(
+                config: config,
+                since: dayStart,
+                until: dayEnd,
+                search: nil
+            )
+            await MainActor.run {
+                loadingTranscriptsFor.remove(dayStart)
+                switch result {
+                case .success(let rows):
+                    transcriptsByDay[dayStart] = rows
+                case .failure(let err):
+                    transcriptsError = err.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func fetchGlobalTranscripts(force: Bool = false) {
+        guard force || globalTranscripts.isEmpty else { return }
+        guard !loadingGlobalTranscripts else { return }
+
+        loadingGlobalTranscripts = true
+        globalTranscriptsError = nil
+        let search = transcriptSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        Task {
+            let result = await fetchVoiceMemoTranscripts(
+                config: config,
+                search: search.isEmpty ? nil : search
+            )
+            await MainActor.run {
+                loadingGlobalTranscripts = false
+                switch result {
+                case .success(let rows):
+                    globalTranscripts = rows
+                case .failure(let err):
+                    globalTranscriptsError = err.localizedDescription
                 }
             }
         }
@@ -919,5 +1539,31 @@ struct RewindWindowView: View {
         f.dateFormat = "HH:mm:ss"
         f.locale = Locale(identifier: "en_US_POSIX")
         return f.string(from: d)
+    }
+
+    private func fmtDateTime(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f.string(from: d)
+    }
+
+    private func formatAge(_ seconds: Double) -> String {
+        let s = max(0, Int(seconds.rounded()))
+        if s < 60 { return "\(s)s" }
+        let m = s / 60
+        if m < 60 { return "\(m)m" }
+        return "\(m / 60)h \(m % 60)m"
+    }
+
+    private func transcriptCopyBlock(_ row: TranscriptRef) -> String {
+        let title = row.title?.isEmpty == false ? " · \(row.title!)" : ""
+        let stamp = transcriptScope == .all ? fmtDateTime(row.timestamp) : fmtClock(row.timestamp)
+        return "[\(stamp)\(title)]\n\(row.transcript)"
+    }
+
+    private func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 }
