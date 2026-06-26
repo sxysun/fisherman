@@ -854,3 +854,13 @@ When a CVM is deployed, append a row like:
 | Domain | fisherman.teleport.computer |
 | Relay | relay.fisherman.teleport.computer |
 | Workflow run | https://github.com/sxysun/fisherman/actions/runs/28219559596 |
+
+### 2026-06-26 — Upgrade — compose @ `f4788ee`
+
+| | |
+|---|---|
+| compose_hash | `0x475451d5f951e704de6e3e6bca69621211e18c4dd8d427f1749efba5875ec58e` |
+| VM UUID | `f6a6bbea-4122-4b67-ae1d-5b2380cbae0f` |
+| Domain | fisherman.teleport.computer |
+| Relay | relay.fisherman.teleport.computer |
+| Workflow run | https://github.com/sxysun/fisherman/actions/runs/28227559182 |
