@@ -727,6 +727,7 @@ async def _status_llm_settings(
                     api_key_data_key = None
                 settings["api_key"] = _decrypt_text_for_user(bytes(encrypted_key), api_key_data_key)
             except Exception:
+                log.warning("byo_api_key_decrypt_failed")
                 settings["api_key"] = ""
         settings["api_key_configured"] = bool(settings["api_key"])
     elif mode == "managed":
@@ -745,6 +746,10 @@ def _decrypt_text_for_user(ciphertext: bytes, data_key: str | None) -> str:
     except Exception:
         if data_key is None:
             raise
+        # Tenant key didn't decrypt this row — expected for pre-migration data
+        # encrypted under the legacy master key, but also what a key mismatch
+        # would look like, so make it visible at debug level.
+        log.debug("tenant_decrypt_fallback_to_legacy", kind="text")
         return decrypt_text(ciphertext)
 
 
@@ -754,6 +759,7 @@ def _decrypt_json_for_user(ciphertext: bytes, data_key: str | None) -> object:
     except Exception:
         if data_key is None:
             raise
+        log.debug("tenant_decrypt_fallback_to_legacy", kind="json")
         return decrypt_json(ciphertext)
 
 
@@ -2296,12 +2302,14 @@ def _decrypted_frame_row(row, data_key: str | None = None) -> dict:
             try:
                 d[field] = _decrypt_text_for_user(bytes(raw), data_key)
             except Exception:
+                log.warning("frame_field_decrypt_failed", field=field)
                 d[field] = None
     urls_raw = d.get("urls")
     if urls_raw:
         try:
             d["urls"] = _decrypt_json_for_user(bytes(urls_raw), data_key)
         except Exception:
+            log.warning("frame_field_decrypt_failed", field="urls")
             d["urls"] = None
     for field in ("ts", "created_at"):
         if isinstance(d.get(field), datetime.datetime):
@@ -2318,6 +2326,7 @@ def _decrypted_audio_row(row, data_key: str | None = None) -> dict:
         try:
             d["transcript"] = _decrypt_text_for_user(bytes(raw), data_key)
         except Exception:
+            log.warning("audio_field_decrypt_failed", field="transcript")
             d["transcript"] = None
     for field in ("ts", "created_at"):
         if isinstance(d.get(field), datetime.datetime):
@@ -2728,6 +2737,7 @@ async def _http_thumbnails(request: "web.Request") -> "web.Response":
                         "thumb_b64": base64.b64encode(plain).decode("ascii"),
                     })
                 except Exception:
+                    log.warning("thumbnail_decrypt_skipped", frame_id=fid)
                     continue
             return out
 
@@ -3016,6 +3026,7 @@ async def _http_context_export(request: "web.Request") -> "web.Response":
                     item["image_b64"] = base64.b64encode(jpeg).decode("ascii")
                 except Exception:
                     image_errors += 1
+                    log.debug("frame_image_decode_failed", image_key=item.get("image_key"))
                     item["image_b64"] = None
             frames.append(item)
 
