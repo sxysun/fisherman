@@ -48,8 +48,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
         // grant must live on the app — not the separately-signed python binary.
         // No-op (returns true silently) once the user has granted, so this does
         // not re-prompt on every launch.
-        if !CGRequestScreenCaptureAccess() {
+        let alreadyGranted = CGRequestScreenCaptureAccess()
+        if !alreadyGranted {
             NSLog("[Fisherman] Screen Recording not yet granted — prompted user")
+            // The prompt is async and the daemon spawns moments from now, so a
+            // first-launch daemon caches the denial. Watch for the grant and
+            // restart the daemon as a fresh (granted) child the instant it
+            // flips — no 5-minute backoff or manual "Repair Capture" needed.
+            watchForScreenRecordingGrant()
         }
 
         // macOS does not enforce single-instance for LSUIElement apps. During
@@ -169,6 +175,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
     }
 
     // MARK: - Single-instance enforcement
+
+    /// Poll for the Screen Recording grant after a first-launch prompt and
+    /// restart the daemon once it flips to granted, so capture starts the
+    /// instant the user allows it. Stops itself after the grant lands or after
+    /// a 5-minute window (the user dismissed the prompt; "Repair Capture" or a
+    /// relaunch remains available).
+    private var screenGrantWatchTimer: Timer?
+    private func watchForScreenRecordingGrant() {
+        let deadline = Date().addingTimeInterval(300)
+        screenGrantWatchTimer?.invalidate()
+        screenGrantWatchTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            if CGPreflightScreenCaptureAccess() {
+                NSLog("[Fisherman] Screen Recording granted — restarting daemon as a granted child")
+                self.processManager?.restartFisherman()
+                timer.invalidate()
+                self.screenGrantWatchTimer = nil
+            } else if Date() > deadline {
+                timer.invalidate()
+                self.screenGrantWatchTimer = nil
+            }
+        }
+    }
 
     private func terminateOlderInstances() {
         let me = NSRunningApplication.current
