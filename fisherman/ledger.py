@@ -19,6 +19,7 @@ import json
 import os
 import struct
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -38,6 +39,33 @@ from fisherman.keys import verify_signature
 _MAGIC = b"FISHST2\0"
 _NONCE_LEN = 12
 _TIMEOUT = 10.0
+_FETCH_RETRIES = 4
+_FETCH_RETRY_BACKOFF = 0.25
+
+
+def _fetch_events_json(url: str, timeout: float) -> Any:
+    """GET the relay /events endpoint with retries.
+
+    Large responses over a flaky proxy/VPN intermittently truncate mid-body
+    (urllib raises IncompleteRead, or json sees a partial body). The truncation
+    point is random, so a retry almost always succeeds. Permanent 4xx errors
+    (bad pubkey/recipient_tag) are not retried.
+    """
+    last_err: Exception | None = None
+    for attempt in range(_FETCH_RETRIES):
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                raw = resp.read()
+            return json.loads(raw)
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                raise LedgerError(f"relay rejected request: HTTP {e.code}") from e
+            last_err = e
+        except Exception as e:  # IncompleteRead, URLError, timeout, partial JSON
+            last_err = e
+        if attempt < _FETCH_RETRIES - 1:
+            time.sleep(_FETCH_RETRY_BACKOFF)
+    raise LedgerError(f"relay unreachable: {last_err}") from last_err
 _INFO_PAIRWISE_STATUS = b"fisherman/status-pairwise/v2"
 _TAG_CONTEXT = b"fisherman/status-recipient-tag/v2"
 
@@ -311,11 +339,7 @@ def fetch_friend_status(
     if since_ts is not None:
         params["since"] = str(since_ts)
     url = relay_url.rstrip("/") + "/events?" + urllib.parse.urlencode(params)
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            events = json.loads(resp.read())
-    except Exception as e:
-        raise LedgerError(f"relay unreachable: {e}") from e
+    events = _fetch_events_json(url, timeout)
 
     if not isinstance(events, list):
         return []
