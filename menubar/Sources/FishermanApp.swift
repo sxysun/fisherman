@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreGraphics
 import DynamicNotchKit
 import SwiftUI
 
@@ -39,6 +40,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+
+        // Register Fisherman with TCC for Screen Recording and prompt once, as
+        // Fisherman itself, so it appears in System Settings → Privacy &
+        // Security → Screen Recording. The capture daemon runs as our child
+        // process and inherits this grant (default TCC responsibility), so the
+        // grant must live on the app — not the separately-signed python binary.
+        // No-op (returns true silently) once the user has granted, so this does
+        // not re-prompt on every launch.
+        if !CGRequestScreenCaptureAccess() {
+            NSLog("[Fisherman] Screen Recording not yet granted — prompted user")
+        }
 
         // macOS does not enforce single-instance for LSUIElement apps. During
         // "Update Fisherman", the upgrade subprocess pkill's the old menubar

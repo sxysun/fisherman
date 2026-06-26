@@ -224,7 +224,7 @@ private func isServiceAlive(_ port: Int, path: String, requiredKey: String? = ni
 
 // MARK: - Log file
 
-func logFileHandle(name: String) -> FileHandle {
+func logFilePath(name: String) -> String {
     let logDir = NSHomeDirectory() + "/.fisherman/logs"
     let fm = FileManager.default
     if !fm.fileExists(atPath: logDir) {
@@ -234,6 +234,11 @@ func logFileHandle(name: String) -> FileHandle {
     if !fm.fileExists(atPath: logPath) {
         fm.createFile(atPath: logPath, contents: nil)
     }
+    return logPath
+}
+
+func logFileHandle(name: String) -> FileHandle {
+    let logPath = logFilePath(name: name)
     guard let handle = FileHandle(forWritingAtPath: logPath) else {
         return .nullDevice
     }

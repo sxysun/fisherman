@@ -1,7 +1,7 @@
 import Foundation
 
 final class ProcessManager: @unchecked Sendable {
-    private var fishermanProcess: Process?
+    private var fishermanPID: pid_t?
     private let controlPort: String
     private let restartDelay: TimeInterval = 3.0
     private var stopped = false
@@ -37,17 +37,26 @@ final class ProcessManager: @unchecked Sendable {
     // MARK: - Fisherman daemon
 
     private func startFisherman() {
-        if let proc = fishermanProcess, proc.isRunning {
+        if let pid = fishermanPID, kill(pid, 0) == 0 {
             NSLog("[Fisherman] fisherman daemon process already running; waiting for /status")
             return
         }
 
-        // Skip if fisherman is already running
+        // Reaching here means we have no live child of our own. If a daemon is
+        // still answering on the port, it's an ORPHAN — left behind when a
+        // prior app instance was force-killed without taking its daemon down
+        // (notably the "Update Fisherman" flow, which pkills the old menubar).
+        // An orphan was reparented to launchd and is NOT our child, so it can't
+        // inherit our Screen Recording TCC grant. Adopting it reproduces the
+        // endless "would like to record the screen" prompt. Kill it and spawn a
+        // fresh child instead so capture inherits the app's grant.
         let port = Int(controlPort) ?? 7892
         if isFishermanAlive(port: port) {
-            NSLog("[Fisherman] fisherman daemon already running on :\(port), adopting")
-            fishermanStartedAt = Date()
-            return
+            NSLog("[Fisherman] orphan daemon on :\(port) — replacing with our own child so it inherits the app's Screen Recording grant")
+            _ = runShell("/usr/bin/pkill", ["-9", "-f", "-m fisherman start"])
+            _ = runShell("/usr/bin/pkill", ["-9", "-f", "uv run python -m fisherman"])
+            // Let the control port free up before we bind a fresh daemon.
+            Thread.sleep(forTimeInterval: 1.5)
         }
 
         let projectDir = findProjectDir()
@@ -59,47 +68,99 @@ final class ProcessManager: @unchecked Sendable {
         // but hung forever, which FishermanMenu can't detect through exit
         // status. Only fall back to `uv run` if the venv is missing (fresh
         // install), in which case we still want a working daemon.
-        let proc = Process()
+        let executable: String
+        let arguments: [String]
         if let venvPython = findVenvPython(projectDir: projectDir) {
-            proc.executableURL = URL(fileURLWithPath: venvPython)
-            proc.arguments = ["-m", "fisherman", "start"]
+            executable = venvPython
+            arguments = ["-m", "fisherman", "start"]
             NSLog("[Fisherman] launching daemon via venv python: \(venvPython)")
         } else if let uvPath = findUV() {
             NSLog("[Fisherman] .venv missing — falling back to `uv run` (will sync first)")
-            proc.executableURL = URL(fileURLWithPath: uvPath)
-            proc.arguments = ["run", "python", "-m", "fisherman", "start"]
+            executable = uvPath
+            arguments = ["run", "python", "-m", "fisherman", "start"]
         } else {
             NSLog("[Fisherman] no .venv and no uv — cannot start daemon")
             return
         }
-        proc.currentDirectoryURL = URL(fileURLWithPath: projectDir)
 
         var env = buildEnvironment()
         let backend = configuredCaptureBackend()
         env["FISH_CAPTURE_BACKEND"] = backend
         env["FISHERMAN_FORCE_SCREENCAPTURE"] = readEnvValue("FISHERMAN_FORCE_SCREENCAPTURE") ?? "1"
-        proc.environment = env
 
-        let log = logFileHandle(name: "fisherman")
-        proc.standardOutput = log
-        proc.standardError = log
-
-        proc.terminationHandler = { [weak self] process in
-            guard let self, !self.stopped else { return }
-            NSLog("[Fisherman] fisherman daemon exited with code \(process.terminationStatus), restarting in \(self.restartDelay)s")
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + self.restartDelay) { [weak self] in
-                self?.startFisherman()
-            }
+        guard let pid = spawnDaemon(
+            executable: executable,
+            arguments: arguments,
+            environment: env,
+            cwd: projectDir,
+            logPath: logFilePath(name: "fisherman")
+        ) else {
+            NSLog("[Fisherman] failed to launch fisherman daemon")
+            return
         }
 
-        do {
-            try proc.run()
-            fishermanProcess = proc
-            fishermanStartedAt = Date()
-            consecutiveHealthFailures = 0
-            NSLog("[Fisherman] launched fisherman daemon pid=\(proc.processIdentifier)")
-        } catch {
-            NSLog("[Fisherman] failed to launch fisherman daemon: \(error)")
+        fishermanPID = pid
+        fishermanStartedAt = Date()
+        consecutiveHealthFailures = 0
+        NSLog("[Fisherman] launched fisherman daemon pid=\(pid)")
+        watchForExit(pid: pid)
+    }
+
+    /// posix_spawn the daemon as a direct child, redirecting stdio to the log
+    /// and chdir'ing into the project dir. The child stays a direct child
+    /// (ppid == us) so `waitpid`/`kill` drive its lifecycle. TCC attribution
+    /// follows the default responsibility chain (same as NSTask).
+    private func spawnDaemon(
+        executable: String,
+        arguments: [String],
+        environment: [String: String],
+        cwd: String,
+        logPath: String
+    ) -> pid_t? {
+        var attr: posix_spawnattr_t?
+        posix_spawnattr_init(&attr)
+        defer { posix_spawnattr_destroy(&attr) }
+
+        var actions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&actions)
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        // stdout + stderr → daemon log; cwd → project dir.
+        posix_spawn_file_actions_addopen(&actions, 1, logPath, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        posix_spawn_file_actions_adddup2(&actions, 1, 2)
+        posix_spawn_file_actions_addchdir_np(&actions, cwd)
+
+        let argv: [UnsafeMutablePointer<CChar>?] =
+            ([executable] + arguments).map { strdup($0) } + [nil]
+        let envp: [UnsafeMutablePointer<CChar>?] =
+            environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer {
+            for ptr in argv where ptr != nil { free(ptr) }
+            for ptr in envp where ptr != nil { free(ptr) }
+        }
+
+        var pid: pid_t = 0
+        let rc = posix_spawn(&pid, executable, &actions, &attr, argv, envp)
+        guard rc == 0 else {
+            NSLog("[Fisherman] posix_spawn(disclaimed) failed rc=\(rc) errno=\(errno)")
+            return nil
+        }
+        return pid
+    }
+
+    /// Reap the daemon and respawn it on unexpected exit. Replaces
+    /// Process.terminationHandler now that we spawn the pid directly.
+    private func watchForExit(pid: pid_t) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var status: Int32 = 0
+            _ = waitpid(pid, &status, 0)
+            DispatchQueue.main.async {
+                guard let self, !self.stopped, self.fishermanPID == pid else { return }
+                NSLog("[Fisherman] fisherman daemon pid=\(pid) exited (status=\(status)), restarting in \(self.restartDelay)s")
+                self.fishermanPID = nil
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + self.restartDelay) { [weak self] in
+                    self?.startFisherman()
+                }
+            }
         }
     }
 
@@ -117,8 +178,8 @@ final class ProcessManager: @unchecked Sendable {
 
     func restartFisherman() {
         NSLog("[Fisherman] restarting fisherman daemon for config change")
-        terminate(fishermanProcess)
-        fishermanProcess = nil
+        terminate(fishermanPID)
+        fishermanPID = nil
         fishermanStartedAt = nil
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.startFisherman()
@@ -201,21 +262,21 @@ final class ProcessManager: @unchecked Sendable {
         consecutiveHealthFailures = 0
         fishermanStartedAt = nil
 
-        if let proc = fishermanProcess, proc.isRunning {
-            // SIGKILL directly — .terminate() sends SIGTERM which a wedged
-            // Python process stuck in a C import may never handle.
-            kill(proc.processIdentifier, SIGKILL)
+        if let pid = fishermanPID, kill(pid, 0) == 0 {
+            // SIGKILL directly — SIGTERM which a wedged Python process stuck
+            // in a C import may never handle.
+            kill(pid, SIGKILL)
         }
         // Also kill any orphaned `uv run` wrapper or stray python from prior
         // launches that might still hold the control port.
         _ = runShell("/usr/bin/pkill", ["-KILL", "-f", "uv run python -m fisherman"])
         _ = runShell("/usr/bin/pkill", ["-KILL", "-f", "python.*-m fisherman start"])
 
-        fishermanProcess = nil
-        // terminationHandler on the old Process will fire and respawn; but
-        // if we SIGKILLed an adopted process (no handler), schedule respawn.
+        fishermanPID = nil
+        // The waitForExit reaper on the old pid will fire and respawn; but if
+        // we SIGKILLed an adopted process (no reaper), schedule respawn here.
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + restartDelay) { [weak self] in
-            guard let self, !self.stopped, self.fishermanProcess == nil else { return }
+            guard let self, !self.stopped, self.fishermanPID == nil else { return }
             self.startFisherman()
         }
     }
@@ -248,21 +309,21 @@ final class ProcessManager: @unchecked Sendable {
         stopped = true
         watchdogTimer?.invalidate()
         watchdogTimer = nil
-        terminate(fishermanProcess)
-        fishermanProcess = nil
+        terminate(fishermanPID)
+        fishermanPID = nil
         fishermanStartedAt = nil
     }
 
-    private func terminate(_ process: Process?) {
-        guard let process, process.isRunning else { return }
-        process.terminate()
+    private func terminate(_ pid: pid_t?) {
+        guard let pid, kill(pid, 0) == 0 else { return }
+        kill(pid, SIGTERM)
         // Wait up to 2s, then SIGKILL
         let deadline = Date().addingTimeInterval(2.0)
-        while process.isRunning && Date() < deadline {
+        while kill(pid, 0) == 0 && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.1)
         }
-        if process.isRunning {
-            kill(process.processIdentifier, SIGKILL)
+        if kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)
         }
     }
 

@@ -9,9 +9,26 @@ echo "Built: .build/release/FishermanMenu"
 # Code-sign the binary in-place BEFORE assembly.
 # com.apple.provenance xattr (macOS 15) causes "resource fork" errors
 # if we try to sign after copying into the .app bundle.
-IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')
-SIGN_ID="${IDENTITY:--}"
-codesign --force --sign "$SIGN_ID" .build/release/FishermanMenu
+#
+# Sign with the *Developer ID Application* identity — the same one the DMG
+# release (CI) uses — selected by its SHA-1 hash so it's unambiguous even when
+# duplicate certs exist across keychains. This MUST stay consistent across
+# rebuilds: macOS keys the Screen Recording TCC grant to the app's code
+# requirement (Team ID), so signing local dev builds with a different identity
+# (e.g. a generic "Apple Development" cert) invalidates the grant and triggers
+# an endless screen-recording permission prompt. Falls back to ad-hoc ("-")
+# only if no Developer ID cert is installed.
+SIGN_ID=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/Developer ID Application/ {print $2; exit}')
+SIGN_ID="${SIGN_ID:--}"
+echo "Signing identity: ${SIGN_ID}"
+# Strip the binary clean and re-sign from scratch. Re-signing in place over an
+# old signature plus stray xattrs is what produces "resource fork ... detritus"
+# / "code has no resources but signature indicates they must be present" on
+# macOS 26. --timestamp=none keeps local dev builds offline-friendly.
+xattr -cr .build/release/FishermanMenu 2>/dev/null || true
+codesign --remove-signature .build/release/FishermanMenu 2>/dev/null || true
+codesign --force --options runtime --timestamp=none --sign "$SIGN_ID" .build/release/FishermanMenu
 
 # Assemble .app bundle
 APP=".build/Fisherman.app"
@@ -24,13 +41,17 @@ cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 # Strip ALL xattrs (com.apple.provenance, resource forks, etc.) from the
 # entire bundle to prevent codesign "detritus" errors on macOS 15+
 xattr -cr "$APP" 2>/dev/null || true
+dot_clean -m "$APP" 2>/dev/null || true
 # Also remove resource fork files (._*) and .DS_Store that cp may carry over
-find "$APP" -name '._*' -delete 2>/dev/null || true
-find "$APP" -name '.DS_Store' -delete 2>/dev/null || true
+find "$APP" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
 # Sign the bundle (binary is already signed)
-codesign --force --deep --sign "$SIGN_ID" "$APP"
-echo "Signed: ${IDENTITY:-ad-hoc}"
+codesign --force --deep --options runtime --timestamp=none --sign "$SIGN_ID" "$APP"
+# Gate: a mis-signed bundle won't satisfy the TCC grant's code requirement and
+# resurrects the screen-recording prompt loop, so fail loudly instead of
+# deploying something unverified.
+codesign --verify --strict "$APP" || { echo "ERROR: bundle failed signature verification" >&2; exit 1; }
+echo "Signed: ${SIGN_ID}"
 
 echo "Assembled: $APP"
 
