@@ -29,9 +29,30 @@ Friend status is designed to work across all three modes through an
 end-to-end encrypted relay. The CLI and menubar use the relay friend
 store by default.
 
-## Quick Start
+## Desktop Platform Support
 
-Fisherman currently supports macOS 13+.
+Fisherman's stable desktop app currently supports **macOS 13+**. Linux
+and Windows desktop clients are now available as an **alpha dogfood path**
+for teammates: they use the shared Python daemon/core, first-pass native
+screen capture providers, optional Tesseract OCR, and a lightweight
+desktop shell instead of the macOS SwiftUI notch UI.
+
+Support tiers:
+
+| Platform | Tier | Desktop surface | Capture/OCR notes |
+|---|---|---|---|
+| macOS 13+ | Stable | Native SwiftUI menu bar + notch UI | Quartz/`screencapture` capture and Apple Vision OCR |
+| Linux | Alpha | `fisherman desktop-alpha` Tk shell, optional tray with `pystray` | Tries `grim`, `gnome-screenshot`, `spectacle`, then Pillow `ImageGrab`; OCR uses `tesseract` when installed |
+| Windows | Alpha | `fisherman desktop-alpha` Tk shell, optional tray with `pystray` | Uses Pillow `ImageGrab`; OCR uses `tesseract` when installed |
+
+The Linux/Windows alpha is intended for dogfooding, not polished
+distribution. Known gaps include signed installers, autostart integration,
+Wayland/X11 differences, Windows capture edge cases, foreground-window
+metadata parity, and native settings UX.
+See [Desktop Cross-Platform Alpha](docs/desktop-cross-platform-alpha.md)
+for provider details and the dogfooding checklist.
+
+## Quick Start
 
 ### Install the app
 
@@ -338,7 +359,7 @@ All primary config lives in `~/.fisherman/.env`.
 | `FISH_QUERY_BASE_URL` | derived | HTTP API base for backend-direct agent reads, exports, screenshots, and status |
 | `FISH_STATUS_RELAY_URL` | `https://relay.fisherman.teleport.computer` | E2EE status relay URL |
 | `FISH_PRIVATE_KEY` | auto-generated | Persistent Ed25519 seed |
-| `FISH_CAPTURE_BACKEND` | `native` | Native macOS capture. Old non-native values are ignored. |
+| `FISH_CAPTURE_BACKEND` | `native` | Native platform capture. `native` resolves to macOS, Linux, or Windows providers depending on OS; `swift` remains macOS-specific. |
 | `FISH_CONTROL_PORT` | `7892` | Local daemon control API |
 
 Useful commands:
@@ -377,6 +398,13 @@ cd website && npm install && npm run dev
 
 # macOS menu bar app
 cd menubar && bash build.sh
+
+# Linux/Windows alpha desktop shell
+fisherman desktop-alpha-doctor
+fisherman desktop-alpha-report --output-dir fisherman-alpha-report
+fisherman desktop-alpha-smoke --output fisherman-alpha-smoke.jpg
+fisherman start
+fisherman desktop-alpha
 
 # self-hosted ingest server
 cd server && uv run python ingest.py

@@ -20,6 +20,7 @@ from fisherman.config import DEFAULT_SERVER_URL, FishermanConfig, ingest_url_fro
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
+from fisherman.platform import get_platform_providers
 from fisherman.power import on_battery
 from fisherman.privacy import PrivacyFilter
 from fisherman.relay_client import RelayClient
@@ -40,6 +41,32 @@ _SWIFT_CAPTURE = os.environ.get("FISHERMAN_SWIFT_CAPTURE", "") == "1"
 capture_screen = None
 ocr_fast = None
 maybe_extract_pdf_context = None
+
+
+def _classify_capture_runtime_error(message: str, *, has_captured_once: bool) -> tuple[str, bool, bool]:
+    """Return (status_code, permission_denied, display_unavailable)."""
+    lowered = message.lower()
+    explicit_denial = (
+        "permission" in lowered
+        or "screen recording" in lowered
+        or "denied" in lowered
+        or "not authorized" in lowered
+    )
+    display_unavailable = (
+        "could not create image" in lowered
+        or "display" in lowered
+        or "no screen" in lowered
+        or "no monitor" in lowered
+    )
+    permission_denied = explicit_denial or (
+        not has_captured_once
+        and ("screencapture exited" in lowered or display_unavailable)
+    )
+    if permission_denied:
+        return "capture_permission_denied", True, display_unavailable
+    if display_unavailable:
+        return "capture_display_unavailable", False, True
+    return "capture_failed", False, False
 
 
 def _capture_screen_lazy(max_dim: int, jpeg_quality: int):
@@ -94,6 +121,8 @@ class FishermanDaemon:
         self._capture_backend = "swift" if raw_capture_backend == "swift" else "native"
         self._running = False
         self._capture_ok = False
+        self._last_capture_error_code: str | None = None
+        self._last_capture_error_detail: str | None = None
         # Latches True after the first successful capture this process. Unlike
         # _capture_ok (which resets on any failure) this stays True for the
         # process lifetime, proving the Screen Recording grant is in effect —
@@ -430,6 +459,8 @@ class FishermanDaemon:
                     log.info("screen_capture_working")
                 self._has_captured_once = True
                 self._consecutive_capture_failures = 0
+                self._last_capture_error_code = None
+                self._last_capture_error_detail = None
             except RuntimeError as e:
                 # capture_screen raises RuntimeError when screen recording access
                 # is missing or the capture API returns no image.
@@ -440,17 +471,19 @@ class FishermanDaemon:
                 # a real Screen Recording denial. Disambiguate using whether we
                 # have ever captured successfully this process: if we have, the
                 # grant is proven and this is just the screen being unavailable.
-                explicit_denial = "permission" in message or "screen recording" in message
-                display_unavailable = "could not create image" in message or "display" in message
-                permission_denied = explicit_denial or (
-                    not self._has_captured_once
-                    and ("screencapture exited" in message or display_unavailable)
+                error_code, permission_denied, display_unavailable = (
+                    _classify_capture_runtime_error(
+                        message,
+                        has_captured_once=self._has_captured_once,
+                    )
                 )
+                self._last_capture_error_code = error_code
+                self._last_capture_error_detail = str(e)
 
                 if self._consecutive_capture_failures == 1:
                     self._capture_ok = False
                     if permission_denied:
-                        log.warning("screen_recording_not_granted", error=str(e))
+                        log.warning("capture_permission_denied", error=str(e))
                     else:
                         # Benign: display asleep/locked while granted. Don't log
                         # it as a permission problem or it reads like a regression.
@@ -473,6 +506,8 @@ class FishermanDaemon:
                 continue
             except Exception:
                 self._consecutive_capture_failures += 1
+                self._last_capture_error_code = "capture_failed"
+                self._last_capture_error_detail = "unexpected capture error"
                 log.warning("capture_failed", exc_info=True)
                 backoff = min(interval * (2 ** self._consecutive_capture_failures), 30.0)
                 await asyncio.sleep(backoff)
@@ -541,6 +576,7 @@ class FishermanDaemon:
             await self._publish_frame(frame, dhash_distance, ocr_text, urls)
 
     def _get_status(self) -> dict:
+        providers = get_platform_providers()
         status = {
             "running": self._running,
             "paused": self._privacy.is_paused,
@@ -570,6 +606,9 @@ class FishermanDaemon:
             "on_battery": on_battery(),
             "capture_interval": self._get_interval(),
             "capture_backend": self._capture_backend,
+            "platform_capture_provider": providers.capture.name,
+            "platform_ocr_provider": providers.ocr.name,
+            "platform_power_provider": providers.power.name,
             "audio_enabled": False,
             "in_call": self._in_call,
             "call_app": self._call_app,
@@ -586,7 +625,9 @@ class FishermanDaemon:
             "mirror_failed": (self._mirror_sync.state.failed_files if self._mirror_sync else 0),
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
-            status["error"] = "screen_recording_not_granted"
+            status["error"] = self._last_capture_error_code or "capture_failed"
+            status["capture_error_detail"] = self._last_capture_error_detail
+            status["consecutive_capture_failures"] = self._consecutive_capture_failures
         return status
 
     async def _handle_rpc(self, body: dict) -> dict:

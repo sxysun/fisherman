@@ -20,10 +20,12 @@ dependencies = [
 
 [project.optional-dependencies]
 tee = ["pycryptodome>=3.20"]
+desktop = ["pystray>=0.19"]
 
 [project.scripts]
 fisherman = "fisherman.cli:main"
 fisherman-mirror = "mirror.cli:main"
+fisherman-desktop-alpha = "fisherman.desktop_shell:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -31,6 +33,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["fisherman", "mirror", "relay"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"fisherman/data/IntelSGXRootCA.der" = "fisherman/data/IntelSGXRootCA.der"

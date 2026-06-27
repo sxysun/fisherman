@@ -30,8 +30,44 @@ def _configure_logging():
 
 @click.group()
 def main():
-    """Fisherman — lightweight macOS screen streamer."""
+    """Fisherman - lightweight desktop context capture."""
     pass
+
+
+def _daemon_subprocess_args(
+    server_url: str | None,
+    backend_mode: str | None,
+    backend_url: str | None,
+) -> list[str]:
+    args = [sys.executable, "-m", "fisherman", "start"]
+    if server_url:
+        args.extend(["--server-url", server_url])
+    if backend_mode:
+        args.extend(["--backend-mode", backend_mode])
+    if backend_url:
+        args.extend(["--backend-url", backend_url])
+    return args
+
+
+def _spawn_daemon_subprocess(
+    server_url: str | None,
+    backend_mode: str | None,
+    backend_url: str | None,
+) -> subprocess.Popen:
+    kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if sys.platform == "win32":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        creationflags |= getattr(subprocess, "DETACHED_PROCESS", 0)
+        kwargs["creationflags"] = creationflags
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(
+        _daemon_subprocess_args(server_url, backend_mode, backend_url),
+        **kwargs,
+    )
 
 
 @main.command()
@@ -45,11 +81,16 @@ def start(server_url: str | None, backend_mode: str | None, backend_url: str | N
     _configure_logging()
 
     if daemonize:
-        pid = os.fork()
-        if pid > 0:
-            click.echo(f"Fisherman started (PID {pid})")
-            sys.exit(0)
-        os.setsid()
+        if hasattr(os, "fork") and sys.platform != "win32":
+            pid = os.fork()
+            if pid > 0:
+                click.echo(f"Fisherman started (PID {pid})")
+                sys.exit(0)
+            os.setsid()
+        else:
+            proc = _spawn_daemon_subprocess(server_url, backend_mode, backend_url)
+            click.echo(f"Fisherman started (PID {proc.pid})")
+            return
 
     overrides = {}
     if server_url:
@@ -70,7 +111,13 @@ def start(server_url: str | None, backend_mode: str | None, backend_url: str | N
         click.echo("  Ingest:   disabled (local-only capture)")
     click.echo(f"  Relay:    {config.status_relay_url}")
     click.echo(f"  Control:  http://127.0.0.1:{config.control_port}")
-    click.echo("  Capture:  native")
+    try:
+        from fisherman.platform import get_platform_providers
+
+        capture_provider = get_platform_providers().capture.name
+    except Exception:
+        capture_provider = "native"
+    click.echo(f"  Capture:  {capture_provider}")
     click.echo(f"  Interval: {config.capture_interval}s")
     click.echo(f"  Frames:   {config.frames_dir}")
 
@@ -93,6 +140,132 @@ def start(server_url: str | None, backend_mode: str | None, backend_url: str | N
         pass
     finally:
         loop.close()
+
+
+@main.command("desktop-alpha")
+def desktop_alpha():
+    """Open the Linux/Windows alpha desktop shell."""
+    from fisherman.desktop_shell import main as shell_main
+
+    shell_main()
+
+
+@main.command("desktop-alpha-doctor")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def desktop_alpha_doctor(as_json: bool):
+    """Check dependencies for the Linux/Windows alpha desktop shell."""
+    from fisherman.platform.diagnostics import desktop_alpha_diagnostics, diagnostics_ok
+
+    rows = desktop_alpha_diagnostics()
+    if as_json:
+        click.echo(json.dumps(rows, indent=2))
+        sys.exit(0 if diagnostics_ok(rows) else 1)
+
+    click.echo("")
+    for name, row in rows.items():
+        required = row.get("required", True)
+        ok = bool(row.get("ok"))
+        mark = "✓" if ok else ("!" if not required else "✗")
+        color = "green" if ok else ("yellow" if not required else "red")
+        label = name.replace("_", " ")
+        click.echo(click.style(f"  [{mark}] {label:<22} {row.get('detail', '')}", fg=color))
+    click.echo("")
+    if not diagnostics_ok(rows):
+        click.echo("  Install the required missing dependencies above, then re-run this command.")
+        sys.exit(1)
+    click.echo(click.style("  required alpha dependencies are present", fg="green"))
+
+
+@main.command("desktop-alpha-smoke")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+@click.option("--output", type=click.Path(dir_okay=False, path_type=str),
+              help="Write the captured JPEG to this path for inspection.")
+@click.option("--no-ocr", is_flag=True, help="Skip OCR during the smoke test.")
+@click.option("--max-dim", default=960, show_default=True,
+              help="Maximum screenshot dimension for the smoke frame.")
+@click.option("--jpeg-quality", default=60, show_default=True,
+              help="JPEG quality for the smoke frame.")
+def desktop_alpha_smoke(
+    as_json: bool,
+    output: str | None,
+    no_ocr: bool,
+    max_dim: int,
+    jpeg_quality: int,
+):
+    """Capture one local frame without storing or uploading it."""
+    from fisherman.platform.diagnostics import desktop_alpha_smoke as run_smoke
+
+    try:
+        result = run_smoke(
+            max_dim=max_dim,
+            jpeg_quality=jpeg_quality,
+            run_ocr=not no_ocr,
+            output=output,
+        )
+    except Exception as e:
+        payload = {"ok": False, "error": type(e).__name__, "detail": str(e)}
+        if as_json:
+            click.echo(json.dumps(payload, indent=2))
+        else:
+            click.echo(click.style("  [✗] desktop alpha smoke failed", fg="red"))
+            click.echo(f"      {payload['error']}: {payload['detail']}")
+        sys.exit(1)
+
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+
+    click.echo("")
+    click.echo(click.style("  [✓] captured one desktop frame", fg="green"))
+    click.echo(f"      provider: {result['capture_provider']}")
+    click.echo(f"      size:     {result['width']}x{result['height']} ({result['jpeg_bytes']} bytes)")
+    click.echo(f"      app:      {result.get('app_name') or '-'}")
+    click.echo(f"      window:   {result.get('window_title') or '-'}")
+    click.echo(f"      capture:  {result['capture_ms']}ms")
+    if result.get("ocr_provider"):
+        click.echo(
+            f"      ocr:      {result['ocr_provider']} "
+            f"{result.get('ocr_ms')}ms, {result.get('ocr_text_length')} chars"
+        )
+    if result.get("output"):
+        click.echo(f"      output:   {result['output']}")
+
+
+@main.command("desktop-alpha-report")
+@click.option("--output-dir", default="fisherman-alpha-report", show_default=True,
+              type=click.Path(file_okay=False, path_type=str),
+              help="Directory for report.json and optional smoke.jpg.")
+@click.option("--no-smoke", is_flag=True, help="Skip the capture smoke test.")
+@click.option("--no-ocr", is_flag=True, help="Skip OCR during the smoke test.")
+@click.option("--max-dim", default=960, show_default=True,
+              help="Maximum screenshot dimension for the smoke frame.")
+@click.option("--jpeg-quality", default=60, show_default=True,
+              help="JPEG quality for the smoke frame.")
+def desktop_alpha_report(
+    output_dir: str,
+    no_smoke: bool,
+    no_ocr: bool,
+    max_dim: int,
+    jpeg_quality: int,
+):
+    """Collect a local Linux/Windows alpha dogfood report."""
+    from fisherman.platform.diagnostics import desktop_alpha_report as collect_report
+
+    report = collect_report(
+        output_dir=output_dir,
+        run_smoke=not no_smoke,
+        run_ocr=not no_ocr,
+        max_dim=max_dim,
+        jpeg_quality=jpeg_quality,
+    )
+    click.echo("")
+    click.echo(click.style("  [✓] desktop alpha report written", fg="green"))
+    click.echo(f"      report: {report['report_path']}")
+    smoke = report.get("smoke") or {}
+    if smoke:
+        click.echo(f"      smoke:  {'ok' if smoke.get('ok') else 'failed'}")
+        if smoke.get("output"):
+            click.echo(f"      image:  {smoke['output']}")
 
 
 def _control_request(method: str, path: str, port: int = 7892, timeout: float = 5.0):
