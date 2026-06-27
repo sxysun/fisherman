@@ -30,16 +30,22 @@ xattr -cr .build/release/FishermanMenu 2>/dev/null || true
 codesign --remove-signature .build/release/FishermanMenu 2>/dev/null || true
 codesign --force --options runtime --timestamp=none --sign "$SIGN_ID" .build/release/FishermanMenu
 
-# Assemble .app bundle
-APP=".build/Fisherman.app"
-rm -rf "$APP"
+# Assemble + sign the .app bundle in a staging dir OUTSIDE the project tree.
+# When the repo lives under ~/Desktop (or any iCloud/file-provider location),
+# the provider re-adds com.apple.FinderInfo / com.apple.fileprovider.fpfs#P
+# xattrs faster than `xattr -cr` can strip them, racing codesign and failing
+# `--verify --strict` with "resource fork ... detritus not allowed". /tmp is
+# not synced, so cleaning sticks there. Deploy the signed bundle from staging.
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/fisherman-build.XXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+APP="$STAGE/Fisherman.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/FishermanMenu "$APP/Contents/MacOS/FishermanMenu"
 cp Info.plist "$APP/Contents/Info.plist"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-# Strip ALL xattrs (com.apple.provenance, resource forks, etc.) from the
-# entire bundle to prevent codesign "detritus" errors on macOS 15+
+# Strip ALL xattrs (com.apple.provenance, FinderInfo, resource forks, etc.)
+# from the entire bundle to prevent codesign "detritus" errors on macOS 15+.
 xattr -cr "$APP" 2>/dev/null || true
 dot_clean -m "$APP" 2>/dev/null || true
 # Also remove resource fork files (._*) and .DS_Store that cp may carry over

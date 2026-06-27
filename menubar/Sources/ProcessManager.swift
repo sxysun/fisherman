@@ -9,6 +9,18 @@ final class ProcessManager: @unchecked Sendable {
     private var consecutiveHealthFailures: Int = 0
     private var fishermanStartedAt: Date?
 
+    // Silent-stall detection: the daemon can answer /status fine while its
+    // capture has quietly wedged (no new frames for hours), which surfaces as
+    // "snoozing while in use". When the daemon reports it hasn't published in
+    // captureStallSeconds *and* the user is actively present (real HID input),
+    // capture is broken — restart it. Cooled down so it can't thrash.
+    private var consecutiveStallTicks: Int = 0
+    private var lastCaptureRepairAt: Date?
+    private let captureStallSeconds: Double = 270.0
+    private let captureStallPresenceIdleSeconds: Double = 240.0
+    private let captureStallTickThreshold: Int = 2
+    private let captureRepairCooldownSec: TimeInterval = 300.0
+
     // Watchdog: if /status on the daemon's control port times out this many
     // consecutive times, we assume the asyncio loop is wedged and SIGKILL
     // the process so FishermanMenu's termination handler respawns it.
@@ -181,6 +193,7 @@ final class ProcessManager: @unchecked Sendable {
         terminate(fishermanPID)
         fishermanPID = nil
         fishermanStartedAt = nil
+        consecutiveStallTicks = 0
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.startFisherman()
         }
@@ -216,16 +229,18 @@ final class ProcessManager: @unchecked Sendable {
         if Date().timeIntervalSince(startedAt) < watchdogStartupGraceSec { return }
 
         let port = Int(controlPort) ?? 7892
-        checkStatus(port: port) { [weak self] ok in
+        checkStatus(port: port) { [weak self] ok, json in
             guard let self, !self.stopped else { return }
             if ok {
                 if self.consecutiveHealthFailures > 0 {
                     NSLog("[Fisherman] watchdog: /status responsive again (after \(self.consecutiveHealthFailures) misses)")
                 }
                 self.consecutiveHealthFailures = 0
+                self.evaluateCaptureStall(json)
                 return
             }
             self.consecutiveHealthFailures += 1
+            self.consecutiveStallTicks = 0  // can't assess capture if /status is down
             NSLog("[Fisherman] watchdog: /status no response (\(self.consecutiveHealthFailures)/\(self.watchdogFailureThreshold))")
 
             if self.consecutiveHealthFailures >= self.watchdogFailureThreshold {
@@ -234,9 +249,49 @@ final class ProcessManager: @unchecked Sendable {
         }
     }
 
-    private func checkStatus(port: Int, completion: @Sendable @escaping (Bool) -> Void) {
+    /// Detect a *silent* capture stall: /status answers, the streamer is
+    /// connected and unpaused, the user is actively present, yet no frame has
+    /// published in captureStallSeconds. The daemon's own presence keepalive
+    /// keeps seconds_since_publish low whenever capture is healthy, so a high
+    /// value here means capture itself is wedged — restart it (cooled down).
+    private func evaluateCaptureStall(_ json: [String: Any]?) {
+        guard let json else { consecutiveStallTicks = 0; return }
+
+        let paused = json["paused"] as? Bool ?? false
+        let connected = json["connected"] as? Bool ?? false
+        let streaming = json["streaming_enabled"] as? Bool ?? false
+        let sincePublish = (json["seconds_since_publish"] as? NSNumber)?.doubleValue
+        // user_idle_seconds is null when presence can't be read — treat unknown
+        // as "present" only if we actually have a stall signal to act on.
+        let idle = (json["user_idle_seconds"] as? NSNumber)?.doubleValue
+
+        // Only meaningful for a streaming backend that should be publishing.
+        guard streaming, connected, !paused, let sincePublish else {
+            consecutiveStallTicks = 0
+            return
+        }
+        let present = (idle == nil) || (idle! < captureStallPresenceIdleSeconds)
+        guard sincePublish > captureStallSeconds, present else {
+            consecutiveStallTicks = 0
+            return
+        }
+
+        consecutiveStallTicks += 1
+        NSLog("[Fisherman] watchdog: capture stalled — no publish for \(Int(sincePublish))s while present (\(consecutiveStallTicks)/\(captureStallTickThreshold))")
+        guard consecutiveStallTicks >= captureStallTickThreshold else { return }
+
+        if let last = lastCaptureRepairAt, Date().timeIntervalSince(last) < captureRepairCooldownSec {
+            return  // already repaired recently; give it time to recover
+        }
+        consecutiveStallTicks = 0
+        lastCaptureRepairAt = Date()
+        NSLog("[Fisherman] watchdog: restarting daemon to recover stalled capture")
+        repairCaptureStack()
+    }
+
+    private func checkStatus(port: Int, completion: @Sendable @escaping (Bool, [String: Any]?) -> Void) {
         guard let url = URL(string: "http://127.0.0.1:\(port)/status") else {
-            completion(false); return
+            completion(false, nil); return
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = watchdogTimeoutSec
@@ -252,8 +307,8 @@ final class ProcessManager: @unchecked Sendable {
                   let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   json["running"] != nil
-            else { completion(false); return }
-            completion(true)
+            else { completion(false, nil); return }
+            completion(true, json)
         }.resume()
     }
 

@@ -230,9 +230,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, @unc
             NSLog("[Fisherman] force-terminating straggler PID \(app.processIdentifier)")
             _ = app.forceTerminate()
         }
+
+        // Hard fallback: SIGKILL any sibling matched by executable path.
+        // NSRunningApplication's bundle-id lookup has missed live instances in
+        // the wild (two menu bars coexisting for hours, each spawning a
+        // daemon), so don't rely on it alone — a path match can't miss.
+        killSiblingsByExecutablePath()
+
         // Small settle so the menu bar slot is fully released before we
         // claim it via DynamicNotch.
         Thread.sleep(forTimeInterval: 0.3)
+    }
+
+    /// SIGKILL every other process running our exact executable. Matches by the
+    /// running binary's path (e.g. /Applications/Fisherman.app/Contents/MacOS/
+    /// FishermanMenu), so it's independent of bundle-identifier registration —
+    /// the part that has silently failed. Excludes our own pid.
+    private func killSiblingsByExecutablePath() {
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        let exePath = Bundle.main.executablePath ?? "FishermanMenu"
+
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-f", exePath]
+        let pipe = Pipe()
+        pgrep.standardOutput = pipe
+        pgrep.standardError = FileHandle.nullDevice
+        do { try pgrep.run(); pgrep.waitUntilExit() }
+        catch {
+            NSLog("[Fisherman] pgrep fallback failed to run: \(error)")
+            return
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let out = String(data: data, encoding: .utf8) else { return }
+        for token in out.split(whereSeparator: { $0 == "\n" || $0 == " " }) {
+            guard let pid = pid_t(token.trimmingCharacters(in: .whitespaces)),
+                  pid != myPid else { continue }
+            NSLog("[Fisherman] SIGKILL sibling menu bar PID \(pid) (path-match fallback)")
+            kill(pid, SIGKILL)
+        }
     }
 
     // MARK: - Welcome wizard
