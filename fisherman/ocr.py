@@ -1,26 +1,10 @@
 import io
 import re
-import sys
 
-if sys.platform == "darwin":
-    import objc
-    import Quartz
-    import Vision
-else:
-    objc = None
-    Quartz = None
-    Vision = None
+from fisherman.platform import get_platform_providers
 
 
 _URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
-
-# Common tech terms that Apple Vision OCR tends to misread
-_CUSTOM_WORDS = [
-    "localhost", "https", "OAuth", "GitHub", "README",
-    "webpack", "nginx", "pytest", "asyncio", "pydantic",
-    "PostgreSQL", "SQLite", "WebSocket", "stderr", "stdout",
-    "kubectl", "docker", "sudo", "chmod", "chown",
-]
 
 _PREVIEW_APP_NAME = "preview"
 _PDF_SUFFIX = ".pdf"
@@ -30,63 +14,10 @@ _MIN_PAGE_AREA_RATIO = 0.08
 
 def ocr_fast(jpeg_data: bytes) -> tuple[str, list[str]]:
     """
-    Run Apple Vision OCR on JPEG data. Synchronous.
+    Run OCR on JPEG data using the active platform provider. Synchronous.
     Returns (full_text, extracted_urls).
     """
-    if sys.platform != "darwin" or objc is None or Quartz is None or Vision is None:
-        raise RuntimeError(
-            "native OCR is only supported on macOS; "
-            "Fisherman OCR currently requires Apple Vision"
-        )
-    with objc.autorelease_pool():
-        # Create CGImage from JPEG bytes
-        data_provider = Quartz.CGDataProviderCreateWithCFData(jpeg_data)
-        cg_image = Quartz.CGImageCreateWithJPEGDataProvider(
-            data_provider, None, True, Quartz.kCGRenderingIntentDefault
-        )
-        if cg_image is None:
-            return "", []
-
-        # Create request handler
-        handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_image, None)
-
-        # Create text recognition request — accurate mode with language correction
-        request = Vision.VNRecognizeTextRequest.alloc().init()
-        request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-        request.setUsesLanguageCorrection_(False)
-
-        # Use latest revision if available (Revision3 = macOS 14+)
-        try:
-            request.setRevision_(Vision.VNRecognizeTextRequestRevision3)
-        except AttributeError:
-            pass  # older macOS, use default revision
-
-        # Catch smaller text (menu bars, status bars, footers)
-        request.setMinimumTextHeight_(0.01)
-
-        # Custom vocabulary for tech terms OCR commonly misreads
-        request.setCustomWords_(_CUSTOM_WORDS)
-
-        # Perform
-        success, error = handler.performRequests_error_([request], None)
-        if not success or error:
-            return "", []
-
-        results = request.results()
-        if not results:
-            return "", []
-
-        # Collect text — use top 3 candidates, pick highest confidence
-        lines = []
-        for obs in results:
-            candidates = obs.topCandidates_(3)
-            if candidates:
-                best = max(candidates, key=lambda c: c.confidence())
-                lines.append(best.string())
-
-    full_text = "\n".join(lines)
-    urls = _URL_RE.findall(full_text)
-    return full_text, urls
+    return get_platform_providers().ocr.ocr_fast(jpeg_data)
 
 
 def _should_try_pdf_context(app_name: str | None, window_title: str | None) -> bool:

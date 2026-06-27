@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added a Linux/Windows desktop alpha while preserving the native macOS
+  SwiftUI/notch app. The daemon now routes capture, OCR, power, and active
+  window metadata through platform providers, with macOS native providers plus
+  first-pass Linux and Windows alpha providers.
+- Added `fisherman desktop-alpha`, `desktop-alpha-doctor`,
+  `desktop-alpha-smoke`, and `desktop-alpha-report` for cross-platform
+  dogfooding, including no-upload capture smoke tests and report bundles.
+- Added Linux and Windows alpha bootstrap scripts, focused platform tests, and
+  Ubuntu/Windows CI coverage for the desktop alpha command surface.
+
 ## v0.1.9 - 2026-06-26
 
 - Fixed the recurring macOS Screen Recording permission prompt loop: the
