@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## v0.1.10 - 2026-06-27
+
+- Your own status no longer shows "snoozing" while you're actively using the
+  machine. Presence now follows real keyboard/mouse input: on a static screen
+  the daemon keeps the backend's freshness window alive while you're present,
+  and only lapses to away after genuine inactivity.
+- Fixed duplicate/orphaned instances that could leave a stale daemon serving
+  frozen status for hours: the daemon now reaps itself when its menu bar app
+  dies, and the menu bar enforces a single instance with a path-matched
+  fallback that can't miss.
+- Added a silent-capture-stall watchdog: if the daemon stops publishing frames
+  while you're present (capture wedged but /status still responsive), the menu
+  bar restarts it automatically.
+- Made the local build's code-signing deterministic under iCloud-synced
+  directories (sign in a temp staging dir), so rebuilds can't fail strict
+  signature verification or invalidate the Screen Recording grant.
+
 ## v0.1.9 - 2026-06-26
 
 - Fixed the recurring macOS Screen Recording permission prompt loop: the
