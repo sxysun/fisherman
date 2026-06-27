@@ -20,7 +20,7 @@ from fisherman.config import DEFAULT_SERVER_URL, FishermanConfig, ingest_url_fro
 from fisherman.control import ControlServer
 from fisherman.differ import FrameDiffer
 from fisherman.frame_store import FrameStore
-from fisherman.power import on_battery
+from fisherman.power import on_battery, user_idle_seconds
 from fisherman.privacy import PrivacyFilter
 from fisherman.relay_client import RelayClient
 from fisherman.router import TierRouter
@@ -34,6 +34,18 @@ from fisherman.upload_queue import UploadQueue
 log = structlog.get_logger()
 
 _SWIFT_CAPTURE = os.environ.get("FISHERMAN_SWIFT_CAPTURE", "") == "1"
+
+# Presence keepalive: the backend marks a user "away/snoozing" after ~5 min
+# without a fresh frame. The differ legitimately suppresses frames on a static
+# screen (reading, a still editor), so an actively-present user would flip to
+# idle. While real keyboard/mouse input is recent, publish a fresh frame every
+# KEEPALIVE_SECONDS even when the screen hasn't changed, so presence reflects
+# input — not pixels. PRESENCE_IDLE_SECONDS bounds "actively present"; past it
+# we let status lapse so "away" stays honest.
+_KEEPALIVE_SECONDS = 200.0
+_PRESENCE_IDLE_SECONDS = 240.0
+# Parent-death supervision cadence. Cheap getppid() poll.
+_SUPERVISOR_INTERVAL = 10.0
 
 # Lazily populated callables. Tests and local harnesses may monkeypatch these
 # names without forcing daemon startup to import PyObjC/Pillow/OCR modules.
@@ -136,6 +148,15 @@ class FishermanDaemon:
         self._in_call = False
         self._call_app: str | None = None
         self._audio_sent = 0
+        # Presence + supervision. _initial_ppid lets the daemon notice when its
+        # parent menu-bar app dies (reparent to launchd, ppid==1) and exit, so a
+        # force-killed app can't leave a daemon serving stale "away" status for
+        # hours. _last_publish_mono drives the presence keepalive that stops the
+        # backend marking an actively-present user as snoozing on a static screen.
+        self._initial_ppid = os.getppid()
+        self._last_publish_mono = time.monotonic()
+        self._keepalives_sent = 0
+        self._capture_task: asyncio.Task | None = None
 
         # Keys for relay/deputy RPC. Loaded eagerly so daemon refuses to
         # start in a half-broken state if FISH_PRIVATE_KEY is malformed.
@@ -344,6 +365,13 @@ class FishermanDaemon:
             self._processor_schedule_loop()
         )
 
+        # Watch for the parent menu-bar app dying so an orphaned daemon doesn't
+        # linger serving stale status (the duplicate-instance / upgrade-orphan
+        # failure mode).
+        supervisor_task: asyncio.Task | None = asyncio.create_task(
+            self._supervisor_loop()
+        )
+
         # Connect to relay (RPC mailbox) if we have keys + a configured URL.
         if self._signing_priv is not None and self._config.ledger_url:
             self._relay_client = RelayClient(
@@ -372,14 +400,23 @@ class FishermanDaemon:
                 log.warning("mirror_sync_init_failed", exc_info=True)
 
         try:
-            if _SWIFT_CAPTURE:
-                await self._process_loop()
-            else:
-                await self._capture_loop()
+            # Run capture as a cancelable task so the supervisor can stop the
+            # daemon cleanly (flushing the streamer/outbox) when orphaned,
+            # rather than leaving a loop blocked on the frame queue.
+            self._capture_task = asyncio.create_task(
+                self._process_loop() if _SWIFT_CAPTURE else self._capture_loop()
+            )
+            await self._capture_task
         except asyncio.CancelledError:
             pass
         finally:
             self._running = False
+            if supervisor_task is not None:
+                supervisor_task.cancel()
+                try:
+                    await supervisor_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if processor_task is not None:
                 processor_task.cancel()
                 try:
@@ -404,6 +441,47 @@ class FishermanDaemon:
         if on_battery():
             return cfg.battery_capture_interval
         return cfg.capture_interval
+
+    def _is_orphaned(self) -> bool:
+        """True once the parent that launched us has died.
+
+        The menu-bar app spawns the daemon as a direct child; when the app is
+        force-killed (the "Update Fisherman" flow, a crash, or single-instance
+        replacement) the daemon is reparented to launchd (ppid==1). A daemon
+        launched detached (initial ppid already 1, e.g. a dev `nohup`) is not
+        considered orphaned — there was no owning app to lose.
+        """
+        return self._initial_ppid > 1 and os.getppid() <= 1
+
+    async def _supervisor_loop(self) -> None:
+        """Reap ourselves when orphaned so stale daemons can't accumulate."""
+        while self._running:
+            await asyncio.sleep(_SUPERVISOR_INTERVAL)
+            if self._is_orphaned():
+                log.warning(
+                    "daemon_orphaned_self_exit",
+                    initial_ppid=self._initial_ppid,
+                )
+                self._running = False
+                if self._capture_task is not None:
+                    self._capture_task.cancel()
+                return
+
+    def _should_presence_keepalive(self) -> bool:
+        """Whether to force-publish a frame on a static screen right now.
+
+        True only when the user is genuinely present (recent HID input) and the
+        backend's freshness window is about to lapse. Unknown idle (None) counts
+        as present so we never wrongly mark an active user away.
+        """
+        if self._streamer is None and self._upload_queue is None:
+            return False  # local-only: no backend freshness to maintain
+        if self._privacy.is_paused:
+            return False
+        if time.monotonic() - self._last_publish_mono < _KEEPALIVE_SECONDS:
+            return False
+        idle = user_idle_seconds()
+        return idle is None or idle < _PRESENCE_IDLE_SECONDS
 
     async def _capture_loop(self) -> None:
         loop = asyncio.get_running_loop()
@@ -488,11 +566,19 @@ class FishermanDaemon:
             diff = self._differ.diff_frame(frame.jpeg_data)
             if not diff.is_new:
                 consecutive_idle += 1
-                elapsed = asyncio.get_event_loop().time() - t0
-                await asyncio.sleep(max(0, interval - elapsed))
-                continue
-
-            consecutive_idle = 0
+                # Static screen, but if the user is actively present keep the
+                # backend's freshness window alive by publishing this frame
+                # anyway — otherwise an engaged-but-still user (reading, a
+                # paused video) flips to "away/snoozing" after 5 idle minutes.
+                if self._should_presence_keepalive():
+                    self._keepalives_sent += 1
+                    log.debug("presence_keepalive_publish", idle_frames=consecutive_idle)
+                else:
+                    elapsed = asyncio.get_event_loop().time() - t0
+                    await asyncio.sleep(max(0, interval - elapsed))
+                    continue
+            else:
+                consecutive_idle = 0
 
             try:
                 # OCR in thread pool
@@ -584,6 +670,12 @@ class FishermanDaemon:
             "mirror_active": self._mirror_sync is not None,
             "mirror_uploaded": (self._mirror_sync.state.uploaded_files if self._mirror_sync else 0),
             "mirror_failed": (self._mirror_sync.state.failed_files if self._mirror_sync else 0),
+            # Presence + capture liveness. seconds_since_publish lets the menu
+            # bar spot a *silent* capture stall (responsive /status but no new
+            # frames) — the failure that showed "snoozing while in use".
+            "seconds_since_publish": round(time.monotonic() - self._last_publish_mono, 1),
+            "user_idle_seconds": user_idle_seconds(),
+            "keepalives_sent": self._keepalives_sent,
         }
         if not self._capture_ok and self._consecutive_capture_failures > 0:
             status["error"] = "screen_recording_not_granted"
@@ -918,3 +1010,4 @@ class FishermanDaemon:
                 target_url=self._upload_target_url(),
             )
         self._frames_sent += 1
+        self._last_publish_mono = time.monotonic()
