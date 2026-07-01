@@ -1,0 +1,68 @@
+name: Update Fisherman DNS
+
+on:
+  workflow_dispatch:
+    inputs:
+      ip:
+        description: Public IPv4 address for Fisherman EC2
+        required: true
+        default: 3.82.134.133
+      update_relay:
+        description: Also point relay.fisherman.teleport.computer to the same IP
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  upsert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upsert Cloudflare A records
+        env:
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID: ${{ vars.CF_ZONE_ID }}
+          TARGET_IP: ${{ inputs.ip }}
+          UPDATE_RELAY: ${{ inputs.update_relay }}
+        run: |
+          set -euo pipefail
+          test -n "$CF_API_TOKEN"
+          test -n "$CF_ZONE_ID"
+          test -n "$TARGET_IP"
+
+          upsert_a() {
+            local name="$1"
+            local record_id
+            record_id="$(curl -fsS \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$name" \
+              | jq -r '.result[0].id // empty')"
+
+            local payload
+            payload="$(jq -nc --arg type A --arg name "$name" --arg content "$TARGET_IP" \
+              '{type:$type,name:$name,content:$content,ttl:60,proxied:false}')"
+
+            if [[ -n "$record_id" ]]; then
+              curl -fsS -X PUT \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "$payload" \
+                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" \
+                | jq -e '.success == true'
+            else
+              curl -fsS -X POST \
+                -H "Authorization: Bearer $CF_API_TOKEN" \
+                -H "Content-Type: application/json" \
+                --data "$payload" \
+                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+                | jq -e '.success == true'
+            fi
+          }
+
+          upsert_a fisherman.teleport.computer
+          if [[ "$UPDATE_RELAY" == "true" ]]; then
+            upsert_a relay.fisherman.teleport.computer
+          fi
