@@ -1,6 +1,7 @@
 """Postgres backup/restore CLI using Cloudflare R2 as durable storage.
 
-Designed for Phala TDX CVM deployments where redeployment wipes disk.
+Designed for hosted deployments where redeployment or instance migration
+can wipe local disk.
 All backups are Fernet-encrypted before upload.
 """
 

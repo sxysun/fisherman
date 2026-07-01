@@ -1,9 +1,7 @@
-# fisherman-mirror — TDX-deployable mirror endpoint container.
+# fisherman-mirror container.
 #
-# Same shape as feedling-mcp-v1/deploy/Dockerfile. One image is used by
-# the Cloud mirror service and the low-trust relay service. State lives
-# in the mounted /data volumes; secrets arrive via dstack-KMS-derived env
-# at runtime.
+# One image is used by the Cloud mirror service and the low-trust relay
+# service. State lives in mounted /data volumes.
 #
 # Reproducibility:
 #  - Base image pinned by sha256 digest.
@@ -13,8 +11,7 @@
 #    base image's apt sources at build time).
 #
 # To upgrade either pin, regenerate and commit both the new digest and
-# the new requirements.lock in the same PR. mirror/deploy/BUILD.md has
-# the exact steps.
+# the new requirements.lock in the same PR.
 
 ARG PYTHON_IMAGE=python@sha256:9e01bf1ae5db7649a236da7be1e94ffbbbdd7a93f867dd0d8d5720d9e1f89fab
 FROM ${PYTHON_IMAGE} AS base
@@ -51,9 +48,7 @@ COPY server/    ./server/
 # `fisherman-mirror` console script when installed via pip later.
 COPY pyproject.toml ./
 
-# Release metadata — baked at build time, read at runtime and served
-# inside /attestation.fisherman_release so audit clients can show
-# "git_commit abc1234" instead of "dev".
+# Release metadata baked at build time.
 ARG FISHERMAN_GIT_COMMIT=dev
 ARG FISHERMAN_BUILT_AT=dev
 ARG FISHERMAN_IMAGE_DIGEST=sha256:dev
@@ -69,7 +64,5 @@ USER fisherman
 
 EXPOSE 5001 5003 9100 9999 9998
 
-# In TDX deployments dstack-KMS provisions secrets to /etc/secrets/* and
-# the mirror reads them at startup. Locally `docker compose up` provides
-# an env-file with the same shape.
+# Locally `docker compose up` can provide an env-file for runtime config.
 CMD ["python", "-u", "-m", "mirror.server"]

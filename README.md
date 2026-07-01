@@ -4,11 +4,10 @@
 
 <p align="center">
   <a href="https://github.com/sxysun/fisherman/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/sxysun/fisherman/ci.yml?branch=main&style=flat-square&label=CI"></a>
-  <a href="https://github.com/sxysun/fisherman/actions/workflows/deploy-cvm.yml"><img alt="CVM deploy" src="https://img.shields.io/github/actions/workflow/status/sxysun/fisherman/deploy-cvm.yml?branch=main&style=flat-square&label=TEE%20deploy"></a>
   <img alt="macOS" src="https://img.shields.io/badge/macOS-13%2B-111827?style=flat-square&logo=apple">
   <img alt="Python" src="https://img.shields.io/badge/Python-3.12%2B-3776AB?style=flat-square&logo=python&logoColor=white">
   <img alt="Relay" src="https://img.shields.io/badge/friend%20relay-E2EE-16A34A?style=flat-square">
-  <img alt="Cloud" src="https://img.shields.io/badge/cloud-TDX%20attested-7C3AED?style=flat-square">
+  <img alt="Cloud" src="https://img.shields.io/badge/cloud-EC2%20hosted-7C3AED?style=flat-square">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-green?style=flat-square"></a>
 </p>
 
@@ -21,8 +20,8 @@ you choose to expose.
 The product model is now backend-mode based:
 
 - **Local Only**: raw context stays on your laptop.
-- **Fisherman Cloud**: managed backend deployed and attested by this
-  repo's CI/CD.
+- **Fisherman Cloud**: managed backend hosted on the Fisherman EC2
+  server.
 - **Self-Hosted**: the same backend capability on infrastructure you run.
 
 Friend status is designed to work across all three modes through an
@@ -101,9 +100,9 @@ Who can read what depends on the data type and backend mode:
   sees signed ciphertext.
 - **Mirror / bring-your-own storage** blobs are AES-256-GCM encrypted on your Mac before
   upload, so the storage provider only sees ciphertext.
-- **Captures** stay on your Mac in **Local Only**; in **Cloud (strict)** they are readable
-  only inside the attested TEE while you're connected, under a tenant key that is never
-  persisted server-side; in **Self-hosted** the operator you run holds the key.
+- **Captures** stay on your Mac in **Local Only**; in **Fisherman Cloud** or
+  **Self-Hosted**, the backend operator controls the server-side runtime and
+  key-wrapping environment.
 
 See [SECURITY.md](SECURITY.md) for the at-a-glance guarantees table and
 [docs/privacy-threat-model.md](docs/privacy-threat-model.md) for the full threat model.
@@ -125,37 +124,18 @@ encrypted status events.
 
 ### Fisherman Cloud
 
-Fisherman Cloud is a managed backend with hardware attestation, not a
-normal hosted server.
-Before private context is sent, clients must verify the TDX attestation
-bundle exposed by the Cloud endpoint.
-The Cloud endpoint also exposes `GET /health` as a capability manifest:
-attestation and relay can be live while multi-tenant ingest remains
-disabled until managed Postgres, encrypted object storage, and account
-enablement are ready.
+Fisherman Cloud is the managed Fisherman backend hosted on the EC2
+server behind `https://fisherman.teleport.computer`. The public Cloud
+endpoint exposes `GET /health` as a capability manifest so clients can
+confirm ingest, storage, and managed status generation are configured
+before switching uploads to it.
 
 ```bash
-fisherman cloud audit https://fisherman.teleport.computer
 fisherman backend configure cloud
 ```
 
-The audit checks:
-
-- TDX quote structure and signature data
-- PCK chain to the bundled Intel SGX root
-- QE report binding
-- compose hash binding through dstack/Phala measurements
-- RTMR event-log replay
-- optional on-chain `isAppAllowed(compose_hash)`
-- TLS certificate fingerprint bound into quote report data
-- baked git commit and image digest
-
-The CI/CD pipeline builds the container, publishes it to GHCR, deploys or
-upgrades the Phala CVM, exposes the hosted relay, publishes compose
-hashes, and runs hourly attestation monitoring.
-
-Cloud multi-tenant ingest is intentionally fail-closed. If required
-storage or database config is missing, the CVM reports
+Cloud ingest is intentionally fail-closed. If required storage or
+database config is missing, the server reports
 `ingest.ready=false` and refuses `/ingest` instead of accepting raw
 context into a half-configured service. `fisherman backend configure
 cloud` only persists the Cloud ingest WebSocket after health reports
@@ -163,13 +143,9 @@ cloud` only persists the Cloud ingest WebSocket after health reports
 invite-only deployments it records an access request and keeps uploads
 queued locally until approval.
 
-Cloud uses client-held tenant data keys. After the user approves a Cloud
-attestation, the daemon derives a tenant key from the user's persistent
-Fish key and sends it only to that approved runtime session. The Cloud
-database stores ciphertext plus `data_key_source=client_provided`; it
-does not persist a Cloud-operator-wrapped tenant key for new data. After
-a Cloud deploy/restart, the runtime must be re-approved/reconnected
-before it can decrypt historical context or run status/deputy compute.
+Cloud uses the same server-backed key wrapping model as the EC2-hosted
+self-hosted backend. The database stores encrypted context and metadata;
+server restarts do not require a hardware-attestation re-approval step.
 
 ### Self-Hosted
 
@@ -315,9 +291,9 @@ A processor manifest is JSON:
 ```
 
 Custom processors receive normalized context JSON on stdin and return
-JSON on stdout. They can run locally, in a self-hosted backend, or inside
-the managed TEE once Fisherman Cloud ingest is enabled. Recurring schedules are
-stored in `~/.fisherman/processor-schedules.json` and the daemon runs due
+JSON on stdout. They can run locally, in a self-hosted backend, or in the
+managed EC2 Cloud backend once Fisherman Cloud ingest is enabled.
+Recurring schedules are stored in `~/.fisherman/processor-schedules.json` and the daemon runs due
 jobs automatically; `fisherman processor schedule run-due` exists for
 manual or external cron execution.
 
@@ -353,21 +329,16 @@ fisherman version
 ## Privacy Model
 
 - Local Only: raw context stays on your laptop.
-- Fisherman Cloud: private-context processing must happen inside the
-  attested TDX CVM. The operator should not be able to inspect decrypted
-  context when attestation passes and clients enforce it. New Cloud data
-  is encrypted under a client-held tenant key, so an unapproved new Cloud
-  deploy cannot decrypt old Cloud ciphertext unless a device re-grants
-  the key or the user enables the dangerous attestation bypass.
+- Fisherman Cloud: private-context processing happens on the managed EC2
+  backend. Treat it like an operator-trusted hosted service.
 - Self-Hosted: you trust your own server/operator.
 - Friend status relay: low-trust by design; payloads are encrypted
   client-side to each recipient and signed by the author.
 - Google Drive backup receives AES-GCM encrypted blobs.
 
 Do not claim "all streamed frames are encrypted before leaving the
-machine" for the self-hosted ingest path. That path sends context over
-the configured WebSocket/TLS channel and encrypts at rest on the server.
-The Cloud path is the operator-untrusted managed-hosting path.
+machine" for hosted ingest paths. They send context over the configured
+WebSocket/TLS channel and encrypt at rest on the server.
 
 ## Development
 
@@ -385,9 +356,8 @@ cd server && uv run python ingest.py
 uv run python -m relay.server --port 9100
 # then set FISH_STATUS_RELAY_URL=http://127.0.0.1:9100 for local relay testing
 
-# managed TEE deployment details
-cat SETUP.md
-cat docs/tee-deployment.md
+# managed EC2 deployment
+cat docs/cloud-operations.md
 ```
 
 ## More Docs

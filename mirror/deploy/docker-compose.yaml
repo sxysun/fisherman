@@ -1,5 +1,4 @@
-# Local / non-TDX deploy of fisherman-mirror.
-# For TDX (Phala dstack), use docker-compose.phala.yaml instead.
+# Local deploy of fisherman-mirror.
 #
 # Run after `fisherman mirror pair-mint` on your laptop and
 # `fisherman-mirror init <token>` on this host. The mirror reads its

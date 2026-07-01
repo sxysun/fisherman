@@ -4,7 +4,7 @@
 
 - [ ] No raw context, screenshots, transcripts, prompts, tenant data, or secrets touched
 - [ ] Tenant/auth boundary reviewed
-- [ ] Cloud attestation behavior reviewed
+- [ ] Cloud/EC2 deployment behavior reviewed
 - [ ] Audit logging remains metadata-only
 
 ## Tests
