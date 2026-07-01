@@ -32,37 +32,37 @@ jobs:
           test -n "$CF_ZONE_ID"
           test -n "$TARGET_IP"
 
-          upsert_a() {
+          replace_with_a() {
             local name="$1"
-            local record_id
-            record_id="$(curl -fsS \
+            local existing
+            existing="$(curl -fsS \
               -H "Authorization: Bearer $CF_API_TOKEN" \
               -H "Content-Type: application/json" \
-              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$name" \
-              | jq -r '.result[0].id // empty')"
+              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?name=$name")"
+
+            jq -r '.result[] | select(.type == "A" or .type == "AAAA" or .type == "CNAME") | .id' <<<"$existing" |
+              while read -r record_id; do
+                [[ -z "$record_id" ]] && continue
+                curl -fsS -X DELETE \
+                  -H "Authorization: Bearer $CF_API_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" \
+                  | jq -e '.success == true'
+              done
 
             local payload
             payload="$(jq -nc --arg type A --arg name "$name" --arg content "$TARGET_IP" \
               '{type:$type,name:$name,content:$content,ttl:60,proxied:false}')"
 
-            if [[ -n "$record_id" ]]; then
-              curl -fsS -X PUT \
-                -H "Authorization: Bearer $CF_API_TOKEN" \
-                -H "Content-Type: application/json" \
-                --data "$payload" \
-                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" \
-                | jq -e '.success == true'
-            else
-              curl -fsS -X POST \
-                -H "Authorization: Bearer $CF_API_TOKEN" \
-                -H "Content-Type: application/json" \
-                --data "$payload" \
-                "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
-                | jq -e '.success == true'
-            fi
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "$payload" \
+              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+              | jq -e '.success == true'
           }
 
-          upsert_a fisherman.teleport.computer
+          replace_with_a fisherman.teleport.computer
           if [[ "$UPDATE_RELAY" == "true" ]]; then
-            upsert_a relay.fisherman.teleport.computer
+            replace_with_a relay.fisherman.teleport.computer
           fi
