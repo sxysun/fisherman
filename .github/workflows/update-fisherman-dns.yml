@@ -62,7 +62,39 @@ jobs:
               | jq -e '.success == true'
           }
 
+          replace_caa() {
+            local name="$1"
+            local existing
+            existing="$(curl -fsS \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=CAA&name=$name")"
+
+            jq -r '.result[] | .id' <<<"$existing" |
+              while read -r record_id; do
+                [[ -z "$record_id" ]] && continue
+                curl -fsS -X DELETE \
+                  -H "Authorization: Bearer $CF_API_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" \
+                  | jq -e '.success == true'
+              done
+
+            local payload
+            payload="$(jq -nc --arg name "$name" \
+              '{type:"CAA",name:$name,data:{flags:0,tag:"issue",value:"letsencrypt.org"},ttl:60}')"
+
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $CF_API_TOKEN" \
+              -H "Content-Type: application/json" \
+              --data "$payload" \
+              "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records" \
+              | jq -e '.success == true'
+          }
+
           replace_with_a fisherman.teleport.computer
+          replace_caa fisherman.teleport.computer
           if [[ "$UPDATE_RELAY" == "true" ]]; then
             replace_with_a relay.fisherman.teleport.computer
+            replace_caa relay.fisherman.teleport.computer
           fi
