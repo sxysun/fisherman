@@ -196,9 +196,9 @@ def _cloud_enrollment_mode() -> str:
 def _cloud_key_mode() -> str:
     """Return Cloud tenant-key mode.
 
-    server_wrapped is the legacy/self-hosted behavior. client_provided is
-    the managed Cloud privacy mode: the tenant key arrives only from an
-    attestation-approved client session and is kept in memory.
+    server_wrapped is the default EC2/self-hosted behavior. client_provided
+    is retained for legacy migration and future client-held key modes: the
+    tenant key arrives from the client session and is kept in memory.
     """
     mode = (
         os.environ.get("FISH_KEY_MODE")

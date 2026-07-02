@@ -282,7 +282,7 @@ class FishermanConfig(BaseSettings):
                 expected = ingest_url_from_backend_url(self.backend_url)
                 # Accept an explicitly persisted Cloud ingest URL only
                 # when it matches the Cloud backend. This allows
-                # attestation-gated Cloud ingest enablement while still
+                # health/account-gated Cloud ingest enablement while still
                 # ignoring stale self-hosted FISH_SERVER_URL values.
                 if explicit_server and self.server_url == expected:
                     self.server_url = expected
@@ -312,7 +312,7 @@ class FishermanConfig(BaseSettings):
             return bool(self.server_url)
         if self.backend_mode == "cloud":
             # Only stream once the managed Cloud ingest websocket is
-            # explicitly configured and approved.
+            # explicitly configured and the account is enabled.
             return self.server_url.startswith(("ws://", "wss://")) and self.server_url != DEFAULT_SERVER_URL
         return False
 
@@ -328,7 +328,6 @@ class FishermanConfig(BaseSettings):
     backend_mode: str = "auto"
     backend_url: str = ""
     query_base_url: str = ""
-    cloud_trust_policy: str = "strict"  # strict | dangerously_skip
     cloud_ingest_status: str = ""  # enabled | blocked | ""
     cloud_ingest_block_reason: str = ""
     cloud_ingest_block_detail: str = ""

@@ -19,9 +19,8 @@ uv run fisherman show <id> -o /tmp/f.jpg           # full frame detail + image
 ```
 
 Self-hosted development uses `.env` with `DATABASE_URL` and `ENCRYPTION_KEY`
-(already configured if `setup.sh` was run). Managed Cloud runs with
-`FISH_CLOUD_KEY_MODE=client_provided`; tenant data keys come from approved
-clients and are not persisted under a Cloud-wide wrapping key.
+(already configured if `setup.sh` was run). Managed EC2 Cloud uses the
+server-wrapped model unless a migration explicitly enables another key mode.
 
 ## Stack
 

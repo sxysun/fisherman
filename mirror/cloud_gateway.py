@@ -3,14 +3,13 @@
 The hosted Cloud hostname represents the product capability surface, not
 one internal service. This gateway keeps that boundary explicit:
 
-  - /health reports attestation, relay, mirror, and ingest readiness.
-  - /.well-known/attestation is proxied to the attested mirror service.
+  - /health reports relay, mirror, and ingest readiness.
   - /ingest and /api/* are proxied to Cloud ingest only when it is
     configured and reachable.
 
 The gateway intentionally returns HTTP 200 from /health even when a
-capability is not ready. CI and dstack-ingress need a stable liveness
-endpoint; clients should read the JSON body for capability state.
+capability is not ready. Clients should read the JSON body for capability
+state.
 """
 
 from __future__ import annotations
@@ -129,10 +128,6 @@ def build_capability_payload(
             "public_url": public_url,
             "mode": "multi_tenant",
         },
-        "attestation": {
-            "ready": mirror_ok,
-            "url": f"{public_url.rstrip('/')}/.well-known/attestation",
-        },
         "ingest": {
             "ready": ingest_ready,
             "url": f"{public_url.rstrip('/')}/ingest".replace("https://", "wss://").replace("http://", "ws://", 1),
@@ -152,7 +147,6 @@ def build_capability_payload(
         "mirror": {
             "paired": mirror_paired,
             "ready": mirror_paired,
-            "attestation_ready": mirror_ok,
             "detail": mirror_text,
         },
         "relay": {
@@ -207,17 +201,6 @@ def _forward_headers(request: web.Request) -> dict[str, str]:
             continue
         out[key] = value
     return out
-
-
-async def _proxy_attestation(request: web.Request) -> web.Response:
-    session: ClientSession = request.app["session"]
-    target = _join_url(request.app["mirror_url"], request.path_qs)
-    async with session.get(target, headers=_forward_headers(request)) as resp:
-        body = await resp.read()
-        headers = {
-            "Content-Type": resp.headers.get("Content-Type", "application/json"),
-        }
-        return web.Response(status=resp.status, body=body, headers=headers)
 
 
 async def _proxy_api(request: web.Request) -> web.Response:
@@ -322,7 +305,6 @@ async def build_app() -> web.Application:
     app["max_ws_message_bytes"] = max_ws_message_bytes
 
     app.router.add_get("/health", _health)
-    app.router.add_get("/.well-known/attestation", _proxy_attestation)
     app.router.add_route("*", "/api/{tail:.*}", _proxy_api)
     app.router.add_get("/ingest", _proxy_ingest_ws)
 

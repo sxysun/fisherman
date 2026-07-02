@@ -91,7 +91,7 @@ class BackendModeTests(unittest.TestCase):
         self.assertEqual(status["backend_mode"], "cloud")
         self.assertFalse(status["streaming_enabled"])
         self.assertEqual(status["upload_queue_pending"], 0)
-        self.assertEqual(status["backend_block_code"], "cloud_approval_required")
+        self.assertEqual(status["backend_block_code"], "cloud_account_not_enabled")
 
     def test_cloud_daemon_surfaces_persisted_account_block_reason(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:

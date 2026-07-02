@@ -145,7 +145,7 @@ queued locally until approval.
 
 Cloud uses the same server-backed key wrapping model as the EC2-hosted
 self-hosted backend. The database stores encrypted context and metadata;
-server restarts do not require a hardware-attestation re-approval step.
+server restarts do not require a release re-approval step.
 
 ### Self-Hosted
 

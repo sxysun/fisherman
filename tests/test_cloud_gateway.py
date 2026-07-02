@@ -19,7 +19,7 @@ def _load_cloud_ingest_module():
 
 
 class CloudGatewayTests(unittest.TestCase):
-    def test_health_payload_distinguishes_attestation_from_ingest_readiness(self):
+    def test_health_payload_distinguishes_mirror_from_ingest_readiness(self):
         payload = build_capability_payload(
             mirror={"ok": True, "body": "unpaired"},
             ingest={
@@ -43,7 +43,6 @@ class CloudGatewayTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["status"], "degraded")
-        self.assertTrue(payload["attestation"]["ready"])
         self.assertFalse(payload["mirror"]["paired"])
         self.assertFalse(payload["ingest"]["ready"])
         self.assertEqual(payload["ingest"]["missing"], ["DATABASE_URL", "ENCRYPTION_KEY"])

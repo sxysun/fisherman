@@ -100,4 +100,4 @@ Cloud and self-hosted expose the same migration surface:
 - `DELETE /api/context`
 
 All backend calls require FishKey auth. Fisherman Cloud also requires an
-approved Cloud release and the client-held tenant data key.
+active Cloud account for the user's FishKey identity.

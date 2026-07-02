@@ -4,14 +4,35 @@ This is for repository operators, not normal users.
 
 ## Deployment
 
-The managed Cloud path is CI/CD driven:
+Fisherman Cloud now runs on the EC2-backed service behind
+`https://fisherman.teleport.computer`.
 
-- `docker-publish.yml` builds and publishes the image.
-- `deploy-cvm.yml` upgrades the Phala CVM on `main`.
-- `bootstrap-cvm.yml` creates a CVM when needed.
-- `attestation-monitor.yml` audits the live endpoint hourly.
+The active deployment pieces are:
 
-Required secrets and variables are listed in [SETUP.md](../SETUP.md).
+- EC2 instance running `fisherman-ingest.service` for `/ingest` and the HTTP API.
+- EC2 instance running `fisherman-relay.service` for the E2EE relay.
+- nginx with Let's Encrypt certificates for `fisherman.teleport.computer`
+  and `relay.fisherman.teleport.computer`.
+- `.github/workflows/update-fisherman-dns.yml`, a manual workflow that
+  points those Cloudflare DNS records at the current EC2 IPv4 address.
+
+The old Phala/CVM CI/CD path has been removed. Do not recreate
+`deploy-cvm.yml`, `bootstrap-cvm.yml`, or attestation-monitor automation
+for Fisherman Cloud unless the product intentionally moves back to a TEE
+architecture.
+
+## Health Checks
+
+Use the Cloud health command before switching clients:
+
+```bash
+fisherman cloud audit https://fisherman.teleport.computer
+curl -fsS https://fisherman.teleport.computer/health
+curl -fsS https://relay.fisherman.teleport.computer/health
+```
+
+`fisherman cloud audit` reads `/health` and verifies that the endpoint is
+reachable and ingest-ready. It no longer verifies TEE attestation.
 
 ## User Enrollment
 
@@ -51,18 +72,16 @@ key for writes and reads.
 ## Key Rotation
 
 Rotate any token that appears in chat, shell history, CI logs, issues, or
-PRs. In particular, Phala API keys used by `PHALA_CLOUD_API_KEY` should
-be treated as deployment-control credentials.
+PRs. Treat AWS, Cloudflare, database, R2, and OpenRouter/OpenAI keys as
+deployment-control or data-plane credentials.
 
-## Release Approval UX
+## Client Setup
 
-When CI deploys a new compose hash, strict clients do not silently upload
-raw context. Users must approve the new Cloud release in Settings or run:
+Clients should use:
 
 ```bash
-fisherman cloud audit https://fisherman.teleport.computer
 fisherman backend configure cloud
 ```
 
-If they do not approve, capture continues locally and the upload queue
-holds frames for later.
+If the account is not enabled yet, the daemon keeps capture local and
+queues uploads until Cloud account setup is complete.

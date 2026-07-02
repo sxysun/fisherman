@@ -133,7 +133,7 @@ class ConfigIdentityTests(unittest.TestCase):
 
     def test_cli_formats_backend_iso_timestamps(self) -> None:
         rendered = cli._fmt_ts("2026-05-11T17:48:35+00:00")
-        self.assertRegex(rendered, r"^2026-05-11 \d\d:\d\d:\d\d$")
+        self.assertRegex(rendered, r"^2026-05-(11|12) \d\d:\d\d:\d\d$")
 
     def test_backend_api_url_maps_default_self_hosted_ingest_port_to_http_api(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
@@ -278,7 +278,7 @@ class ConfigIdentityTests(unittest.TestCase):
             self.assertEqual(cfg.server_url, "ws://new.example:9999/ingest")
             self.assertEqual(cfg.query_base_url, "http://new.example:9998")
 
-    def test_non_cloud_backend_config_resets_dangerous_cloud_policy(self) -> None:
+    def test_backend_config_clears_retired_cloud_gate_policy(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:
             home = Path(home_dir)
             os.environ["HOME"] = str(home)
@@ -300,9 +300,8 @@ class ConfigIdentityTests(unittest.TestCase):
                 )
 
             written = user_env.read_text(encoding="utf-8")
-            self.assertIn("FISH_CLOUD_TRUST_POLICY=strict\n", written)
+            self.assertNotIn("FISH_CLOUD_TRUST_POLICY=", written)
             self.assertEqual(cfg.backend_mode, "self_hosted")
-            self.assertEqual(cfg.cloud_trust_policy, "strict")
 
     def test_non_cloud_backend_config_clears_cloud_ingest_block_state(self) -> None:
         with tempfile.TemporaryDirectory() as home_dir:

@@ -34,13 +34,13 @@ def generate_data_key() -> str:
 
 
 def wrap_data_key(data_key: str | bytes) -> bytes:
-    """Encrypt a tenant data key with the CVM/self-host master key."""
+    """Encrypt a tenant data key with the deployment/self-host master key."""
     raw = data_key if isinstance(data_key, bytes) else data_key.encode()
     return _get_fernet().encrypt(raw)
 
 
 def unwrap_data_key(wrapped_data_key: bytes) -> str:
-    """Decrypt a tenant data key with the CVM/self-host master key."""
+    """Decrypt a tenant data key with the deployment/self-host master key."""
     return _get_fernet().decrypt(bytes(wrapped_data_key)).decode()
 
 

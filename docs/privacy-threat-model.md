@@ -19,42 +19,26 @@ while the laptop is online.
 Friend status may use the hosted relay, but payloads are encrypted to
 each recipient before upload.
 
-## Fisherman Cloud Strict Mode
+## Fisherman Cloud
 
-The client must approve a live TEE release before upload. The approved
-record includes compose hash, app identity, git commit, image digest,
-and TLS binding.
-
-New Cloud data is encrypted with a client-held tenant data key. The key
-is derived from the user's persistent identity and sent only to an
-approved runtime session. The database stores ciphertext and does not
-persist a Cloud-operator-wrapped tenant key for new strict-mode data.
-
-An unapproved new Cloud deploy should not receive new frames, and after
-a restart it cannot decrypt historical strict-mode ciphertext until an
-approved client reconnects with the tenant key.
+Fisherman Cloud is an operator-trusted EC2-hosted backend. Clients use
+TLS plus FishKey request signatures, and the server encrypts sensitive
+columns and image blobs at rest, but the Cloud operator controls the
+runtime, database, storage credentials, and LLM provider configuration.
 
 ## What Cloud Operators Can Still Do
 
 A malicious or compromised operator can:
 
-- ship a new Cloud release and ask users to approve it
 - observe metadata such as connection timing, tenant public keys, row
   counts, object sizes, and access logs
-- read new raw context inside a malicious release after a user approves
-  that release or enables `dangerously_skip`
+- read context inside a malicious or compromised server runtime
 - deny service, delete backend data, or corrupt data if they control the
   deployment/storage plane
 
-Strict mode is not a substitute for user review of a new release. It is
-the mechanism that prevents silent unapproved releases from receiving
-new uploads or decrypting old strict-mode ciphertext after restart.
-
-## Dangerous Attestation Skip
-
-`FISH_CLOUD_TRUST_POLICY=dangerously_skip` is a development escape hatch.
-It allows raw Cloud upload without a passing attestation/release check.
-Do not use it for production privacy.
+Cloud is not an operator-untrusted TEE mode. Users who need to avoid a
+hosted operator should use Local Only or a self-hosted server they
+control.
 
 ## Self-hosted
 

@@ -1,12 +1,10 @@
-"""Cloud ingest entrypoint with explicit readiness gating.
+"""Legacy Cloud ingest entrypoint with explicit readiness gating.
 
-The production Cloud compose should be able to run self-contained inside
-the attested CVM. DATABASE_URL is provided by the local Postgres service;
-strict Cloud mode receives tenant data keys from approved clients and
-does not generate a persistent Cloud-wide wrapping key. Legacy decrypt
-mode may still load/generate ENCRYPTION_KEY for one-off migrations. R2 is
-optional: when absent, storage.py uses encrypted local disk under
-/data/frames.
+The active EC2-hosted Cloud path runs ``server.ingest`` directly. This
+module remains for old migration/dev deployments that need the historical
+Cloud defaults. Legacy decrypt mode may still load/generate
+ENCRYPTION_KEY for one-off migrations. R2 is optional: when absent,
+storage.py uses encrypted local disk under /data/frames.
 """
 
 from __future__ import annotations

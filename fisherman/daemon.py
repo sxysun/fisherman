@@ -188,7 +188,7 @@ class FishermanDaemon:
         """Backend URL used to tag durable outbox rows.
 
         Cloud can be selected while raw ingest is temporarily disabled
-        pending attestation approval. In that state config.server_url is the
+        pending account approval. In that state config.server_url is the
         local placeholder, but queued rows are intended for the configured
         Cloud endpoint once approval succeeds.
         """
@@ -223,24 +223,11 @@ class FishermanDaemon:
             return
 
         if self._config.server_url == DEFAULT_SERVER_URL:
-            try:
-                from fisherman import cloud_trust
-
-                trusted = cloud_trust.load_trust() is not None
-            except Exception:
-                trusted = False
-            if trusted:
-                self._set_backend_block(
-                    "cloud_account_not_enabled",
-                    "Cloud release is approved, but this account is not enabled yet.",
-                    "Open Settings > Context Home > Finish Setup",
-                )
-            else:
-                self._set_backend_block(
-                    "cloud_approval_required",
-                    "Review and approve Fisherman Cloud before raw uploads start.",
-                    "Open Settings > Context Home > Review Release",
-                )
+            self._set_backend_block(
+                "cloud_account_not_enabled",
+                "Cloud ingest is healthy, but this account is not enabled yet.",
+                "Open Settings > Context Home > Finish Setup",
+            )
 
     def _default_backend_block_detail(self, code: str) -> str:
         if code == "cloud_account_not_enabled":
@@ -248,55 +235,13 @@ class FishermanDaemon:
         if code == "cloud_ingest_not_ready":
             return "Fisherman Cloud ingest is not ready yet."
         if code == "cloud_approval_required":
-            return "Review and approve Fisherman Cloud before raw uploads start."
-        if code == "cloud_attestation_failed":
-            return "Cloud attestation failed; raw uploads are blocked."
+            return "Finish Fisherman Cloud setup before raw uploads start."
         return "Cloud uploads are blocked."
 
     def _cloud_connect_guard(self) -> bool:
-        """Re-check Cloud trust before every websocket connect/reconnect."""
-        if self._config.backend_mode != "cloud":
-            return True
-        if self._config.cloud_trust_policy == "dangerously_skip":
-            log.warning("cloud_trust_dangerously_skipped")
-            self._set_backend_block(None)
-            return True
-        try:
-            from fisherman import cloud_trust
-
-            result = cloud_trust.verify_or_approve(
-                self._config.backend_url,
-                allow_bootstrap=False,
-                live_tls_fingerprint_func=_live_tls_fingerprint,
-            )
-        except Exception:
-            log.warning("cloud_trust_recheck_failed", exc_info=True)
-            self._set_backend_block(
-                "cloud_attestation_unreachable",
-                "Could not verify the live Fisherman Cloud release. Uploads are queued locally.",
-                "Open Settings > Context Home > Review Release",
-            )
-            return False
-        if result.ok:
-            self._set_backend_block(None)
-            return True
-        code = "cloud_approval_required"
-        if "attestation" in result.reason.lower():
-            code = "cloud_attestation_failed"
-        log.warning(
-            "cloud_trust_recheck_blocked",
-            reason=result.reason,
-            failures=list(result.failures),
-        )
-        detail = result.reason
-        if result.failures:
-            detail = f"{detail}: {result.failures[0]}"
-        self._set_backend_block(
-            code,
-            detail,
-            "Open Settings > Context Home > Review Release",
-        )
-        return False
+        """Cloud uses EC2 health/account checks at configuration time."""
+        self._set_backend_block(None)
+        return True
 
     async def _enhance_pdf_context(self, frame, ocr_text: str, urls: list[str]) -> tuple[str, list[str]]:
         loop = asyncio.get_running_loop()

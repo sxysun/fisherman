@@ -60,7 +60,7 @@ def start(server_url: str | None, backend_mode: str | None, backend_url: str | N
         overrides["backend_url"] = backend_url
 
     config = FishermanConfig(**overrides)
-    _ensure_cloud_trust_or_disable(config)
+    _ensure_cloud_runtime_or_disable(config)
 
     click.echo("Fisherman daemon starting")
     click.echo(f"  Backend:  {config.backend_summary}")
@@ -462,7 +462,7 @@ def _live_tls_fingerprint(url: str, timeout: float, *, quiet: bool = False) -> s
     try:
         ctx = _ssl.create_default_context()
         ctx.check_hostname = False
-        ctx.verify_mode = _ssl.CERT_NONE  # pinned separately by attestation
+        ctx.verify_mode = _ssl.CERT_NONE
         with _sock.create_connection((host, port), timeout=timeout) as raw:
             with ctx.wrap_socket(raw, server_hostname=host) as s:
                 der = s.getpeercert(binary_form=True)
@@ -473,369 +473,24 @@ def _live_tls_fingerprint(url: str, timeout: float, *, quiet: bool = False) -> s
         return None
 
 
-def _ensure_cloud_trust_or_disable(config: FishermanConfig) -> None:
-    """Refuse raw-context streaming to Cloud unless the approved deploy
-    still matches the live attested deploy. Capture continues and the
-    durable upload outbox queues frames locally while trust is unresolved.
+def _ensure_cloud_runtime_or_disable(config: FishermanConfig) -> None:
+    """Legacy hook retained for older call sites.
+
+    Fisherman Cloud now runs as an EC2-hosted managed backend. Runtime
+    enablement is controlled by the configured ingest URL plus `/health`
+    and account readiness checks during `backend configure cloud`.
     """
-    if config.backend_mode != "cloud" or not config.streaming_enabled:
-        return
-    if config.cloud_trust_policy == "dangerously_skip":
-        click.echo(
-            "  Cloud trust: DANGEROUSLY SKIPPED — raw ingest is not attestation-gated",
-            err=True,
-        )
-        return
-
-    from fisherman import cloud_trust
-    from fisherman.config import (
-        DEFAULT_APP_AUTH_CONTRACT,
-        DEFAULT_APP_AUTH_RPC_URL,
-        DEFAULT_SERVER_URL,
-    )
-
-    timeout = float(os.environ.get("FISH_CLOUD_TRUST_TIMEOUT", "15") or "15")
-    result = cloud_trust.verify_or_approve(
-        config.backend_url,
-        timeout=timeout,
-        allow_bootstrap=False,
-        rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or DEFAULT_APP_AUTH_RPC_URL,
-        contract_address=(
-            os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
-            or DEFAULT_APP_AUTH_CONTRACT
-        ),
-        live_tls_fingerprint_func=lambda url, t: _live_tls_fingerprint(
-            url, t, quiet=True
-        ),
-    )
-    if result.ok:
-        status = "approved" if result.bootstrapped else "verified"
-        current = result.current or result.record or {}
-        compose = current.get("compose_hash") or "?"
-        git = current.get("git_commit") or "?"
-        click.echo(f"  Cloud trust: {status} compose=0x{compose[:12]} git={git[:12]}")
-        return
-
-    click.echo("  Cloud trust: FAILED — raw ingest disabled; capture will queue locally", err=True)
-    click.echo(f"    {result.reason}", err=True)
-    for failure in result.failures[:5]:
-        click.echo(f"    - {failure}", err=True)
-    config.server_url = DEFAULT_SERVER_URL
+    return None
 
 
-def _ensure_cloud_trust_for_secret_request(config: FishermanConfig, purpose: str) -> None:
-    """Refuse to send client-held tenant secrets to an unapproved Cloud deploy."""
-    if config.backend_mode != "cloud":
-        return
-    if config.cloud_trust_policy == "dangerously_skip":
-        return
+def _ensure_cloud_secret_request_allowed(config: FishermanConfig, purpose: str) -> None:
+    """Legacy hook retained for older call sites."""
+    return None
 
-    from fisherman import cloud_trust
-    from fisherman.config import (
-        DEFAULT_APP_AUTH_CONTRACT,
-        DEFAULT_APP_AUTH_RPC_URL,
-    )
-
-    timeout = float(os.environ.get("FISH_CLOUD_TRUST_TIMEOUT", "15") or "15")
-    result = cloud_trust.verify_or_approve(
-        config.backend_url,
-        timeout=timeout,
-        allow_bootstrap=False,
-        rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or DEFAULT_APP_AUTH_RPC_URL,
-        contract_address=(
-            os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
-            or DEFAULT_APP_AUTH_CONTRACT
-        ),
-        live_tls_fingerprint_func=lambda url, t: _live_tls_fingerprint(
-            url, t, quiet=True
-        ),
-    )
-    if result.ok:
-        return
-    failures = "; ".join(result.failures[:3])
-    detail = f": {failures}" if failures else ""
-    raise click.ClickException(
-        f"refusing to send Cloud tenant key for {purpose}; "
-        f"approve the current Cloud deployment first ({result.reason}{detail})"
-    )
-
-
-@main.command(hidden=True)
-@click.argument("mirror_url")
-@click.option("--rpc-url", "rpc_url", envvar="FISHERMAN_ETH_RPC_URL", default=None,
-              help="Ethereum RPC URL for the on-chain isAppAllowed check "
-                   "(e.g. an Infura/Alchemy Sepolia endpoint).")
-@click.option("--contract", "contract_address", envvar="FISHERMAN_APP_AUTH_CONTRACT",
-              default=None,
-              help="Address of the FishermanAppAuth contract on the chain "
-                   "the mirror is registered against.")
-@click.option("--expected-mrtd", "expected_mrtd_hex", default=None,
-              help="If provided, also pin-check that the live MRTD matches "
-                   "this hex string (paste the value baked into your menubar dmg).")
-@click.option("--json", "as_json", is_flag=True,
-              help="Machine-readable output instead of the green/red table.")
-@click.option("--timeout", default=15.0, show_default=True,
-              help="HTTP timeout for fetching /.well-known/attestation.")
-def audit(mirror_url, rpc_url, contract_address, expected_mrtd_hex, as_json, timeout):
-    """Verify a fisherman-mirror's TEE attestation end-to-end.
-
-    Runs the full Cloud attestation check: structural quote parse, body
-    ECDSA, PCK chain to bundled Intel SGX Root CA, QE report binding,
-    mr_config_id ↔ compose_hash, RTMR3 event-log replay, and optional
-    on-chain isAppAllowed lookup.
-
-    Exit code is 0 only when every required row passes.
-    """
-    from fisherman import attestation as _att
-
-    # Best-effort: capture sha256(cert.DER) of the live TLS handshake so
-    # we can evaluate the TLS-binding row (when the bundle carries an
-    # attested fingerprint).
-    live_tls_fp = _live_tls_fingerprint(mirror_url, timeout, quiet=as_json)
-
-    res = _att.verify_attestation(
-        mirror_url,
-        expected_mrtd_hex=expected_mrtd_hex,
-        rpc_url=rpc_url,
-        contract_address=contract_address,
-        live_tls_cert_sha256_hex=live_tls_fp,
-        timeout=timeout,
-    )
-
-    if as_json:
-        out = _audit_to_json(res, mirror_url=mirror_url, live_tls_fp=live_tls_fp)
-        click.echo(json.dumps(out, indent=2))
-        sys.exit(0 if res.all_required_ok else 1)
-
-    _audit_print_table(res, mirror_url=mirror_url, live_tls_fp=live_tls_fp,
-                       has_onchain_inputs=bool(rpc_url and contract_address))
-    sys.exit(0 if res.all_required_ok else 1)
-
-
-def _audit_print_table(res, *, mirror_url: str, live_tls_fp: str | None,
-                       has_onchain_inputs: bool) -> None:
-    """Render an `AttestationResult` as a green/red row table."""
-    rows: list[tuple[str, bool | None, str]] = []
-    meas = res.measurements
-
-    if res.quote_parsed_ok and meas:
-        row1_detail = (
-            f"mrtd={meas.mrtd.hex()[:16]}…  rtmr3={meas.rtmr3.hex()[:16]}…"
-        )
-    else:
-        row1_detail = res.errors[0] if res.errors else "no quote in bundle"
-    rows.append((
-        "/.well-known/attestation reachable + TDX v4 quote parses",
-        res.quote_parsed_ok, row1_detail,
-    ))
-
-    if res.sig_data_parsed_ok and res.signature_data:
-        chain_n = len(res.pck_chain.chain) if res.pck_chain else 0
-        row2_detail = (
-            f"pck chain {chain_n} certs, qe_report 384B, "
-            f"qe_auth {len(res.signature_data.qe_auth_data)}B"
-        )
-    elif res.quote_parsed_ok:
-        row2_detail = next(
-            (e for e in res.errors if e.startswith("signature_data_")),
-            "signature_data parse failed",
-        )
-    else:
-        row2_detail = "(blocked by parse error above)"
-    rows.append((
-        "Quote signature_data parses (qe_cert_data_type=6)",
-        res.sig_data_parsed_ok, row2_detail,
-    ))
-
-    if not res.sig_data_parsed_ok:
-        body_detail = "(blocked by signature_data parse error above)"
-    elif res.body_sig_ok:
-        body_detail = "verified under embedded attestation pubkey"
-    else:
-        body_detail = ("signature did not verify "
-                       "(expected on dstack simulator quotes; "
-                       "real TDX hardware always passes)")
-    rows.append((
-        "Body ECDSA-P256 signature valid", res.body_sig_ok, body_detail,
-    ))
-
-    if not res.sig_data_parsed_ok:
-        chain_detail = "(blocked by signature_data parse error above)"
-    elif res.pck_chain and res.pck_chain.error:
-        chain_detail = res.pck_chain.error
-    else:
-        chain_detail = "leaf → platform CA → SGX Root, all signatures verified"
-    rows.append((
-        "PCK cert chain → bundled Intel SGX Root CA",
-        res.pck_chain_ok, chain_detail,
-    ))
-
-    if not res.sig_data_parsed_ok:
-        qe_detail = "(blocked by signature_data parse error above)"
-    elif res.qe_verdict:
-        qe_detail = (
-            f"sig_by_pck_leaf={res.qe_verdict.signature_valid}  "
-            f"report_data_binding={res.qe_verdict.report_data_valid}"
-        )
-    else:
-        qe_detail = "(no QE verdict)"
-    rows.append((
-        "Intel QE report ties attestation key to PCK",
-        res.qe_report_ok, qe_detail,
-    ))
-
-    # mr_config_id binding row.
-    mrcfg = meas.mr_config_id.hex() if meas else ""
-    if res.mr_config_id_binding_ok:
-        rows.append((
-            "compose_hash bound via mr_config_id (dstack-KMS)",
-            True,
-            f"mr_config_id[1:33] == compose_hash ({mrcfg[:16]}…)",
-        ))
-    else:
-        flag_byte = mrcfg[:2] if mrcfg else "??"
-        detail = (
-            f"mr_config_id[0]=0x{flag_byte} (need 0x01) — "
-            "dstack-KMS binding absent or compose_hash unknown"
-        )
-        rows.append((
-            "compose_hash bound via mr_config_id (dstack-KMS)",
-            False, detail,
-        ))
-
-    # Event-log row complements mr_config_id.
-    rows.append((
-        "RTMR3 event log replays + carries compose_hash event",
-        res.event_log_replay_ok and res.compose_hash_event_present,
-        ("replayed RTMR3 matches attested; compose-hash event present"
-         if res.event_log_replay_ok else
-         "event log absent, malformed, or replay disagrees with attested RTMR3"),
-    ))
-
-    # On-chain row only when caller supplied inputs.
-    if has_onchain_inputs:
-        rows.append((
-            "isAppAllowed(compose_hash) on FishermanAppAuth",
-            bool(res.on_chain_allowed),
-            f"contract returned {res.on_chain_allowed}"
-            if res.on_chain_allowed is not None else "rpc call failed",
-        ))
-
-    # TLS-binding row when we got a live fp + the bundle carried one.
-    if live_tls_fp and res.attested_tls_fingerprint_hex:
-        if res.tls_fingerprint_ok is None:
-            rows.append((
-                "TLS cert sha256 bound to attestation",
-                None,
-                "bundle carries no fingerprint — TLS terminated outside the enclave",
-            ))
-        else:
-            rows.append((
-                "TLS cert sha256 bound to attestation",
-                bool(res.tls_fingerprint_ok),
-                (f"attested {res.attested_tls_fingerprint_hex[:16]}… == "
-                 f"live {live_tls_fp[:16]}…")
-                if res.tls_fingerprint_ok else
-                (f"MITM: attested {res.attested_tls_fingerprint_hex[:16]}… "
-                 f"vs live {live_tls_fp[:16]}…"),
-            ))
-
-    if res.expected_mrtd_ok is not None:
-        rows.append((
-            "MRTD pin matches caller-supplied --expected-mrtd",
-            bool(res.expected_mrtd_ok),
-            "pin matches" if res.expected_mrtd_ok else
-            f"pin diverged: live mrtd={meas.mrtd.hex()[:16]}…",
-        ))
-
-    click.echo(f"\nFisherman TEE audit  →  {mirror_url}")
-    if res.git_commit or res.image_digest:
-        click.echo(
-            f"  release: git={res.git_commit or '?'}  image={res.image_digest or '?'}"
-        )
-    click.echo("")
-    for i, (title, ok, detail) in enumerate(rows, start=1):
-        if ok is None:
-            mark, color = "•", "yellow"
-        elif ok:
-            mark, color = "✓", "green"
-        else:
-            mark, color = "✗", "red"
-        click.echo(click.style(f"  Row {i} [{mark}] {title}", fg=color))
-        if detail:
-            for ln in detail.split("\n"):
-                click.echo(f"          {ln}")
-    click.echo("")
-
-    # Count using the verdict semantics: rows 6+7 are alternatives (the
-    # compose-binding requirement is satisfied if either passes), so we
-    # collapse them into a single "compose-binding" tally.
-    if res.all_required_ok:
-        click.echo(click.style("  ALL REQUIRED CHECKS PASS", fg="green"))
-    else:
-        click.echo(click.style("  AUDIT FAILED — see errors below", fg="red"))
-    click.echo("  (compose-binding requires EITHER mr_config_id OR event-log replay; "
-               "body-sig fails on dstack simulator quotes by design)")
-    if res.errors:
-        click.echo("")
-        click.echo("  errors:")
-        for e in res.errors:
-            click.echo(f"    - {e}")
-
-
-def _audit_to_json(res, *, mirror_url: str, live_tls_fp: str | None) -> dict:
-    meas = res.measurements
-    bundle = res.bundle or {}
-    return {
-        "mirror_url": mirror_url,
-        "all_required_ok": res.all_required_ok,
-        "app": {
-            "app_id": bundle.get("app_id"),
-            "instance_id": bundle.get("instance_id"),
-        },
-        "release": {
-            "git_commit": res.git_commit,
-            "image_digest": res.image_digest,
-        },
-        "checks": {
-            "quote_parsed":         res.quote_parsed_ok,
-            "signature_data_parsed":res.sig_data_parsed_ok,
-            "body_signature":       res.body_sig_ok,
-            "pck_chain":            res.pck_chain_ok,
-            "qe_report":            res.qe_report_ok,
-            "mr_config_id_binding": res.mr_config_id_binding_ok,
-            "event_log_replay":     res.event_log_replay_ok,
-            "compose_hash_event":   res.compose_hash_event_present,
-            "on_chain_allowed":     res.on_chain_allowed,
-            "tls_fingerprint":      res.tls_fingerprint_ok,
-            "expected_mrtd":        res.expected_mrtd_ok,
-        },
-        "measurements":  meas.to_hex() if meas else None,
-        "compose_hash":  res.compose_hash.hex() if res.compose_hash else None,
-        "live_tls_fingerprint_hex":     live_tls_fp,
-        "attested_tls_fingerprint_hex": res.attested_tls_fingerprint_hex,
-        "errors":        res.errors,
-    }
-
-
-def _cloud_required_failures(res) -> list[str]:
-    failures: list[str] = []
-    if not res.all_required_ok:
-        failures.extend(res.errors or ["base attestation checks failed"])
-    if res.on_chain_allowed is not True:
-        failures.append("cloud requires on-chain compose_hash authorization")
-    if res.tls_fingerprint_ok is not True:
-        failures.append("cloud requires TLS certificate fingerprint bound in attestation")
-    if not getattr(res, "git_commit", None):
-        failures.append("cloud requires release git_commit metadata")
-    image_digest = getattr(res, "image_digest", None)
-    if not image_digest or image_digest == "sha256:dev":
-        failures.append("cloud requires immutable image_digest metadata")
-    return failures
 
 
 def _cloud_capability_health(url: str, *, timeout: float = 10.0) -> dict | None:
-    """Best-effort read of the Cloud gateway /health capability manifest."""
+    """Best-effort read of the Cloud /health capability manifest."""
     from urllib.parse import urlparse, urlunparse
     from urllib.request import urlopen
 
@@ -852,6 +507,44 @@ def _cloud_capability_health(url: str, *, timeout: float = 10.0) -> dict | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def _cloud_ingest_readiness(capabilities: dict | None) -> tuple[bool, str | None]:
+    if not isinstance(capabilities, dict):
+        return False, "Cloud health check did not respond"
+
+    if isinstance(capabilities.get("ingest"), dict):
+        ingest = capabilities["ingest"]
+        ready = ingest.get("ready") is True
+        missing = ingest.get("missing") or capabilities.get("missing") or []
+        if not ready and missing:
+            return False, "Cloud ingest is missing: " + ", ".join(map(str, missing))
+        if not ready:
+            detail = ingest.get("detail") or capabilities.get("detail")
+            return False, f"Cloud ingest is not ready: {detail}" if detail else "Cloud ingest is not ready yet"
+        return True, None
+
+    ready = capabilities.get("ingest_ready")
+    if ready is None:
+        ready = capabilities.get("configured")
+    missing = capabilities.get("missing") or []
+    if ready is True:
+        return True, None
+    if missing:
+        return False, "Cloud ingest is missing: " + ", ".join(map(str, missing))
+    status = capabilities.get("status")
+    if status and status != "ok":
+        return False, f"Cloud health status is {status}"
+    return False, "Cloud ingest is not ready yet"
+
+
+def _cloud_health_ok(capabilities: dict | None) -> bool:
+    ready, _detail = _cloud_ingest_readiness(capabilities)
+    return bool(
+        ready
+        and isinstance(capabilities, dict)
+        and capabilities.get("status", "ok") == "ok"
+    )
 
 
 def _cloud_account_request(url: str, method: str = "GET", *, timeout: float = 10.0) -> dict:
@@ -1250,7 +943,6 @@ def _persist_backend_config(
     query_base_url: str | None = None,
     relay_url: str | None = None,
     server_url: str | None = None,
-    cloud_trust_policy: str | None = None,
     cloud_ingest_status: str | None = None,
     cloud_ingest_block_reason: str | None = None,
     cloud_ingest_block_detail: str | None = None,
@@ -1277,10 +969,7 @@ def _persist_backend_config(
         _cfg.remove_user_env_var("FISH_SERVER_URL")
     if relay_url is not None:
         _cfg.persist_user_env_var("FISH_STATUS_RELAY_URL", relay_url)
-    if cloud_trust_policy is not None:
-        _cfg.persist_user_env_var("FISH_CLOUD_TRUST_POLICY", cloud_trust_policy)
-    elif mode != "cloud":
-        _cfg.persist_user_env_var("FISH_CLOUD_TRUST_POLICY", "strict")
+    _cfg.remove_user_env_var("FISH_CLOUD_TRUST_POLICY")
     if mode == "cloud":
         if cloud_ingest_status is not None:
             _cfg.persist_user_env_var("FISH_CLOUD_INGEST_STATUS", cloud_ingest_status)
@@ -1321,7 +1010,6 @@ def backend_status(as_json: bool):
         "mode": cfg.backend_mode,
         "backend_url": cfg.backend_url,
         "query_base_url": cfg.query_base_url,
-        "cloud_trust_policy": cfg.cloud_trust_policy,
         "cloud_ingest": {
             "status": cfg.cloud_ingest_status,
             "block_reason": cfg.cloud_ingest_block_reason,
@@ -1341,7 +1029,6 @@ def backend_status(as_json: bool):
     click.echo(f"mode:       {cfg.backend_mode}")
     click.echo(f"backend:    {cfg.backend_summary}")
     if cfg.backend_mode == "cloud":
-        click.echo(f"trust:      {cfg.cloud_trust_policy}")
         if not cfg.streaming_enabled and cfg.cloud_ingest_block_detail:
             click.echo(f"cloud:      {cfg.cloud_ingest_block_detail}")
     click.echo(f"ingest:     {out['ingest_url'] or 'disabled'}")
@@ -1438,12 +1125,14 @@ def backend_configure_self_hosted(
 
 @backend_configure_group.command(name="cloud")
 @click.option("--url", "backend_url", default=None,
-              help="Fisherman Cloud URL (default: hosted TEE endpoint).")
+              help="Fisherman Cloud URL (default: hosted EC2 endpoint).")
 @click.option("--relay-url", default=None, help="Optional E2EE status relay URL.")
 @click.option("--skip-audit", is_flag=True,
-              help="Persist config without checking TEE attestation.")
+              hidden=True,
+              help="Deprecated no-op; Cloud uses /health.")
 @click.option("--dangerously-allow-unaudited-ingest", is_flag=True,
-              help="Allow Cloud raw ingest without attestation. Unsafe; use only for development.")
+              hidden=True,
+              help="Deprecated no-op; Cloud uses /health.")
 @click.option("--timeout", default=15.0, show_default=True)
 def backend_configure_cloud(
     backend_url: str | None,
@@ -1453,67 +1142,14 @@ def backend_configure_cloud(
     timeout: float,
 ):
     """Use Fisherman Cloud."""
-    from fisherman import attestation as _att
     from fisherman.config import (
-        DEFAULT_APP_AUTH_CONTRACT,
-        DEFAULT_APP_AUTH_RPC_URL,
         DEFAULT_CLOUD_BACKEND_URL,
         ingest_url_from_backend_url,
     )
 
     url = backend_url or DEFAULT_CLOUD_BACKEND_URL
-    trust_record = None
-    if not skip_audit:
-        live_tls_fp = _live_tls_fingerprint(url, timeout)
-        res = _att.verify_attestation(
-            url,
-            rpc_url=os.environ.get("FISHERMAN_ETH_RPC_URL") or DEFAULT_APP_AUTH_RPC_URL,
-            contract_address=(
-                os.environ.get("FISHERMAN_APP_AUTH_CONTRACT")
-                or DEFAULT_APP_AUTH_CONTRACT
-            ),
-            live_tls_cert_sha256_hex=live_tls_fp,
-            timeout=timeout,
-        )
-        _audit_print_table(
-            res,
-            mirror_url=url,
-            live_tls_fp=live_tls_fp,
-            has_onchain_inputs=bool(
-                os.environ.get("FISHERMAN_ETH_RPC_URL")
-                or DEFAULT_APP_AUTH_RPC_URL
-            ),
-        )
-        cloud_failures = _cloud_required_failures(res)
-        if cloud_failures:
-            for failure in cloud_failures:
-                click.echo(f"cloud guarantee missing: {failure}", err=True)
-            click.echo("refusing to configure Fisherman Cloud until attestation passes", err=True)
-            sys.exit(1)
-        from fisherman import cloud_trust
-        try:
-            trust_record = cloud_trust.approve(url, res, live_tls_fp)
-        except cloud_trust.CloudTrustError as e:
-            click.echo(f"cloud trust approval failed: {e}", err=True)
-            sys.exit(1)
-
     capabilities = _cloud_capability_health(url, timeout=timeout)
-    ingest_detail = None
-    ingest_ready = bool(
-        isinstance(capabilities, dict)
-        and isinstance(capabilities.get("ingest"), dict)
-        and capabilities["ingest"].get("ready") is True
-    )
-    if isinstance(capabilities, dict) and isinstance(capabilities.get("ingest"), dict):
-        ingest = capabilities["ingest"]
-        missing = ingest.get("missing") or []
-        if missing:
-            ingest_detail = "Cloud ingest is missing: " + ", ".join(map(str, missing))
-        else:
-            detail = ingest.get("detail")
-            ingest_detail = f"Cloud ingest is not ready: {detail}" if detail else None
-    elif capabilities is None:
-        ingest_detail = "Cloud health check did not respond"
+    ingest_ready, ingest_detail = _cloud_ingest_readiness(capabilities)
     account_ready = False
     account_detail = None
     if ingest_ready:
@@ -1533,7 +1169,6 @@ def backend_configure_cloud(
         query_base_url=query_base_url_from_backend_url(url),
         relay_url=relay_url,
         server_url=ingest_url_from_backend_url(url) if ingest_ready and account_ready else None,
-        cloud_trust_policy="dangerously_skip" if dangerously_allow_unaudited_ingest else "strict",
         cloud_ingest_status="enabled" if ingest_ready and account_ready else "blocked",
         cloud_ingest_block_reason=block_reason,
         cloud_ingest_block_detail=block_detail,
@@ -1546,21 +1181,10 @@ def backend_configure_cloud(
     if block_detail:
         click.echo(f"  action:  {block_detail}")
     click.echo(f"  relay:   {cfg.status_relay_url}")
-    if trust_record:
-        compose = trust_record.get("compose_hash") or "?"
-        git = trust_record.get("git_commit") or "?"
-        click.echo(f"  trust:   approved compose=0x{compose[:12]} git={git[:12]}")
-    elif skip_audit:
-        click.echo("  trust:   skipped; raw ingest will stay disabled until Cloud is approved")
-    if dangerously_allow_unaudited_ingest:
-        click.echo(
-            "  trust:   DANGEROUSLY SKIPPED; raw ingest may continue without attestation",
-            err=True,
-        )
     if isinstance(capabilities, dict):
-        att_ready = (capabilities.get("attestation") or {}).get("ready")
         relay_ready = (capabilities.get("relay") or {}).get("ready")
-        click.echo(f"  cloud:   attestation={bool(att_ready)} relay={bool(relay_ready)} ingest={ingest_ready}")
+        relay_status = "" if relay_ready is None else f" relay={bool(relay_ready)}"
+        click.echo(f"  cloud:   health={capabilities.get('status', 'unknown')} ingest={ingest_ready}{relay_status}")
     click.echo("Restart the daemon for changes to take effect.")
 
 
@@ -1592,7 +1216,7 @@ def _status_llm_backend_request(
     data = None
     headers = {"Authorization": auth}
     if cfg.backend_mode == "cloud":
-        _ensure_cloud_trust_for_secret_request(cfg, "activity status settings")
+        _ensure_cloud_secret_request_allowed(cfg, "activity status settings")
         from fisherman import keys as _keys
         headers["X-Fisherman-Tenant-Data-Key"] = _keys.cloud_tenant_data_key(
             bytes.fromhex(seed_hex)
@@ -1622,7 +1246,7 @@ def _backend_owner_headers(cfg: FishermanConfig, *, content_type: str | None = N
     if content_type:
         headers["Content-Type"] = content_type
     if cfg.backend_mode == "cloud" and cfg.private_key:
-        _ensure_cloud_trust_for_secret_request(cfg, "backend owner request")
+        _ensure_cloud_secret_request_allowed(cfg, "backend owner request")
         from fisherman import keys as _keys
         headers["X-Fisherman-Tenant-Data-Key"] = _keys.cloud_tenant_data_key(
             bytes.fromhex(cfg.private_key)
@@ -2205,49 +1829,51 @@ def cloud_group():
 
 @cloud_group.command(name="audit")
 @click.argument("cloud_url", required=False)
-@click.option("--rpc-url", "rpc_url", envvar="FISHERMAN_ETH_RPC_URL", default=None)
-@click.option("--contract", "contract_address", envvar="FISHERMAN_APP_AUTH_CONTRACT", default=None)
+@click.option("--rpc-url", "rpc_url", envvar="FISHERMAN_ETH_RPC_URL", default=None, hidden=True)
+@click.option("--contract", "contract_address", envvar="FISHERMAN_APP_AUTH_CONTRACT", default=None, hidden=True)
 @click.option("--json", "as_json", is_flag=True)
 @click.option("--timeout", default=15.0, show_default=True)
 def cloud_audit(cloud_url, rpc_url, contract_address, as_json, timeout):
-    """Audit the managed TEE endpoint."""
-    from fisherman.config import (
-        DEFAULT_APP_AUTH_CONTRACT,
-        DEFAULT_APP_AUTH_RPC_URL,
-        DEFAULT_CLOUD_BACKEND_URL,
-    )
+    """Audit the managed EC2 Cloud endpoint."""
+    from fisherman.config import DEFAULT_CLOUD_BACKEND_URL
 
     url = cloud_url or DEFAULT_CLOUD_BACKEND_URL
-    rpc_url = rpc_url or DEFAULT_APP_AUTH_RPC_URL
-    contract_address = contract_address or DEFAULT_APP_AUTH_CONTRACT
-    from fisherman import attestation as _att
-    live_tls_fp = _live_tls_fingerprint(url, timeout, quiet=as_json)
-    res = _att.verify_attestation(
-        url,
-        rpc_url=rpc_url,
-        contract_address=contract_address,
-        live_tls_cert_sha256_hex=live_tls_fp,
-        timeout=timeout,
-    )
-    cloud_failures = _cloud_required_failures(res)
+    capabilities = _cloud_capability_health(url, timeout=timeout)
+    ingest_ready, ingest_detail = _cloud_ingest_readiness(capabilities)
+    ok = _cloud_health_ok(capabilities)
     if as_json:
-        out = _audit_to_json(res, mirror_url=url, live_tls_fp=live_tls_fp)
-        out["cloud_required_ok"] = not cloud_failures
-        out["cloud_required_failures"] = cloud_failures
+        out = {
+            "cloud_url": url,
+            "ok": ok,
+            "ingest_ready": ingest_ready,
+            "ingest_detail": ingest_detail,
+            "health": capabilities,
+        }
         click.echo(json.dumps(out, indent=2))
-        sys.exit(0 if not cloud_failures else 1)
-    _audit_print_table(
-        res,
-        mirror_url=url,
-        live_tls_fp=live_tls_fp,
-        has_onchain_inputs=bool(rpc_url and contract_address),
-    )
-    if cloud_failures:
-        click.echo("")
-        click.echo(click.style("  CLOUD GUARANTEES NOT SATISFIED", fg="red"))
-        for failure in cloud_failures:
-            click.echo(f"    - {failure}")
-    sys.exit(0 if not cloud_failures else 1)
+        sys.exit(0 if ok else 1)
+
+    click.echo(f"\nFisherman Cloud audit  ->  {url}\n")
+    if not isinstance(capabilities, dict):
+        click.echo(click.style("  [x] /health unavailable", fg="red"))
+        click.echo(f"      {ingest_detail}")
+        sys.exit(1)
+
+    health_status = capabilities.get("status", "unknown")
+    health_color = "green" if health_status == "ok" else "red"
+    click.echo(click.style(f"  [{'✓' if health_status == 'ok' else 'x'}] health status: {health_status}", fg=health_color))
+    click.echo(click.style(f"  [{'✓' if ingest_ready else 'x'}] ingest ready: {ingest_ready}", fg="green" if ingest_ready else "red"))
+    if ingest_detail:
+        click.echo(f"      {ingest_detail}")
+    storage = capabilities.get("storage")
+    if storage:
+        click.echo(f"  storage: {storage}")
+    version = capabilities.get("version")
+    if isinstance(version, dict):
+        click.echo(f"  version: {version.get('git_commit') or version.get('version') or 'reported'}")
+    model = capabilities.get("status_llm_model")
+    if model:
+        click.echo(f"  status LLM: {model}")
+    sys.exit(0 if ok else 1)
 
 
 @cloud_group.command(name="account")

@@ -77,11 +77,9 @@ def index_columns_key(seed: bytes) -> bytes:
 def cloud_tenant_data_key(seed: bytes) -> str:
     """Stable Fernet key used for Fisherman Cloud tenant data encryption.
 
-    This key is derived on the user's device and sent only to an
-    attestation-approved Cloud runtime. The managed Cloud backend must not
-    persist it under a Cloud-held wrapping key; losing the in-memory key
-    after a deploy is what prevents unapproved future code from decrypting
-    historical ciphertext.
+    EC2-hosted Fisherman Cloud currently uses server-wrapped rows, but this
+    derived key remains available for legacy migration tooling and future
+    client-held key modes.
     """
     return base64.urlsafe_b64encode(
         _derive(seed, _INFO_CLOUD_TENANT_DATA, 32)

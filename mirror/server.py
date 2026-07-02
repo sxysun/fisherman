@@ -7,8 +7,7 @@ Architecture:
   - At pairing time the user provisioned this mirror with K_blob_at_rest
     and the user's X25519 priv key (so it can decrypt deputy requests
     that were encrypted to the user's X25519 pubkey, exactly as the
-    laptop daemon would). For TEE deployments these keys would be
-    sealed by the enclave instead.
+    laptop daemon would).
   - The mirror connects to the relay as kind="secondary" — the relay
     routes RPCs here when the laptop (kind="primary") is offline.
   - Query implementations read encrypted blobs from a BlobStore, decrypt
@@ -30,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
 import secrets
@@ -230,216 +228,33 @@ class MirrorServer:
         return {"error": f"unsupported_command:{cmd}"}
 
 
-def _release_metadata() -> dict:
-    return {
-        "git_commit":   os.environ.get("FISHERMAN_GIT_COMMIT", "dev"),
-        "built_at":     os.environ.get("FISHERMAN_BUILT_AT", "dev"),
-        "image_digest": os.environ.get("FISHERMAN_IMAGE_DIGEST", "sha256:dev"),
-    }
-
-
-def _read_ingress_tls_fingerprint() -> str:
-    """Best-effort: read the ingress TLS cert fingerprint dstack-ingress
-    writes to a shared evidences volume. If that sidecar file is absent,
-    compute sha256(leaf DER) from the shared Let's Encrypt cert volume.
-    Returns empty string when absent — the audit row degrades to "info"
-    rather than failing."""
-    candidates = [
-        "/evidences/tls-cert-sha256.txt",
-        "/evidences/tls_cert_sha256.txt",
-        "/var/run/fisherman/tls-cert-sha256.txt",
-    ]
-    for p in candidates:
-        try:
-            if os.path.exists(p):
-                with open(p) as f:
-                    return f.read().strip().lower().removeprefix("0x")
-        except OSError:
-            continue
-    for p in _tls_cert_file_candidates():
-        fp = _fingerprint_leaf_cert_pem(p)
-        if fp:
-            return fp
-    return ""
-
-
-def _tls_cert_file_candidates() -> list[str]:
-    import glob
-
-    out: list[str] = []
-    explicit = os.environ.get("FISHERMAN_TLS_CERT_PATH")
-    if explicit:
-        out.append(explicit)
-    domain = os.environ.get("FISHERMAN_TLS_DOMAIN") or os.environ.get("DOMAIN")
-    if domain:
-        out.append(f"/evidences/cert-{domain}.pem")
-        live_dir = f"/etc/letsencrypt/live/{domain}"
-        out.extend([
-            f"{live_dir}/cert.pem",
-            f"{live_dir}/fullchain.pem",
-        ])
-    out.extend(glob.glob("/evidences/cert-*.pem"))
-    out.extend(glob.glob("/etc/letsencrypt/live/*/cert.pem"))
-    out.extend(glob.glob("/etc/letsencrypt/live/*/fullchain.pem"))
-    return out
-
-
-def _fingerprint_leaf_cert_pem(path: str) -> str:
-    from cryptography import x509
-    from cryptography.hazmat.primitives import serialization
-
-    try:
-        with open(path, "rb") as f:
-            data = f.read()
-    except OSError:
-        return ""
-    begin = b"-----BEGIN CERTIFICATE-----"
-    end = b"-----END CERTIFICATE-----"
-    start = data.find(begin)
-    if start < 0:
-        return ""
-    stop = data.find(end, start)
-    if stop < 0:
-        return ""
-    pem = data[start:stop + len(end)] + b"\n"
-    try:
-        cert = x509.load_pem_x509_certificate(pem)
-    except Exception:
-        return ""
-    der = cert.public_bytes(serialization.Encoding.DER)
-    return hashlib.sha256(der).hexdigest()
-
-
-async def _build_attestation_bundle(
-    *,
-    paired: bool,
-    mirror_pubkey: bytes | None,
-    user_pubkey: bytes | None,
-) -> dict:
-    """Assemble the bundle served at /.well-known/attestation.
-
-    Reads tappd.sock when present (always inside a CVM); falls back to
-    a structural bundle when the socket is absent (local dev). Mirrors
-    the field shape of feedling-mcp-v1's /attestation so the same
-    auditor logic works against both."""
-    from mirror import tappd as _tappd  # local import to keep deploy footprint small
-
-    # Default socket location is /var/run/tappd.sock inside the CVM;
-    # override via DSTACK_TAPPD_SOCK for local dev (mock harness, etc).
-    sock_path = os.environ.get("DSTACK_TAPPD_SOCK", _tappd.DEFAULT_TAPPD_SOCK)
-
-    bundle: dict = {
-        "fisherman_release": _release_metadata(),
-        "paired":          paired,
-        "mirror_pubkey":   mirror_pubkey.hex() if mirror_pubkey else None,
-        "user_pubkey":     user_pubkey.hex() if user_pubkey else None,
-        "tdx_quote_hex":   "",
-        "event_log":       [],
-        "event_log_json":  "",
-        "compose_hash":    "",
-        "measurements":    {},
-        "enclave_tls_cert_fingerprint_hex": "",
-    }
-
-    # 1. App info (compose_hash, measurements). Cheap; always try.
-    info = await _tappd.get_info(sock_path=sock_path)
-    if info is not None:
-        bundle["compose_hash"] = info.compose_hash
-        bundle["measurements"] = {
-            "mrtd":         info.mrtd,
-            "mr_config_id": info.mr_config_id,
-            "rtmr0":        info.rtmr0,
-            "rtmr1":        info.rtmr1,
-            "rtmr2":        info.rtmr2,
-            "rtmr3":        info.rtmr3,
-        }
-        if info.event_log_json:
-            bundle["event_log_json"] = info.event_log_json
-            try:
-                bundle["event_log"] = json.loads(info.event_log_json)
-            except json.JSONDecodeError:
-                pass
-        bundle["app_id"] = info.app_id
-        bundle["instance_id"] = info.instance_id
-
-    # 2. TDX quote bound to the mirror's identity (and TLS fp when paired).
-    tls_fp = _read_ingress_tls_fingerprint()
-    if tls_fp:
-        bundle["enclave_tls_cert_fingerprint_hex"] = tls_fp
-
-    rd_parts: list[bytes] = [b"fisherman-mirror-attest-v1"]
-    if mirror_pubkey:
-        rd_parts.append(mirror_pubkey)
-    if tls_fp:
-        try:
-            rd_parts.append(bytes.fromhex(tls_fp))
-        except ValueError:
-            pass
-    # Pack into <=64 bytes; dstack pads on its end.
-    report_data = b"".join(rd_parts)[:64]
-
-    quote = await _tappd.get_quote(report_data, sock_path=sock_path)
-    if quote is not None:
-        bundle["tdx_quote_hex"] = quote.quote_hex
-        # Prefer the event log returned with the quote when Tappd.Info
-        # didn't populate it.
-        if quote.event_log_json and not bundle["event_log_json"]:
-            bundle["event_log_json"] = quote.event_log_json
-            try:
-                bundle["event_log"] = json.loads(quote.event_log_json)
-            except json.JSONDecodeError:
-                pass
-
-    return bundle
-
 
 async def _build_health_app(server: "MirrorServer") -> web.Application:
-    """Tiny HTTP server: /health for the dstack-ingress liveness probe,
-    plus /.well-known/attestation for the menubar to verify the TEE."""
+    """Tiny HTTP server exposing paired mirror health."""
     app = web.Application()
 
     async def health(_):
         return web.Response(text="ok")
 
-    async def attestation(_):
-        bundle = await _build_attestation_bundle(
-            paired=True,
-            mirror_pubkey=server.mirror_pubkey,
-            user_pubkey=server._user_pubkey,
-        )
-        return web.json_response(bundle)
-
     app.router.add_get("/health", health)
-    app.router.add_get("/.well-known/attestation", attestation)
     return app
 
 
 async def _build_unpaired_health_app() -> web.Application:
-    """Health app for the unpaired-CVM case: /health returns 'unpaired'
-    so dstack-ingress sees a 200 and can start serving TLS, but the
-    response makes it obvious the mirror isn't ready for RPC yet."""
+    """Health app for the unpaired case."""
     app = web.Application()
 
     async def health(_):
         return web.Response(text="unpaired")
 
-    async def attestation(_):
-        bundle = await _build_attestation_bundle(
-            paired=False, mirror_pubkey=None, user_pubkey=None,
-        )
-        return web.json_response(bundle)
-
     app.router.add_get("/health", health)
-    app.router.add_get("/.well-known/attestation", attestation)
     return app
 
 
 async def amain():
-    # First: bring up the HTTP server unconditionally. The CVM boot path
-    # needs /health to come up so dstack-ingress can issue LE certs and
-    # the bootstrap workflow can proceed past the wait step. After that,
-    # the user pairs from the menubar — which provisions env vars and
-    # we restart into the paired mode (or the user kicks the container).
+    # First: bring up the HTTP server unconditionally so operators can see
+    # whether the mirror is paired. After that, the user pairs from the
+    # menubar, which provisions env vars and restarts into paired mode.
     paired_env_vars = ["MIRROR_USER_PUBKEY", "MIRROR_USER_X25519_PRIV",
                        "MIRROR_BLOB_KEY", "MIRROR_RELAY_URL", "MIRROR_STORAGE_PATH"]
     paired = all(os.environ.get(v) for v in paired_env_vars)

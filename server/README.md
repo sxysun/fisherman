@@ -222,12 +222,9 @@ The server auto-creates and migrates the Postgres schema on startup.
 Sensitive columns (window title, OCR text, URLs, VLM descriptions) are
 Fernet-encrypted at rest. Images are encrypted before storage.
 
-In managed Fisherman Cloud, new tenant data uses client-held tenant keys:
-the approved client sends a Fernet-compatible tenant key to the attested
-runtime, and rows are marked `data_key_source=client_provided`. The
-runtime keeps that key in memory; it is not persisted under a static
-Cloud wrapping key. Self-hosted deployments keep the simpler
-server-wrapped key path because the operator is the user.
+In managed EC2 Fisherman Cloud, tenant data uses the server-wrapped key
+path unless a migration explicitly enables another key mode. Self-hosted
+deployments use the same model because the operator is the user.
 
 ## Server Debug CLI
 

@@ -47,7 +47,7 @@ def is_multi_tenant_enabled() -> bool:
 
     Self-hosted servers accept only the server owner's FishKey. Cloud ingest
     accepts any valid FishKey as that user's tenant identity; paid enrollment and
-    attestation policy can be layered above this without changing table scope.
+    deployment policy can be layered above this without changing table scope.
     """
     return (
         _env_truthy("FISH_MULTI_TENANT")

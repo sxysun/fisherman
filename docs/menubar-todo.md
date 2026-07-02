@@ -17,14 +17,14 @@ of the same protocols.
 - Default relay configuration for the hosted relay URL.
 - Diagnostics and one-click repair using the same checks as
   `fisherman doctor`.
-- Fisherman Cloud release review/approval, strict attestation gate, and
-  account access-request flow through the CLI.
+- Fisherman Cloud health check and account access-request flow through
+  the CLI.
 
 ## Future Work
 
 - Cloud capability health in Settings. The CLI can read the Cloud
-  endpoint, but the app should render `attestation.ready`, `relay.ready`,
-  and `ingest.ready` instead of free-text backend endpoint fields.
+  endpoint, but the app should render `health`, relay state, and
+  `ingest_ready` instead of free-text backend endpoint fields.
 - Cloud account admin UI. The backend records pending access requests,
   but operators still approve accounts outside the menubar.
 - Friend policy preview in Settings: run the current policy against a

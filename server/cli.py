@@ -46,7 +46,7 @@ async def _get_pool() -> asyncpg.Pool:
 
 
 def _ensure_encryption_key() -> None:
-    """Load the CVM-generated master key when it is stored on /data."""
+    """Load a deployment-generated master key when it is stored on /data."""
     if os.environ.get("ENCRYPTION_KEY"):
         return
     key_path = Path(os.environ.get("FISHERMAN_CLOUD_ENCRYPTION_KEY_FILE", "/data/secrets/encryption.key"))

@@ -43,14 +43,13 @@ jobs:
         run: |
           # pyobjc is macOS-only via PEP 508 markers, so Linux agents can
           # install and use the deputy/query CLI without capture frameworks.
-          uv sync --extra tee
+          uv sync
 
       - name: Import-time sanity (Linux-portable subset)
         run: |
           source .venv/bin/activate
           fisherman --help >/dev/null
           python -c "
-          from fisherman.attestation import keccak256, function_selector, parse_tdx_quote, replay_event_log
           from fisherman.blob_store import MemoryBlobStore, LocalFSBlobStore, S3CompatibleBlobStore, WebDAVBlobStore, GoogleDriveBlobStore, from_config
           from fisherman.sync import MirrorSync, decrypt_uploaded
           from fisherman.keys import signing_keypair, encryption_keypair
@@ -69,18 +68,6 @@ jobs:
         run: |
           source .venv/bin/activate
           python -m unittest tests.test_config_identity tests.test_platform_support
-
-      - name: keccak256 against known vectors
-        run: |
-          source .venv/bin/activate
-          python -c "
-          from fisherman.attestation import keccak256, function_selector
-          assert keccak256(b'').hex() == 'c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470'
-          assert keccak256(b'hello').hex() == '1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8'
-          assert function_selector('isAppAllowed(bytes32)').hex() == '90144031'
-          assert function_selector('addComposeHash(bytes32)').hex() == 'dfc77223'
-          print('selectors ok')
-          "
 
       - name: RPC + relay roundtrip
         run: |
